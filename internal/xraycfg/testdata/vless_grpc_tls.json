@@ -1,0 +1,34 @@
+{
+  "tag": "proxy",
+  "protocol": "vless",
+  "settings": {
+    "vnext": [
+      {
+        "address": "grpc.example.com",
+        "port": 443,
+        "users": [
+          {
+            "id": "uuid-grpc",
+            "encryption": "none"
+          }
+        ]
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "grpc",
+    "security": "tls",
+    "grpcSettings": {
+      "serviceName": "myservice",
+      "authority": "grpc.example.com"
+    },
+    "tlsSettings": {
+      "serverName": "grpc.example.com",
+      "fingerprint": "chrome",
+      "alpn": [
+        "h2",
+        "http/1.1"
+      ]
+    }
+  }
+}

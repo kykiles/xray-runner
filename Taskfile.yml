@@ -1,0 +1,64 @@
+version: '3'
+
+vars:
+  BINARY: xray-runner
+  CMD: ./cmd/xray-runner
+  GIT_COMMIT:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+
+tasks:
+  build:
+    desc: Build the binary
+    cmds:
+      - go build -ldflags "-X main.Version={{.GIT_COMMIT}}" -o {{.BINARY}}.exe {{.CMD}}
+    generates:
+      - "{{.BINARY}}.exe"
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test -v -coverprofile=coverage.out ./...
+
+  test-race:
+    desc: Run tests with race detector (requires CGO)
+    cmds:
+      - go test -v -race -coverprofile=coverage.out ./...
+
+  test-update:
+    desc: Run tests and update golden files
+    cmds:
+      - go test -v -update ./...
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run ./...
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - go clean
+      - cmd: remove-item xray_config.json -ErrorAction SilentlyContinue
+        platforms: [windows]
+      - cmd: rm -f xray_config.json
+        platforms: [linux, darwin]
+
+  run:
+    desc: Build and run
+    cmds:
+      - task: build
+      - cmd: "{{.BINARY}}.exe"
+        platforms: [windows]
+      - cmd: "./{{.BINARY}}"
+        platforms: [linux, darwin]
+
+  default:
+    desc: Run tests and build
+    cmds:
+      - task: test
+      - task: build

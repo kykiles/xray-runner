@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -12,8 +14,19 @@ import (
 	"xray-runner/internal/log"
 )
 
+var Version = "dev"
+
 func main() {
-	cfg, err := config.Load(".env")
+	flagVersion := flag.Bool("version", false, "show version")
+	flagConfig := flag.String("config", ".env", "path to .env file")
+	flag.Parse()
+
+	if *flagVersion {
+		fmt.Printf("xray-runner %s\n", Version)
+		os.Exit(0)
+	}
+
+	cfg, err := config.Load(*flagConfig)
 	if err != nil {
 		log.Fatalf("❌ %v", err)
 	}
@@ -33,10 +46,3 @@ func main() {
 
 	fmt.Println("\n👋 До встречи!")
 }
-```
-
-Wait, I'm importing "fmt" but didn't add it. Let me fix that. Also I used `slog` but it's imported via `log/slog`. Actually I do need `fmt` for the final message. Let me rewrite.<｜end▁of▁thinking｜>
-
-<｜｜DSML｜｜tool_calls>
-<｜｜DSML｜｜invoke name="edit">
-<｜｜DSML｜｜parameter name="filePath" string="true">D:\user\efimov_p\USB-Flash\projects\Xray\cmd\xray-runner\main.go
