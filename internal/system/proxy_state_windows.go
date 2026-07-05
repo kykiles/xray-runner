@@ -1,3 +1,5 @@
+//go:build windows
+
 package system
 
 import (
@@ -7,12 +9,6 @@ import (
 )
 
 const regKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
-
-type ProxyState struct {
-	Enabled   bool
-	Server    string
-	Overrides string
-}
 
 func ReadProxyState() ProxyState {
 	var s ProxyState
@@ -24,23 +20,6 @@ func ReadProxyState() ProxyState {
 	s.Server = queryRegString("ProxyServer")
 	s.Overrides = queryRegString("ProxyOverride")
 	return s
-}
-
-func queryRegString(name string) string {
-	out, err := exec.Command("reg", "query", regKey, "/v", name).Output()
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.Contains(line, "REG_SZ") {
-			parts := strings.SplitN(line, "REG_SZ", 2)
-			if len(parts) == 2 {
-				return strings.TrimSpace(parts[1])
-			}
-		}
-	}
-	return ""
 }
 
 func WriteProxyState(s ProxyState) error {
@@ -64,6 +43,23 @@ func WriteProxyState(s ProxyState) error {
 		}
 	}
 	return nil
+}
+
+func queryRegString(name string) string {
+	out, err := exec.Command("reg", "query", regKey, "/v", name).Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "REG_SZ") {
+			parts := strings.SplitN(line, "REG_SZ", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return ""
 }
 
 func execReg(args ...string) error {

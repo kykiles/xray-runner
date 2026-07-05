@@ -1,17 +1,15 @@
+//go:build windows
+
 package system
 
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
 func setupRegMock(t *testing.T, mockScript string) {
 	t.Helper()
-	if runtime.GOOS != "windows" {
-		t.Skip("system tests require Windows")
-	}
 
 	dir := t.TempDir()
 	regPath := filepath.Join(dir, "reg.bat")

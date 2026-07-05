@@ -5,14 +5,20 @@ vars:
   CMD: ./cmd/xray-runner
   GIT_COMMIT:
     sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  TARGET_OS: '{{default .OS (env "GOOS")}}'
+  TARGET_ARCH: '{{default .ARCH (env "GOARCH")}}'
+  BIN_EXT: '{{if eq .TARGET_OS "windows"}}.exe{{end}}'
 
 tasks:
   build:
     desc: Build the binary
     cmds:
-      - go build -ldflags "-X main.Version={{.GIT_COMMIT}}" -o {{.BINARY}}.exe {{.CMD}}
+      - go build -ldflags "-X main.Version={{.GIT_COMMIT}}" -o '{{.BINARY}}{{.BIN_EXT}}' {{.CMD}}
+    env:
+      GOOS: '{{.TARGET_OS}}'
+      GOARCH: '{{.TARGET_ARCH}}'
     generates:
-      - "{{.BINARY}}.exe"
+      - "{{.BINARY}}*"
 
   test:
     desc: Run all tests
@@ -52,10 +58,7 @@ tasks:
     desc: Build and run
     cmds:
       - task: build
-      - cmd: "{{.BINARY}}.exe"
-        platforms: [windows]
-      - cmd: "./{{.BINARY}}"
-        platforms: [linux, darwin]
+      - cmd: "./{{.BINARY}}{{.BIN_EXT}}"
 
   default:
     desc: Run tests and build
