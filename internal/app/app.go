@@ -65,6 +65,13 @@ func (a *App) Run(ctx context.Context) error {
 		return fmt.Errorf("load template: %w", err)
 	}
 
+	if a.cfg.Mode == "tun" {
+		tc.Inbounds = []xraycfg.Inbound{xraycfg.BuildTUNInbound()}
+		fmt.Println("  Режим: TUN (весь трафик через VPN)")
+	} else {
+		fmt.Println("  Режим: Прокси (HTTP/SOCKS5)")
+	}
+
 	cfg := xraycfg.MergeConfig(tc, proxyOutbound)
 	cfg.Log = &xraycfg.LogConfig{Loglevel: a.cfg.XrayLogLvl}
 
@@ -72,12 +79,12 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 
-	printConfigSummary(cfg)
+	printConfigSummary(cfg, a.cfg.Mode)
 	fmt.Println("── Routing ──────────────────────────────")
 	printRoutingRules(cfg)
 
 	binary := xray.FindBinary()
-	slog.Info("starting xray", "binary", binary)
+	slog.Info("starting xray", "binary", binary, "mode", a.cfg.Mode)
 
 	a.runner = xray.New(binary, a.tmpFile)
 
@@ -91,6 +98,13 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}()
 
+	if a.cfg.Mode == "tun" {
+		return a.runTun(ctx, cfg)
+	}
+	return a.runProxy(ctx, cfg)
+}
+
+func (a *App) runProxy(ctx context.Context, cfg *xraycfg.XrayConfig) error {
 	socksPort, httpPort := a.checkPorts(cfg)
 	fmt.Printf("  Порты: SOCKS5 127.0.0.1:%d  HTTP 127.0.0.1:%d\n", socksPort, httpPort)
 
@@ -111,21 +125,80 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	fmt.Println("──────────────────────────────────────────")
-
-	go a.healthCheckLoop(ctx, socksPort, httpPort)
+	go a.healthCheckLoopPorts(ctx, socksPort, httpPort)
 
 	<-ctx.Done()
-	xrayCancel()
 	fmt.Println("\n🛑 Останавливаем Xray...")
-
 	return nil
 }
 
+func (a *App) runTun(ctx context.Context, cfg *xraycfg.XrayConfig) error {
+	time.Sleep(2 * time.Second)
+	fmt.Print("  ⏳ Ожидание TUN интерфейса... ")
+	time.Sleep(3 * time.Second)
+	fmt.Println("✅ TUN активирован")
+
+	if a.cfg.KillSwitch {
+		fmt.Print("  ⛔ Включение Kill Switch... ")
+		if err := system.EnableKillSwitch(); err != nil {
+			fmt.Printf("❌ %v\n", err)
+		} else {
+			fmt.Println("✅")
+		}
+	}
+
+	testConnectivity(ctx)
+	fmt.Println("──────────────────────────────────────────")
+	go a.healthCheckLoopConnectivity(ctx)
+
+	<-ctx.Done()
+	fmt.Println("\n🛑 Останавливаем Xray...")
+	return nil
+}
+
+func testConnectivity(ctx context.Context) {
+	testURLs := []string{
+		"https://www.google.com/generate_204",
+		"https://connectivitycheck.gstatic.com/generate_204",
+		"https://www.cloudflare.com/cdn-cgi/trace",
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	for attempt := 0; attempt < 3; attempt++ {
+		for _, testURL := range testURLs {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			req, _ := http.NewRequestWithContext(ctx, "GET", testURL, nil)
+			resp, err := client.Do(req)
+			if err != nil {
+				continue
+			}
+			resp.Body.Close()
+			if resp.StatusCode == 204 || resp.StatusCode == 200 {
+				fmt.Printf("  🌐 Проверка подключения... ✅ (HTTP %d)\n", resp.StatusCode)
+				return
+			}
+		}
+		delay := time.Duration(1<<uint(attempt)) * time.Second
+		fmt.Printf("  🌐 Проверка подключения не удалась (попытка %d/3), повтор через %v...\n", attempt+1, delay)
+		time.Sleep(delay)
+	}
+	fmt.Println("  🌐 Проверка подключения... ❌ не удалась")
+}
+
 func (a *App) cleanup() {
-	oldProxy := system.ReadProxyState()
-	if oldProxy.Enabled {
-		if err := a.proxy.Restore(oldProxy); err != nil {
-			slog.Warn("failed to restore proxy", "error", err)
+	if a.cfg != nil && a.cfg.Mode == "tun" {
+		system.DisableKillSwitch()
+	} else {
+		oldProxy := system.ReadProxyState()
+		if oldProxy.Enabled {
+			if err := a.proxy.Restore(oldProxy); err != nil {
+				slog.Warn("failed to restore proxy", "error", err)
+			}
 		}
 	}
 	if a.runner != nil {
@@ -219,7 +292,7 @@ func maskIfNeeded(s string) string {
 	return s[:4] + "..." + s[len(s)-4:]
 }
 
-func printConfigSummary(cfg *xraycfg.XrayConfig) {
+func printConfigSummary(cfg *xraycfg.XrayConfig, mode string) {
 	if len(cfg.Outbounds) == 0 {
 		return
 	}
@@ -240,7 +313,7 @@ func printConfigSummary(cfg *xraycfg.XrayConfig) {
 		vs := ob.Settings.VNext[0]
 		fmt.Printf(" | server: %s:%d", vs.Address, vs.Port)
 	}
-	fmt.Println()
+	fmt.Printf(" | mode: %s\n", mode)
 }
 
 func printRoutingRules(cfg *xraycfg.XrayConfig) {
@@ -342,7 +415,7 @@ func testProxyConnection(ctx context.Context, httpPort int) {
 	fmt.Println("  🌐 Тестовый запрос... ❌ не удался после 3 попыток")
 }
 
-func (a *App) healthCheckLoop(ctx context.Context, socksPort, httpPort int) {
+func (a *App) healthCheckLoopPorts(ctx context.Context, socksPort, httpPort int) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
@@ -374,6 +447,39 @@ func (a *App) healthCheckLoop(ctx context.Context, socksPort, httpPort int) {
 			}
 			consecutiveFails = 0
 		}
+	}
+}
+
+func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	consecutiveFails := 0
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		req, _ := http.NewRequestWithContext(ctx, "GET", "https://www.google.com/generate_204", nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			consecutiveFails++
+			slog.Warn("TUN connectivity check failed", "consecutive_fails", consecutiveFails)
+			if consecutiveFails >= 3 {
+				slog.Warn("3 consecutive TUN failures, requesting xray restart")
+				if a.runner != nil {
+					a.runner.Stop()
+				}
+				consecutiveFails = 0
+			}
+			continue
+		}
+		resp.Body.Close()
+		consecutiveFails = 0
 	}
 }
 

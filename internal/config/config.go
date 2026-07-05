@@ -11,11 +11,13 @@ import (
 
 type Config struct {
 	VlessURL   string
+	Mode       string
 	LogEnabled bool
 	LogFile    string
 	LogLevel   string
 	MaskCreds  bool
 	XrayLogLvl string
+	KillSwitch bool
 }
 
 func Load(filenames ...string) (*Config, error) {
@@ -25,11 +27,17 @@ func Load(filenames ...string) (*Config, error) {
 
 	cfg := &Config{
 		VlessURL:   os.Getenv("VLESS_URL"),
+		Mode:       strings.ToLower(envOr("MODE", "proxy")),
 		LogEnabled: parseBool("LOG_ENABLED", false),
 		LogFile:    envOr("LOG_FILE", "xray-runner.log"),
 		LogLevel:   strings.ToLower(envOr("LOG_LEVEL", "info")),
 		MaskCreds:  parseBool("MASK_CREDENTIALS", true),
 		XrayLogLvl: envOr("XRAY_LOG_LEVEL", "warning"),
+		KillSwitch: parseBool("KILL_SWITCH", false),
+	}
+
+	if cfg.Mode != "proxy" && cfg.Mode != "tun" {
+		return nil, fmt.Errorf("MODE must be 'proxy' or 'tun', got %q", cfg.Mode)
 	}
 
 	if cfg.VlessURL == "" {

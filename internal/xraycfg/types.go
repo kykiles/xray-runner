@@ -1,6 +1,8 @@
 package xraycfg
 
-import "encoding/json"
+import (
+	"encoding/json"
+) 
 
 type XrayConfig struct {
 	Log       *LogConfig       `json:"log,omitempty"`
@@ -105,4 +107,24 @@ type RealitySettings struct {
 	PublicKey   string `json:"publicKey,omitempty"`
 	ShortID     string `json:"shortId,omitempty"`
 	Fingerprint string `json:"fingerprint,omitempty"`
+}
+
+type TUNSettings struct {
+	MTU           int      `json:"mtu"`
+	Address       []string `json:"address"`
+	Networks      []string `json:"networks"`
+	InterfaceName string   `json:"interfaceName"`
+}
+
+func BuildTUNInbound() Inbound {
+	return Inbound{
+		Tag:      "tun",
+		Protocol: "tun",
+		Settings: json.RawMessage(`{"mtu":9000,"address":["10.0.0.1/24"],"networks":["tcp","udp"],"interfaceName":"xray-tun"}`),
+		Sniffing: &SniffingConfig{
+			Enabled:       true,
+			RouteOnly:     true,
+			DestOverride:  []string{"http", "tls", "quic"},
+		},
+	}
 }
