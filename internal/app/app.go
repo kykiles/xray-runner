@@ -80,33 +80,28 @@ func (a *App) Run(ctx context.Context) error {
 	slog.Info("starting xray", "binary", binary)
 
 	a.runner = xray.New(binary, a.tmpFile)
-	if err := a.runner.Start(ctx); err != nil {
-		return err
-	}
-	fmt.Printf("🟢 Xray запущен с PID: %d\n", a.runner.PID())
+
+	xrayCtx, xrayCancel := context.WithCancel(ctx)
+	defer xrayCancel()
+
+	go func() {
+		if err := a.runner.RunWithRetry(xrayCtx, 5); err != nil {
+			slog.Error("xray runner failed", "error", err)
+			xrayCancel()
+		}
+	}()
 
 	socksPort, httpPort := a.checkPorts(cfg)
 	fmt.Printf("  Порты: SOCKS5 127.0.0.1:%d  HTTP 127.0.0.1:%d\n", socksPort, httpPort)
 
-	go func() {
-		if err := a.runner.Wait(); err != nil {
-			slog.Warn("xray exited unexpectedly", "error", err)
-		}
-	}()
-
-	fmt.Print("  ⏳ Ожидание портов Xray... ")
-	if waitForPort(socksPort, 10*time.Second) {
-		fmt.Println("✅ SOCKS5 доступен")
-	} else {
-		fmt.Println("❌ SOCKS5 не отвечает за 10с")
+	if !awaitPort(ctx, socksPort, "SOCKS5", 10*time.Second) {
+		return fmt.Errorf("SOCKS5 порт не открылся за 10с")
 	}
-	if waitForPort(httpPort, 5*time.Second) {
-		fmt.Println("  ✅ HTTP-прокси доступен")
-	} else {
-		fmt.Println("  ❌ HTTP-прокси не отвечает")
+	if !awaitPort(ctx, httpPort, "HTTP", 5*time.Second) {
+		return fmt.Errorf("HTTP порт не открылся за 5с")
 	}
 
-	testProxyConnection(httpPort)
+	testProxyConnection(ctx, httpPort)
 
 	if err := a.proxy.Enable(httpPort); err != nil {
 		slog.Warn("failed to enable system proxy", "error", err)
@@ -116,7 +111,11 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	fmt.Println("──────────────────────────────────────────")
+
+	go a.healthCheckLoop(ctx, socksPort, httpPort)
+
 	<-ctx.Done()
+	xrayCancel()
 	fmt.Println("\n🛑 Останавливаем Xray...")
 
 	return nil
@@ -279,42 +278,113 @@ func printRoutingRules(cfg *xraycfg.XrayConfig) {
 	}
 }
 
-func waitForPort(port int, timeout time.Duration) bool {
+func awaitPort(ctx context.Context, port int, label string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
+	fmt.Printf("  ⏳ Ожидание %s порта... ", label)
 	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			fmt.Println("❌ отменено")
+			return false
+		default:
+		}
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
 		if err == nil {
 			conn.Close()
+			fmt.Printf("✅ %s доступен\n", label)
 			return true
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	fmt.Printf("❌ %s не отвечает за %v\n", label, timeout)
 	return false
 }
 
-func testProxyConnection(httpPort int) {
+func testProxyConnection(ctx context.Context, httpPort int) {
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", httpPort)
-	fmt.Printf("  🌐 Тестовый запрос через HTTP-прокси %s... ", proxyURL)
+	testURLs := []string{
+		"https://www.google.com/generate_204",
+		"https://connectivitycheck.gstatic.com/generate_204",
+		"https://www.cloudflare.com/cdn-cgi/trace",
+	}
 
 	transport := &http.Transport{
 		Proxy: func(req *http.Request) (*url.URL, error) {
 			return url.Parse(proxyURL)
 		},
 	}
-	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
 
-	resp, err := client.Get("https://www.google.com/generate_204")
+	for attempt := 0; attempt < 3; attempt++ {
+		for _, testURL := range testURLs {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+			req, _ := http.NewRequestWithContext(ctx, "GET", testURL, nil)
+			resp, err := client.Do(req)
+			if err != nil {
+				continue
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode == 204 || resp.StatusCode == 200 {
+				fmt.Printf("  🌐 Тестовый запрос %s... ✅ (HTTP %d)\n", proxyURL, resp.StatusCode)
+				return
+			}
+		}
+		delay := time.Duration(1<<uint(attempt)) * time.Second
+		fmt.Printf("  🌐 Тестовый запрос не удался (попытка %d/3), повтор через %v...\n", attempt+1, delay)
+		time.Sleep(delay)
+	}
+	fmt.Println("  🌐 Тестовый запрос... ❌ не удался после 3 попыток")
+}
+
+func (a *App) healthCheckLoop(ctx context.Context, socksPort, httpPort int) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	consecutiveFails := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		socksOK := checkPort(ctx, socksPort)
+		httpOK := checkPort(ctx, httpPort)
+
+		if socksOK && httpOK {
+			consecutiveFails = 0
+			continue
+		}
+
+		consecutiveFails++
+		slog.Warn("health check failed", "socks", socksOK, "http", httpOK,
+			"consecutive_fails", consecutiveFails)
+
+		if consecutiveFails >= 3 {
+			slog.Warn("3 consecutive health check failures, requesting xray restart")
+			if a.runner != nil {
+				a.runner.Stop()
+			}
+			consecutiveFails = 0
+		}
+	}
+}
+
+func checkPort(ctx context.Context, port int) bool {
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
-		fmt.Printf("❌ %v\n", err)
-		return
+		return false
 	}
-	resp.Body.Close()
-
-	if resp.StatusCode == 204 || resp.StatusCode == 200 {
-		fmt.Printf("✅ (HTTP %d)\n", resp.StatusCode)
-	} else {
-		fmt.Printf("⚠️  (HTTP %d)\n", resp.StatusCode)
-	}
+	conn.Close()
+	return true
 }
 
 func verifySystemProxy(httpPort int) {

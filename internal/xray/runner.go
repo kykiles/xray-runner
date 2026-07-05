@@ -2,11 +2,14 @@ package xray
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"time"
 )
 
 type Runner struct {
@@ -69,4 +72,32 @@ func (r *Runner) PID() int {
 		return r.cmd.Process.Pid
 	}
 	return 0
+}
+
+func (r *Runner) RunWithRetry(ctx context.Context, maxRetries int) error {
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if err := r.Start(ctx); err != nil {
+			return err
+		}
+		fmt.Printf("🟢 Xray запущен с PID: %d\n", r.PID())
+
+		err := r.Wait()
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+
+		delay := time.Duration(math.Pow(2, float64(attempt))) * time.Second
+		fmt.Printf("⚠️ Xray завершился (попытка %d/%d): %v. Перезапуск через %v...\n",
+			attempt+1, maxRetries, err, delay)
+
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	return fmt.Errorf("xray crashed %d times, giving up", maxRetries)
 }

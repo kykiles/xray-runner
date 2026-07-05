@@ -13,7 +13,9 @@ func New() *ProxyManager {
 }
 
 func (pm *ProxyManager) Enable(port int) error {
-	overrides := queryRegString("ProxyOverride")
+	saved := ReadProxyState()
+
+	overrides := saved.Overrides
 	if overrides == "" {
 		overrides = "<-loopback>"
 	} else if !strings.Contains(overrides, "<-loopback>") {
@@ -26,9 +28,11 @@ func (pm *ProxyManager) Enable(port int) error {
 		return fmt.Errorf("enable proxy: %w", err)
 	}
 	if err := execReg("add", regKey, "/v", "ProxyServer", "/t", "REG_SZ", "/d", fmt.Sprintf("127.0.0.1:%d", port), "/f"); err != nil {
+		WriteProxyState(saved)
 		return fmt.Errorf("set proxy server: %w", err)
 	}
 	if err := execReg("add", regKey, "/v", "ProxyOverride", "/t", "REG_SZ", "/d", overrides, "/f"); err != nil {
+		WriteProxyState(saved)
 		return fmt.Errorf("set proxy overrides: %w", err)
 	}
 	return nil
