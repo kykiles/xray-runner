@@ -11,7 +11,7 @@ import (
 
 	"xray-runner/internal/app"
 	"xray-runner/internal/config"
-	"xray-runner/internal/log"
+	applog "xray-runner/internal/log"
 )
 
 var Version = "dev"
@@ -31,7 +31,7 @@ func main() {
 		log.Fatalf("❌ %v", err)
 	}
 
-	defer log.Init(cfg)()
+	defer applog.Init(cfg)()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
