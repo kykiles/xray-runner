@@ -1,0 +1,24 @@
+# Secrets
+.env
+
+# Generated runtime files
+xray_config.json
+xray-runner.log
+
+# Build output
+myxray.exe
+*.exe
+
+# Xray dependencies (download separately)
+xray.exe
+geoip.dat
+geosite.dat
+wintun.dll
+
+# Go build cache
+go.work
+go.work.sum
+
+# OS files
+Thumbs.db
+.DS_Store
