@@ -30,12 +30,25 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadMissingVlessURL(t *testing.T) {
+func TestLoadMissingURLs(t *testing.T) {
 	os.Clearenv()
 
 	_, err := Load()
 	if err == nil {
-		t.Fatal("expected error for missing VLESS_URL, got nil")
+		t.Fatal("expected error for missing VLESS_URL/SUBSCRIPTION_URL, got nil")
+	}
+}
+
+func TestLoadSubscriptionURL(t *testing.T) {
+	os.Clearenv()
+	os.Setenv("SUBSCRIPTION_URL", "https://example.com/sub")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SubscriptionURL != "https://example.com/sub" {
+		t.Errorf("SubscriptionURL = %q, want %q", cfg.SubscriptionURL, "https://example.com/sub")
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"xray-runner/internal/config"
+	"xray-runner/internal/subscription"
 	"xray-runner/internal/system"
 	"xray-runner/internal/xray"
 	"xray-runner/internal/xraycfg"
@@ -35,29 +36,47 @@ func New(cfg *config.Config) *App {
 	}
 }
 
-func (a *App) Run(ctx context.Context) error {
-	defer a.cleanup()
+func (a *App) resolveOutbound(ctx context.Context) (json.RawMessage, error) {
+	if a.cfg.SubscriptionURL != "" {
+		fmt.Println("📡 Загрузка подписки...")
+		entries, err := subscription.Fetch(a.cfg.SubscriptionURL)
+		if err != nil {
+			return nil, fmt.Errorf("subscription: %w", err)
+		}
+		fmt.Printf("  ✅ Загружено серверов: %d\n", len(entries))
+
+		selected := subscription.ShowMenu(entries)
+		printSubEntryDetails(selected)
+		resolveServer(selected.Address)
+
+		return subscription.BuildOutboundJSON(selected)
+	}
 
 	u, err := url.Parse(a.cfg.VlessURL)
 	if err != nil {
-		return fmt.Errorf("parse VLESS_URL: %w", err)
+		return nil, fmt.Errorf("parse VLESS_URL: %w", err)
 	}
 	printURLDetails(u)
 	resolveServer(hostFromURL(u))
 
-	var proxyOutbound json.RawMessage
 	switch u.Scheme {
 	case "vless":
 		ob := xraycfg.BuildVLESSOutbound(u)
-		proxyOutbound, err = json.Marshal(ob)
+		return json.Marshal(ob)
 	case "ss":
 		ob := xraycfg.BuildSSOutbound(u)
-		proxyOutbound, err = json.Marshal(ob)
+		return json.Marshal(ob)
 	default:
-		return fmt.Errorf("unsupported protocol: %s (vless, ss)", u.Scheme)
+		return nil, fmt.Errorf("unsupported protocol: %s (vless, ss)", u.Scheme)
 	}
+}
+
+func (a *App) Run(ctx context.Context) error {
+	defer a.cleanup()
+
+	proxyOutbound, err := a.resolveOutbound(ctx)
 	if err != nil {
-		return fmt.Errorf("marshal outbound: %w", err)
+		return err
 	}
 
 	tc, err := xraycfg.LoadTemplate("template.json")
@@ -99,9 +118,17 @@ func (a *App) Run(ctx context.Context) error {
 	}()
 
 	if a.cfg.Mode == "tun" {
-		return a.runTun(ctx, cfg)
+		err = a.runTun(ctx, cfg)
+	} else {
+		err = a.runProxy(ctx, cfg)
 	}
-	return a.runProxy(ctx, cfg)
+
+	// Cancel xray context BEFORE cleanup, so exec.CommandContext kills the
+	// process and RunWithRetry returns cleanly (context.Canceled) instead
+	// of retrying after a manual Stop()
+	xrayCancel()
+	time.Sleep(200 * time.Millisecond)
+	return err
 }
 
 func (a *App) runProxy(ctx context.Context, cfg *xraycfg.XrayConfig) error {
@@ -249,6 +276,24 @@ func resolveServer(host string) {
 	fmt.Printf("✅ %s → %s\n", host, strings.Join(addrs, ", "))
 }
 
+func printSubEntryDetails(e *subscription.SubEntry) {
+	fmt.Println("── Выбранный сервер ─────────────────────")
+	fmt.Printf("  Протокол:  %s\n", e.Protocol)
+	fmt.Printf("  Сервер:    %s\n", e.Address)
+	fmt.Printf("  Порт:      %d\n", e.Port)
+	if e.UUID != "" {
+		fmt.Printf("  UUID:      %s\n", maskIfNeeded(e.UUID))
+	}
+	fmt.Printf("  Transport: %s\n", e.Network)
+	if e.Security != "" {
+		fmt.Printf("  Security:  %s\n", e.Security)
+	}
+	if e.Remarks != "" {
+		fmt.Printf("  Заметка:   %s\n", e.Remarks)
+	}
+	fmt.Println("─────────────────────────────────────────")
+}
+
 func printURLDetails(u *url.URL) {
 	fmt.Println("── URL ──────────────────────────────────")
 	fmt.Printf("  Протокол:  %s\n", u.Scheme)
@@ -296,22 +341,41 @@ func printConfigSummary(cfg *xraycfg.XrayConfig, mode string) {
 	if len(cfg.Outbounds) == 0 {
 		return
 	}
-	var ob xraycfg.VLESSOutbound
-	if err := json.Unmarshal(cfg.Outbounds[0], &ob); err != nil {
+	var proto struct {
+		Protocol string          `json:"protocol"`
+		Settings json.RawMessage `json:"settings"`
+		Stream   *xraycfg.StreamSettings `json:"streamSettings,omitempty"`
+	}
+	if err := json.Unmarshal(cfg.Outbounds[0], &proto); err != nil {
 		return
 	}
-	fmt.Printf("📡 Outbound: %s", ob.Protocol)
-	if ob.Stream != nil {
-		if ob.Stream.Network != "" {
-			fmt.Printf(" | transport: %s", ob.Stream.Network)
+	fmt.Printf("📡 Outbound: %s", proto.Protocol)
+	if proto.Stream != nil {
+		if proto.Stream.Network != "" {
+			fmt.Printf(" | transport: %s", proto.Stream.Network)
 		}
-		if ob.Stream.Security != "" {
-			fmt.Printf(" | security: %s", ob.Stream.Security)
+		if proto.Stream.Security != "" {
+			fmt.Printf(" | security: %s", proto.Stream.Security)
 		}
 	}
-	if ob.Settings != nil && len(ob.Settings.VNext) > 0 {
-		vs := ob.Settings.VNext[0]
-		fmt.Printf(" | server: %s:%d", vs.Address, vs.Port)
+	if proto.Settings != nil {
+		var addr struct {
+			VNext []struct {
+				Address string `json:"address"`
+				Port    int    `json:"port"`
+			} `json:"vnext,omitempty"`
+			Servers []struct {
+				Address string `json:"address"`
+				Port    int    `json:"port"`
+			} `json:"servers,omitempty"`
+		}
+		if err := json.Unmarshal(proto.Settings, &addr); err == nil {
+			if len(addr.VNext) > 0 {
+				fmt.Printf(" | server: %s:%d", addr.VNext[0].Address, addr.VNext[0].Port)
+			} else if len(addr.Servers) > 0 {
+				fmt.Printf(" | server: %s:%d", addr.Servers[0].Address, addr.Servers[0].Port)
+			}
+		}
 	}
 	fmt.Printf(" | mode: %s\n", mode)
 }

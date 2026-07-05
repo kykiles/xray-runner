@@ -2,7 +2,6 @@ package xray
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -82,10 +81,7 @@ func (r *Runner) RunWithRetry(ctx context.Context, maxRetries int) error {
 		fmt.Printf("🟢 Xray запущен с PID: %d\n", r.PID())
 
 		err := r.Wait()
-		if err == nil {
-			return nil
-		}
-		if errors.Is(err, context.Canceled) {
+		if err == nil || ctx.Err() != nil {
 			return nil
 		}
 

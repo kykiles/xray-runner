@@ -72,13 +72,58 @@ type SSServer struct {
 	Level    int    `json:"level"`
 }
 
+type VMessOutbound struct {
+	Tag      string          `json:"tag"`
+	Protocol string          `json:"protocol"`
+	Settings *VMessSettings  `json:"settings,omitempty"`
+	Stream   *StreamSettings `json:"streamSettings,omitempty"`
+}
+
+type VMessSettings struct {
+	VNext []VMessServer `json:"vnext,omitempty"`
+}
+
+type VMessServer struct {
+	Address string      `json:"address"`
+	Port    int         `json:"port"`
+	Users   []VMessUser `json:"users"`
+}
+
+type VMessUser struct {
+	ID       string `json:"id"`
+	Security string `json:"security"`
+	AlterID  int    `json:"alterId"`
+}
+
+type HysteriaOutbound struct {
+	Tag      string           `json:"tag"`
+	Protocol string           `json:"protocol"`
+	Settings *HysteriaProtoSettings `json:"settings,omitempty"`
+	Stream   *StreamSettings  `json:"streamSettings,omitempty"`
+}
+
+type HysteriaProtoSettings struct {
+	Version int    `json:"version"`
+	Address string `json:"address"`
+	Port    int    `json:"port"`
+}
+
+type HysteriaTransportSettings struct {
+	Version      int    `json:"version"`
+	Auth         string `json:"auth,omitempty"`
+	Up           string `json:"up,omitempty"`
+	Down         string `json:"down,omitempty"`
+	Congestion   string `json:"congestion,omitempty"`
+}
+
 type StreamSettings struct {
-	Network      string           `json:"network,omitempty"`
-	Security     string           `json:"security,omitempty"`
-	WSSettings   *WSSettings      `json:"wsSettings,omitempty"`
-	GRPCSettings *GRPCSettings    `json:"grpcSettings,omitempty"`
-	TLSSettings  *TLSSettings     `json:"tlsSettings,omitempty"`
-	Reality      *RealitySettings `json:"realitySettings,omitempty"`
+	Network             string                      `json:"network,omitempty"`
+	Security            string                      `json:"security,omitempty"`
+	WSSettings          *WSSettings                 `json:"wsSettings,omitempty"`
+	GRPCSettings        *GRPCSettings               `json:"grpcSettings,omitempty"`
+	TLSSettings         *TLSSettings                `json:"tlsSettings,omitempty"`
+	Reality             *RealitySettings            `json:"realitySettings,omitempty"`
+	HysteriaSettings    *HysteriaTransportSettings  `json:"hysteriaSettings,omitempty"`
 }
 
 type WSSettings struct {
@@ -97,9 +142,10 @@ type GRPCSettings struct {
 }
 
 type TLSSettings struct {
-	ServerName  string   `json:"serverName,omitempty"`
-	Fingerprint string   `json:"fingerprint,omitempty"`
-	ALPN        []string `json:"alpn,omitempty"`
+	ServerName    string   `json:"serverName,omitempty"`
+	Fingerprint   string   `json:"fingerprint,omitempty"`
+	ALPN          []string `json:"alpn,omitempty"`
+	AllowInsecure bool     `json:"allowInsecure,omitempty"`
 }
 
 type RealitySettings struct {

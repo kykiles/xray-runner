@@ -10,14 +10,15 @@ import (
 )
 
 type Config struct {
-	VlessURL   string
-	Mode       string
-	LogEnabled bool
-	LogFile    string
-	LogLevel   string
-	MaskCreds  bool
-	XrayLogLvl string
-	KillSwitch bool
+	VlessURL        string
+	SubscriptionURL string
+	Mode            string
+	LogEnabled      bool
+	LogFile         string
+	LogLevel        string
+	MaskCreds       bool
+	XrayLogLvl      string
+	KillSwitch      bool
 }
 
 func Load(filenames ...string) (*Config, error) {
@@ -26,22 +27,23 @@ func Load(filenames ...string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		VlessURL:   os.Getenv("VLESS_URL"),
-		Mode:       strings.ToLower(envOr("MODE", "proxy")),
-		LogEnabled: parseBool("LOG_ENABLED", false),
-		LogFile:    envOr("LOG_FILE", "xray-runner.log"),
-		LogLevel:   strings.ToLower(envOr("LOG_LEVEL", "info")),
-		MaskCreds:  parseBool("MASK_CREDENTIALS", true),
-		XrayLogLvl: envOr("XRAY_LOG_LEVEL", "warning"),
-		KillSwitch: parseBool("KILL_SWITCH", false),
+		VlessURL:        os.Getenv("VLESS_URL"),
+		SubscriptionURL: os.Getenv("SUBSCRIPTION_URL"),
+		Mode:            strings.ToLower(envOr("MODE", "proxy")),
+		LogEnabled:      parseBool("LOG_ENABLED", false),
+		LogFile:         envOr("LOG_FILE", "xray-runner.log"),
+		LogLevel:        strings.ToLower(envOr("LOG_LEVEL", "info")),
+		MaskCreds:       parseBool("MASK_CREDENTIALS", true),
+		XrayLogLvl:      envOr("XRAY_LOG_LEVEL", "warning"),
+		KillSwitch:      parseBool("KILL_SWITCH", false),
 	}
 
 	if cfg.Mode != "proxy" && cfg.Mode != "tun" {
 		return nil, fmt.Errorf("MODE must be 'proxy' or 'tun', got %q", cfg.Mode)
 	}
 
-	if cfg.VlessURL == "" {
-		return nil, fmt.Errorf("VLESS_URL is required but not set in .env")
+	if cfg.VlessURL == "" && cfg.SubscriptionURL == "" {
+		return nil, fmt.Errorf("either VLESS_URL or SUBSCRIPTION_URL must be set in .env")
 	}
 
 	return cfg, nil
