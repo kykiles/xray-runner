@@ -16,6 +16,9 @@ geoip.dat
 geosite.dat
 wintun.dll
 
+# Linux distribution bundle
+xray_linux/
+
 # Go build cache
 go.work
 go.work.sum
