@@ -15,24 +15,13 @@ func buildMockXray(t *testing.T, exitCode int, sleep time.Duration) string {
 	t.Helper()
 	dir := t.TempDir()
 
-	var src string
-	if runtime.GOOS == "windows" {
-		src = fmt.Sprintf(`package main
+	src := fmt.Sprintf(`package main
 import "os"
 import "time"
 func main() {
-	time.Sleep(%v)
+	time.Sleep(time.Duration(%d))
 	os.Exit(%d)
-}`, sleep, exitCode)
-	} else {
-		src = fmt.Sprintf(`package main
-import "os"
-import "time"
-func main() {
-	time.Sleep(%v)
-	os.Exit(%d)
-}`, sleep, exitCode)
-	}
+}`, sleep.Nanoseconds(), exitCode)
 
 	// Use "go build" to compile a small test binary
 	mainPath := filepath.Join(dir, "main.go")
@@ -108,10 +97,10 @@ func TestRunnerRunWithRetryCleanExit(t *testing.T) {
 func TestFindBinary(t *testing.T) {
 	mockBinary := buildMockXray(t, 0, 100*time.Millisecond)
 	origDir := filepath.Dir(mockBinary)
-	origExe := os.Executable
+	origExe := osExecutable
 
-	defer func() { os.Executable = origExe }()
-	os.Executable = func() (string, error) {
+	defer func() { osExecutable = origExe }()
+	osExecutable = func() (string, error) {
 		return filepath.Join(origDir, "test.exe"), nil
 	}
 

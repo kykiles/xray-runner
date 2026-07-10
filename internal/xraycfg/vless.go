@@ -1,19 +1,24 @@
 package xraycfg
 
 import (
+	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
 )
 
-func BuildVLESSOutbound(u *url.URL) *VLESSOutbound {
-	host, portStr, _ := strings.Cut(u.Host, ":")
-	if host == "" {
-		host = u.Host
+func BuildVLESSOutbound(u *url.URL) (*VLESSOutbound, error) {
+	host, portStr, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return nil, fmt.Errorf("parse host:port: %w", err)
 	}
-	port, _ := strconv.Atoi(portStr)
-	if port == 0 {
-		port = 443
+	if strings.Contains(host, ":") {
+		return nil, fmt.Errorf("IPv6 addresses are not supported (IPv6 is disabled): %s", host)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid port %q: %w", portStr, err)
 	}
 	uuid := u.User.Username()
 	q := u.Query()
@@ -44,7 +49,7 @@ func BuildVLESSOutbound(u *url.URL) *VLESSOutbound {
 			},
 		},
 		Stream: ss,
-	}
+	}, nil
 }
 
 func setTransportSettings(ss *StreamSettings, network string, q url.Values) {

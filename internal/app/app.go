@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"xray-runner/internal/config"
@@ -22,17 +23,21 @@ import (
 )
 
 type App struct {
-	cfg     *config.Config
-	runner  *xray.Runner
-	proxy   *system.ProxyManager
-	tmpFile string
+	cfg             *config.Config
+	runner          *xray.Runner
+	proxy           *system.ProxyManager
+	tmpFile         string
+	originalProxy   system.ProxyState
+	proxyTouched    bool
+	interfaces      func() ([]net.Interface, error)
 }
 
 func New(cfg *config.Config) *App {
 	return &App{
-		cfg:    cfg,
-		proxy:  system.New(),
-		tmpFile: filepath.Join(".", "xray_config.json"),
+		cfg:        cfg,
+		proxy:      system.New(),
+		tmpFile:    filepath.Join(".", "xray_config.json"),
+		interfaces: net.Interfaces,
 	}
 }
 
@@ -43,10 +48,10 @@ func (a *App) resolveOutbound(ctx context.Context) (json.RawMessage, error) {
 		if err != nil {
 			return nil, fmt.Errorf("subscription: %w", err)
 		}
-		fmt.Printf("  ✅ Загружено серверов: %d\n", len(entries))
+		slog.Info("subscription loaded", "servers", len(entries))
 
 		selected := subscription.ShowMenu(entries)
-		printSubEntryDetails(selected)
+		a.printSubEntryDetails(selected)
 		resolveServer(selected.Address)
 
 		return subscription.BuildOutboundJSON(selected)
@@ -56,15 +61,21 @@ func (a *App) resolveOutbound(ctx context.Context) (json.RawMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse VLESS_URL: %w", err)
 	}
-	printURLDetails(u)
+	a.printURLDetails(u)
 	resolveServer(hostFromURL(u))
 
 	switch u.Scheme {
 	case "vless":
-		ob := xraycfg.BuildVLESSOutbound(u)
+		ob, err := xraycfg.BuildVLESSOutbound(u)
+		if err != nil {
+			return nil, fmt.Errorf("build vless: %w", err)
+		}
 		return json.Marshal(ob)
 	case "ss":
-		ob := xraycfg.BuildSSOutbound(u)
+		ob, err := xraycfg.BuildSSOutbound(u)
+		if err != nil {
+			return nil, fmt.Errorf("build ss: %w", err)
+		}
 		return json.Marshal(ob)
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s (vless, ss)", u.Scheme)
@@ -87,8 +98,10 @@ func (a *App) Run(ctx context.Context) error {
 	if a.cfg.Mode == "tun" {
 		tc.Inbounds = []xraycfg.Inbound{xraycfg.BuildTUNInbound()}
 		fmt.Println("  Режим: TUN (весь трафик через VPN)")
+		slog.Info("mode", "mode", "tun")
 	} else {
 		fmt.Println("  Режим: Прокси (HTTP/SOCKS5)")
+		slog.Info("mode", "mode", "proxy")
 	}
 
 	cfg := xraycfg.MergeConfig(tc, proxyOutbound)
@@ -110,7 +123,10 @@ func (a *App) Run(ctx context.Context) error {
 	xrayCtx, xrayCancel := context.WithCancel(ctx)
 	defer xrayCancel()
 
+	var xrayDone sync.WaitGroup
+	xrayDone.Add(1)
 	go func() {
+		defer xrayDone.Done()
 		if err := a.runner.RunWithRetry(xrayCtx, 5); err != nil {
 			slog.Error("xray runner failed", "error", err)
 			xrayCancel()
@@ -127,13 +143,13 @@ func (a *App) Run(ctx context.Context) error {
 	// process and RunWithRetry returns cleanly (context.Canceled) instead
 	// of retrying after a manual Stop()
 	xrayCancel()
-	time.Sleep(200 * time.Millisecond)
+	xrayDone.Wait()
 	return err
 }
 
 func (a *App) runProxy(ctx context.Context, cfg *xraycfg.XrayConfig) error {
 	socksPort, httpPort := a.checkPorts(cfg)
-	fmt.Printf("  Порты: SOCKS5 127.0.0.1:%d  HTTP 127.0.0.1:%d\n", socksPort, httpPort)
+	slog.Info("proxy listening", "socks5", socksPort, "http", httpPort)
 
 	if !awaitPort(ctx, socksPort, "SOCKS5", 10*time.Second) {
 		return fmt.Errorf("SOCKS5 порт не открылся за 10с")
@@ -144,9 +160,13 @@ func (a *App) runProxy(ctx context.Context, cfg *xraycfg.XrayConfig) error {
 
 	testProxyConnection(ctx, httpPort)
 
+	a.originalProxy = system.ReadProxyState()
+
 	if err := a.proxy.Enable(httpPort); err != nil {
 		slog.Warn("failed to enable system proxy", "error", err)
 	} else {
+		a.proxyTouched = true
+		slog.Info("system proxy enabled", "port", httpPort)
 		fmt.Println("✅ Системный прокси включён (127.0.0.1:" + strconv.Itoa(httpPort) + ")")
 		verifySystemProxy(httpPort)
 	}
@@ -155,22 +175,28 @@ func (a *App) runProxy(ctx context.Context, cfg *xraycfg.XrayConfig) error {
 	go a.healthCheckLoopPorts(ctx, socksPort, httpPort)
 
 	<-ctx.Done()
-	fmt.Println("\n🛑 Останавливаем Xray...")
+	slog.Info("shutting down xray")
 	return nil
 }
 
 func (a *App) runTun(ctx context.Context, cfg *xraycfg.XrayConfig) error {
-	time.Sleep(2 * time.Second)
 	fmt.Print("  ⏳ Ожидание TUN интерфейса... ")
-	time.Sleep(3 * time.Second)
+	if !a.awaitTUNInterface(ctx, xraycfg.TunInterfaceName, 10*time.Second) {
+		fmt.Println("❌ не поднялся")
+		slog.Error("tun interface did not come up")
+		return fmt.Errorf("TUN-интерфейс %s не поднялся за 10с", xraycfg.TunInterfaceName)
+	}
 	fmt.Println("✅ TUN активирован")
+	slog.Info("tun interface activated")
 
 	if a.cfg.KillSwitch {
 		fmt.Print("  ⛔ Включение Kill Switch... ")
 		if err := system.EnableKillSwitch(); err != nil {
 			fmt.Printf("❌ %v\n", err)
+			slog.Warn("kill switch failed", "error", err)
 		} else {
 			fmt.Println("✅")
+			slog.Info("kill switch enabled")
 		}
 	}
 
@@ -179,8 +205,29 @@ func (a *App) runTun(ctx context.Context, cfg *xraycfg.XrayConfig) error {
 	go a.healthCheckLoopConnectivity(ctx)
 
 	<-ctx.Done()
-	fmt.Println("\n🛑 Останавливаем Xray...")
+	slog.Info("shutting down xray")
 	return nil
+}
+
+func (a *App) awaitTUNInterface(ctx context.Context, name string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+		}
+		ifaces, err := a.interfaces()
+		if err == nil {
+			for _, iface := range ifaces {
+				if iface.Name == name && iface.Flags&net.FlagUp != 0 {
+					return true
+				}
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
 }
 
 func testConnectivity(ctx context.Context) {
@@ -207,23 +254,25 @@ func testConnectivity(ctx context.Context) {
 			resp.Body.Close()
 			if resp.StatusCode == 204 || resp.StatusCode == 200 {
 				fmt.Printf("  🌐 Проверка подключения... ✅ (HTTP %d)\n", resp.StatusCode)
+				slog.Info("connectivity check ok", "status", resp.StatusCode)
 				return
 			}
 		}
 		delay := time.Duration(1<<uint(attempt)) * time.Second
 		fmt.Printf("  🌐 Проверка подключения не удалась (попытка %d/3), повтор через %v...\n", attempt+1, delay)
+		slog.Warn("connectivity check failed", "attempt", attempt+1, "retry_in", delay)
 		time.Sleep(delay)
 	}
 	fmt.Println("  🌐 Проверка подключения... ❌ не удалась")
+	slog.Error("connectivity check failed after 3 attempts")
 }
 
 func (a *App) cleanup() {
 	if a.cfg != nil && a.cfg.Mode == "tun" {
 		system.DisableKillSwitch()
 	} else {
-		oldProxy := system.ReadProxyState()
-		if oldProxy.Enabled {
-			if err := a.proxy.Restore(oldProxy); err != nil {
+		if a.proxyTouched {
+			if err := a.proxy.Restore(a.originalProxy); err != nil {
 				slog.Warn("failed to restore proxy", "error", err)
 			}
 		}
@@ -239,7 +288,11 @@ func (a *App) writeConfig(cfg *xraycfg.XrayConfig) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return os.WriteFile(a.tmpFile, data, 0644)
+	if err := os.WriteFile(a.tmpFile, data, 0644); err != nil {
+		return err
+	}
+	slog.Debug("generated xray config", "path", a.tmpFile, "config", string(data))
+	return nil
 }
 
 func (a *App) checkPorts(cfg *xraycfg.XrayConfig) (socksPort, httpPort int) {
@@ -267,22 +320,25 @@ func resolveServer(host string) {
 	addrs, err := net.LookupHost(host)
 	if err != nil {
 		fmt.Printf("❌ ОШИБКА: %v\n", err)
+		slog.Error("dns resolve failed", "host", host, "error", err)
 		return
 	}
 	if len(addrs) == 0 {
 		fmt.Println("❌ Нет записей A/AAAA")
+		slog.Warn("dns resolve returned no records", "host", host)
 		return
 	}
 	fmt.Printf("✅ %s → %s\n", host, strings.Join(addrs, ", "))
+	slog.Info("dns resolved", "host", host, "addrs", addrs)
 }
 
-func printSubEntryDetails(e *subscription.SubEntry) {
+func (a *App) printSubEntryDetails(e *subscription.SubEntry) {
 	fmt.Println("── Выбранный сервер ─────────────────────")
 	fmt.Printf("  Протокол:  %s\n", e.Protocol)
 	fmt.Printf("  Сервер:    %s\n", e.Address)
 	fmt.Printf("  Порт:      %d\n", e.Port)
 	if e.UUID != "" {
-		fmt.Printf("  UUID:      %s\n", maskIfNeeded(e.UUID))
+		fmt.Printf("  UUID:      %s\n", a.maskIfNeeded(e.UUID))
 	}
 	fmt.Printf("  Transport: %s\n", e.Network)
 	if e.Security != "" {
@@ -291,10 +347,13 @@ func printSubEntryDetails(e *subscription.SubEntry) {
 	if e.Remarks != "" {
 		fmt.Printf("  Заметка:   %s\n", e.Remarks)
 	}
+	if e.ShortID != "" {
+		fmt.Printf("  ShortID:   %s\n", a.maskIfNeeded(e.ShortID))
+	}
 	fmt.Println("─────────────────────────────────────────")
 }
 
-func printURLDetails(u *url.URL) {
+func (a *App) printURLDetails(u *url.URL) {
 	fmt.Println("── URL ──────────────────────────────────")
 	fmt.Printf("  Протокол:  %s\n", u.Scheme)
 	host, port, _ := net.SplitHostPort(u.Host)
@@ -302,16 +361,16 @@ func printURLDetails(u *url.URL) {
 	fmt.Printf("  Порт:      %s\n", port)
 	if u.Scheme == "vless" {
 		q := u.Query()
-		fmt.Printf("  UUID:      %s\n", maskIfNeeded(u.User.Username()))
+		fmt.Printf("  UUID:      %s\n", a.maskIfNeeded(u.User.Username()))
 		printParam(q, "type", "Transport")
 		printParam(q, "security", "Security")
 		printParam(q, "sni", "SNI")
 		printParam(q, "fp", "Fingerprint")
 		if v := q.Get("pbk"); v != "" {
-			fmt.Printf("  PublicKey: %s\n", maskIfNeeded(v))
+			fmt.Printf("  PublicKey: %s\n", a.maskIfNeeded(v))
 		}
 		if v := q.Get("sid"); v != "" {
-			fmt.Printf("  ShortID:   %s\n", maskIfNeeded(v))
+			fmt.Printf("  ShortID:   %s\n", a.maskIfNeeded(v))
 		}
 		printParam(q, "flow", "Flow")
 		printParam(q, "host", "Host")
@@ -327,8 +386,12 @@ func printParam(q url.Values, key, label string) {
 	}
 }
 
-func maskIfNeeded(s string) string {
-	if s == "" {
+func (a *App) maskIfNeeded(s string) string {
+	return maskString(s, a.cfg.MaskCreds)
+}
+
+func maskString(s string, mask bool) string {
+	if !mask || s == "" {
 		return s
 	}
 	if len(s) <= 8 {
@@ -422,6 +485,7 @@ func awaitPort(ctx context.Context, port int, label string, timeout time.Duratio
 		select {
 		case <-ctx.Done():
 			fmt.Println("❌ отменено")
+			slog.Warn("port wait cancelled", "label", label, "port", port)
 			return false
 		default:
 		}
@@ -429,11 +493,13 @@ func awaitPort(ctx context.Context, port int, label string, timeout time.Duratio
 		if err == nil {
 			conn.Close()
 			fmt.Printf("✅ %s доступен\n", label)
+			slog.Info("port available", "label", label, "port", port)
 			return true
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	fmt.Printf("❌ %s не отвечает за %v\n", label, timeout)
+	slog.Error("port timeout", "label", label, "port", port, "timeout", timeout)
 	return false
 }
 
@@ -469,14 +535,17 @@ func testProxyConnection(ctx context.Context, httpPort int) {
 
 			if resp.StatusCode == 204 || resp.StatusCode == 200 {
 				fmt.Printf("  🌐 Тестовый запрос %s... ✅ (HTTP %d)\n", proxyURL, resp.StatusCode)
+				slog.Info("proxy test ok", "proxy", proxyURL, "status", resp.StatusCode)
 				return
 			}
 		}
 		delay := time.Duration(1<<uint(attempt)) * time.Second
 		fmt.Printf("  🌐 Тестовый запрос не удался (попытка %d/3), повтор через %v...\n", attempt+1, delay)
+		slog.Warn("proxy test failed", "attempt", attempt+1, "retry_in", delay)
 		time.Sleep(delay)
 	}
 	fmt.Println("  🌐 Тестовый запрос... ❌ не удался после 3 попыток")
+	slog.Error("proxy test failed after 3 attempts")
 }
 
 func (a *App) healthCheckLoopPorts(ctx context.Context, socksPort, httpPort int) {
@@ -561,12 +630,15 @@ func verifySystemProxy(httpPort int) {
 	s := system.ReadProxyState()
 	if !s.Enabled {
 		fmt.Println("  ⚠️ Системный прокси НЕ включён (реестр не подтвердил)")
+		slog.Warn("system proxy not confirmed in registry")
 		return
 	}
 	expected := fmt.Sprintf("127.0.0.1:%d", httpPort)
 	if s.Server != expected {
 		fmt.Printf("  ⚠️ Системный прокси: %s (ожидалось %s)\n", s.Server, expected)
+		slog.Warn("system proxy mismatch", "got", s.Server, "expected", expected)
 		return
 	}
 	fmt.Printf("  ✅ Системный прокси 127.0.0.1:%d подтверждён\n", httpPort)
+	slog.Info("system proxy confirmed", "port", httpPort)
 }

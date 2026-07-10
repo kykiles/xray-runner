@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var supportedProtocols = map[string]bool{
@@ -18,6 +19,7 @@ var supportedProtocols = map[string]bool{
 
 func ShowMenu(entries []SubEntry) *SubEntry {
 	reader := bufio.NewReader(os.Stdin)
+	var benchmarkResults []BenchmarkResult
 
 	for {
 		fmt.Println("\n── Выбор сервера ──────────────────────")
@@ -28,14 +30,22 @@ func ShowMenu(entries []SubEntry) *SubEntry {
 			if remark != "" {
 				remark = " [" + remark + "]"
 			}
-			if supported {
-				fmt.Printf("  %2d. %-30s  %-5s %s%s\n", i+1, hostPort, e.Protocol, e.Network, remark)
-			} else {
-				fmt.Printf("  %2d. %-30s  %-5s ⚠️ неподдерживается%s\n", i+1, hostPort, e.Protocol, remark)
+			line := fmt.Sprintf("  %2d. %-30s  %-5s %s%s", i+1, hostPort, e.Protocol, e.Network, remark)
+			if benchmarkResults != nil {
+				line += "  ▸ " + benchmarkResults[i].String()
 			}
+			if !supported {
+				line += " ⚠️"
+			}
+			fmt.Println(line)
 		}
 		fmt.Print("  ─────────────────────────────────────\n")
-		fmt.Printf("  Выберите номер (1-%d): ", len(entries))
+
+		if benchmarkResults == nil {
+			fmt.Printf("  [1-%d] выбор, 'b' бенчмарк: ", len(entries))
+		} else {
+			fmt.Printf("  Выберите номер (1-%d): ", len(entries))
+		}
 
 		input, err := reader.ReadString('\n')
 		if err != nil {
@@ -44,6 +54,15 @@ func ShowMenu(entries []SubEntry) *SubEntry {
 		}
 
 		input = strings.TrimSpace(input)
+
+		if strings.EqualFold(input, "b") {
+			fmt.Print("  ⏳ Замер latency...")
+			start := time.Now()
+			benchmarkResults = RunBenchmark(entries, 2*time.Second)
+			fmt.Printf(" готово (%.1fs)\n", time.Since(start).Seconds())
+			continue
+		}
+
 		idx, err := strconv.Atoi(input)
 		if err != nil || idx < 1 || idx > len(entries) {
 			fmt.Println("  ❌ Некорректный номер. Попробуйте снова.")

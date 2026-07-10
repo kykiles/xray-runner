@@ -1,21 +1,28 @@
 package xray
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 )
 
 type Runner struct {
 	binary string
 	config string
+	mu     sync.Mutex
 	cmd    *exec.Cmd
 }
+
+var osExecutable = os.Executable
 
 func New(binary, configPath string) *Runner {
 	return &Runner{binary: binary, config: configPath}
@@ -29,7 +36,7 @@ func FindBinary() string {
 
 	paths := []string{name}
 
-	if exe, err := os.Executable(); err == nil {
+	if exe, err := osExecutable(); err == nil {
 		paths = append([]string{filepath.Join(filepath.Dir(exe), name)}, paths...)
 	}
 
@@ -42,17 +49,41 @@ func FindBinary() string {
 }
 
 func (r *Runner) Start(ctx context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	r.cmd = exec.CommandContext(ctx, r.binary, "run", "-c", r.config)
-	r.cmd.Stdout = os.Stdout
-	r.cmd.Stderr = os.Stderr
+
+	stdout, err := r.cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderr, err := r.cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("stderr pipe: %w", err)
+	}
 
 	if err := r.cmd.Start(); err != nil {
 		return fmt.Errorf("start xray: %w", err)
 	}
+
+	go logPipe(stdout, slog.LevelDebug)
+	go logPipe(stderr, slog.LevelWarn)
 	return nil
 }
 
+func logPipe(rc io.ReadCloser, level slog.Level) {
+	defer rc.Close()
+	scanner := bufio.NewScanner(rc)
+	for scanner.Scan() {
+		slog.Log(context.Background(), level, scanner.Text())
+	}
+}
+
 func (r *Runner) Stop() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if r.cmd == nil || r.cmd.Process == nil {
 		return nil
 	}
@@ -63,10 +94,18 @@ func (r *Runner) Stop() error {
 }
 
 func (r *Runner) Wait() error {
-	return r.cmd.Wait()
+	r.mu.Lock()
+	cmd := r.cmd
+	r.mu.Unlock()
+	if cmd == nil {
+		return fmt.Errorf("Wait called before Start")
+	}
+	return cmd.Wait()
 }
 
 func (r *Runner) PID() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.cmd != nil && r.cmd.Process != nil {
 		return r.cmd.Process.Pid
 	}
@@ -78,7 +117,7 @@ func (r *Runner) RunWithRetry(ctx context.Context, maxRetries int) error {
 		if err := r.Start(ctx); err != nil {
 			return err
 		}
-		fmt.Printf("🟢 Xray запущен с PID: %d\n", r.PID())
+		slog.Info("xray started", "pid", r.PID())
 
 		err := r.Wait()
 		if err == nil || ctx.Err() != nil {
@@ -86,8 +125,7 @@ func (r *Runner) RunWithRetry(ctx context.Context, maxRetries int) error {
 		}
 
 		delay := time.Duration(math.Pow(2, float64(attempt))) * time.Second
-		fmt.Printf("⚠️ Xray завершился (попытка %d/%d): %v. Перезапуск через %v...\n",
-			attempt+1, maxRetries, err, delay)
+		slog.Warn("xray crashed", "attempt", attempt+1, "max_retries", maxRetries, "error", err, "retry_in", delay)
 
 		select {
 		case <-time.After(delay):

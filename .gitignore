@@ -4,6 +4,7 @@
 # Generated runtime files
 xray_config.json
 xray-runner.log
+error.txt
 
 # Build output
 myxray.exe
@@ -23,3 +24,7 @@ go.work.sum
 Thumbs.db
 .DS_Store
 
+IMPLEMENTATION.md
+PLAN.md
+AGENTS.md
+PROJECT.md

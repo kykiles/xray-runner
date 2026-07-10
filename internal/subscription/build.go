@@ -68,7 +68,10 @@ func buildVLESS(e *SubEntry) (json.RawMessage, error) {
 		RawQuery: q.Encode(),
 	}
 
-	outbound := xraycfg.BuildVLESSOutbound(u)
+	outbound, err := xraycfg.BuildVLESSOutbound(u)
+	if err != nil {
+		return nil, fmt.Errorf("build vless: %w", err)
+	}
 	return json.Marshal(outbound)
 }
 
@@ -156,7 +159,10 @@ func buildSS(e *SubEntry) (json.RawMessage, error) {
 		User:   url.User(b64),
 	}
 
-	outbound := xraycfg.BuildSSOutbound(u)
+	outbound, err := xraycfg.BuildSSOutbound(u)
+	if err != nil {
+		return nil, fmt.Errorf("build ss: %w", err)
+	}
 	return json.Marshal(outbound)
 }
 
@@ -201,12 +207,8 @@ func buildHysteria2(e *SubEntry) (json.RawMessage, error) {
 	stream.TLSSettings = tls
 	stream.Security = "tls"
 
-	// Obfs via Obfs object or just pass as-is
-	// (Xray Hysteria2 obfuscation handling is via Salamander; we pass obfs fields
-	// through hysteriaSettings but Xray doesn't natively support Salamander
-	// in streamSettings yet — for now we set it on the transport settings)
 	if e.Obfs != "" {
-		stream.HysteriaSettings.Auth = stream.HysteriaSettings.Auth + "|" + e.Obfs + ":" + e.ObfsPassword
+		return nil, fmt.Errorf("hysteria2 obfuscation (Salamander) not supported by xray-core streamSettings; remove obfs/obfs-password from subscription")
 	}
 
 	outbound := &xraycfg.HysteriaOutbound{

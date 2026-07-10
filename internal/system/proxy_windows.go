@@ -8,15 +8,20 @@ import (
 	"strings"
 )
 
+func formatOverrides(saved string) string {
+	if saved == "" {
+		return "<-loopback>"
+	}
+	if strings.Contains(saved, "<-loopback>") {
+		return saved
+	}
+	return saved + ";<-loopback>"
+}
+
 func (pm *ProxyManager) Enable(port int) error {
 	saved := ReadProxyState()
 
-	overrides := saved.Overrides
-	if overrides == "" {
-		overrides = "<-loopback>"
-	} else if !strings.Contains(overrides, "<-loopback>") {
-		overrides += ";-loopback>"
-	}
+	overrides := formatOverrides(saved.Overrides)
 
 	slog.Debug("enabling system proxy", "port", port, "overrides", overrides)
 

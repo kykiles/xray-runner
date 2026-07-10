@@ -36,7 +36,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	slog.Info("starting xray-runner")
+	slog.Info("starting xray-runner", "version", Version)
 
 	application := app.New(cfg)
 	if err := application.Run(ctx); err != nil {
@@ -44,5 +44,6 @@ func main() {
 		os.Exit(1)
 	}
 
+	slog.Info("session ended")
 	fmt.Println("\n👋 До встречи!")
 }

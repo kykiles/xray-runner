@@ -2,7 +2,10 @@ package xraycfg
 
 import (
 	"encoding/json"
-) 
+	"fmt"
+)
+
+const TunInterfaceName = "xray-tun"
 
 type XrayConfig struct {
 	Log       *LogConfig       `json:"log,omitempty"`
@@ -163,10 +166,11 @@ type TUNSettings struct {
 }
 
 func BuildTUNInbound() Inbound {
+	settings := fmt.Sprintf(`{"mtu":9000,"address":["10.0.0.1/24"],"networks":["tcp","udp"],"interfaceName":%q}`, TunInterfaceName)
 	return Inbound{
 		Tag:      "tun",
 		Protocol: "tun",
-		Settings: json.RawMessage(`{"mtu":9000,"address":["10.0.0.1/24"],"networks":["tcp","udp"],"interfaceName":"xray-tun"}`),
+		Settings: json.RawMessage(settings),
 		Sniffing: &SniffingConfig{
 			Enabled:       true,
 			RouteOnly:     true,

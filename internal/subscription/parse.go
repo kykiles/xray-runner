@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"strconv"
@@ -84,7 +85,7 @@ func parseXrayJSON(obj map[string]interface{}) SubEntry {
 		SNI:         getString(obj, "sni"),
 		Fingerprint: getString(obj, "fp"),
 		PublicKey:   getString(obj, "publicKey"),
-		ShortID:     getString(obj, "shortId"),
+		ShortID:     getStringFirst(obj, "shortId", "sid", "shortID", "short_id"),
 		ALPN:        getString(obj, "alpn"),
 		ServiceName: getString(obj, "serviceName"),
 		Method:      getString(obj, "method"),
@@ -116,8 +117,16 @@ func parseXrayJSON(obj map[string]interface{}) SubEntry {
 	if e.Protocol == "" {
 		e.Protocol = "vless"
 	}
+	if e.Protocol == "hy2" {
+		e.Protocol = "hysteria2"
+	}
 	if e.Network == "" && e.Protocol != "hysteria2" && e.Protocol != "hysteria" {
 		e.Network = "tcp"
+	}
+
+	if e.Security == "reality" && e.ShortID == "" {
+		slog.Debug("REALITY entry has empty shortId (server may accept any)",
+			"address", e.Address)
 	}
 	return e
 }
@@ -208,13 +217,16 @@ func parseURL(rawURL string) (SubEntry, error) {
 		parseVlessURL(u, &e)
 
 	case "ss":
-		parseSSURL(u, &e)
+		if err := parseSSURL(u, &e); err != nil {
+			return SubEntry{}, fmt.Errorf("parse ss url: %w", err)
+		}
 
 	case "vmess":
 		parseVMessURL(u, &e)
 
-	case "hysteria2", "hysteria":
+	case "hysteria2", "hysteria", "hy2":
 		parseHysteria2URL(u, &e)
+		e.Protocol = "hysteria2"
 
 	default:
 		return SubEntry{}, fmt.Errorf("unsupported protocol: %s", u.Scheme)
@@ -245,7 +257,7 @@ func parseVlessURL(u *url.URL, e *SubEntry) {
 	e.SNI = q.Get("sni")
 	e.Fingerprint = q.Get("fp")
 	e.PublicKey = q.Get("pbk")
-	e.ShortID = q.Get("sid")
+	e.ShortID = firstNonEmpty(q.Get("sid"), q.Get("shortId"), q.Get("shortID"), q.Get("short_id"))
 	e.ALPN = q.Get("alpn")
 	e.ServiceName = q.Get("serviceName")
 
@@ -259,9 +271,14 @@ func parseVlessURL(u *url.URL, e *SubEntry) {
 			e.Remarks = u.Fragment
 		}
 	}
+
+	if e.Security == "reality" && e.ShortID == "" {
+		slog.Debug("REALITY URL has empty shortId (server may accept any)",
+			"address", e.Address)
+	}
 }
 
-func parseSSURL(u *url.URL, e *SubEntry) {
+func parseSSURL(u *url.URL, e *SubEntry) error {
 	host, portStr, err := net.SplitHostPort(u.Host)
 	if err == nil {
 		e.Address = host
@@ -277,16 +294,15 @@ func parseSSURL(u *url.URL, e *SubEntry) {
 		b64 += strings.Repeat("=", 4-m)
 	}
 	decoded, err := base64.StdEncoding.DecodeString(b64)
-	if err == nil {
-		parts := strings.SplitN(string(decoded), ":", 2)
-		if len(parts) == 2 {
-			e.Method = parts[0]
-			e.Password = parts[1]
-		}
+	if err != nil {
+		return fmt.Errorf("decode ss base64 userinfo: %w", err)
 	}
-	if e.Method == "" {
-		e.Method = "aes-256-gcm"
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid ss userinfo format, expected method:password")
 	}
+	e.Method = parts[0]
+	e.Password = parts[1]
 	if u.Fragment != "" {
 		if decoded, err := url.QueryUnescape(u.Fragment); err == nil {
 			e.Remarks = decoded
@@ -294,6 +310,7 @@ func parseSSURL(u *url.URL, e *SubEntry) {
 			e.Remarks = u.Fragment
 		}
 	}
+	return nil
 }
 
 func parseVMessURL(u *url.URL, e *SubEntry) {
@@ -365,6 +382,24 @@ func getString(obj map[string]interface{}, key string) string {
 	if v, ok := obj[key]; ok {
 		if s, ok := v.(string); ok {
 			return s
+		}
+	}
+	return ""
+}
+
+func getStringFirst(obj map[string]interface{}, keys ...string) string {
+	for _, k := range keys {
+		if v := getString(obj, k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
 		}
 	}
 	return ""

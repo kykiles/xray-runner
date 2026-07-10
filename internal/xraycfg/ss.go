@@ -2,33 +2,40 @@ package xraycfg
 
 import (
 	"encoding/base64"
+	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
 )
 
-func BuildSSOutbound(u *url.URL) *SSOutbound {
-	host, portStr, _ := strings.Cut(u.Host, ":")
-	if host == "" {
-		host = u.Host
+func BuildSSOutbound(u *url.URL) (*SSOutbound, error) {
+	host, portStr, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return nil, fmt.Errorf("parse host:port: %w", err)
 	}
-	port, _ := strconv.Atoi(portStr)
-	if port == 0 {
-		port = 443
+	if strings.Contains(host, ":") {
+		return nil, fmt.Errorf("IPv6 addresses are not supported (IPv6 is disabled): %s", host)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid port %q: %w", portStr, err)
 	}
 
 	b64 := u.User.Username()
 	if m := len(b64) % 4; m != 0 {
 		b64 += strings.Repeat("=", 4-m)
 	}
-	decoded, _ := base64.StdEncoding.DecodeString(b64)
-	parts := strings.SplitN(string(decoded), ":", 2)
-	method := "aes-256-gcm"
-	password := ""
-	if len(parts) == 2 {
-		method = parts[0]
-		password = parts[1]
+	decoded, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, fmt.Errorf("decode base64 userinfo: %w", err)
 	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid ss userinfo format, expected method:password")
+	}
+	method := parts[0]
+	password := parts[1]
 
 	return &SSOutbound{
 		Tag:      "proxy",
@@ -38,5 +45,5 @@ func BuildSSOutbound(u *url.URL) *SSOutbound {
 				{Address: host, Port: port, Method: method, Password: password, Level: 0},
 			},
 		},
-	}
+	}, nil
 }

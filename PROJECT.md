@@ -57,6 +57,9 @@ go build -o xray-runner.exe .; if ($?) { .\xray-runner.exe }
 ## Key constraints
 
 - **Go build always manual** — `go build -o xray-runner.exe .` is run by hand, never by scripts or the wrapper itself
+- **Tests and build are run manually by the user only** — the agent must NOT execute `go build`, `go test`, `go vet`, or any other build/test commands; the user runs them by hand after each change
+- **Always maintain a TODO list** — the agent has no memory across turns, so any edits/changes in the project must be tracked via the todo tool to preserve task state
+- **Prefer subagents when tasks allow** — decompose work and delegate to subagents where feasible to parallelize and keep the main context focused
 - `.env` **must** exist with `VLESS_URL` set to a valid `vless://...` or `ss://...` URI
 - `ss://` links use standard base64(`method:password`) format (with auto-padding)
 - `template.json` is **not** a standalone Xray config — the Go wrapper modifies it at runtime (adds proxy outbound, appends catch-all rule)
