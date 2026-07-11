@@ -61,7 +61,10 @@ func SaveSubscription(rawURL string) error {
 	}
 	defer f.Close()
 
-	subs, _ := LoadSubscriptions()
+	subs, err := LoadSubscriptions()
+	if err != nil {
+		return fmt.Errorf("check duplicates: %w", err)
+	}
 	for _, s := range subs {
 		if s.URL == rawURL {
 			return nil

@@ -126,18 +126,23 @@ func (a *App) selectSubscription(subs []subscription.NamedSubscription) string {
 			ui.Item(i+1, fmt.Sprintf("%-30s  %s", s.Name, ui.Dim(s.URL)))
 		}
 		ui.Item(len(subs)+1, ui.Colored(ui.ColorGreen, "✚ Добавить новую"))
+		fmt.Printf("  %s%2d.%s  %s\n", ui.ColorCyan, 0, ui.ColorReset, "Выход")
 		ui.Divider()
 
-		input, err := ui.StyledInput(fmt.Sprintf("Выберите [1-%d]", len(subs)+1))
+		input, err := ui.StyledInput(fmt.Sprintf("Выберите [0-%d]", len(subs)+1))
 		if err != nil {
 			ui.Error("Ошибка ввода")
 			continue
 		}
 
 		idx, err := strconv.Atoi(input)
-		if err != nil || idx < 1 || idx > len(subs)+1 {
+		if err != nil || idx < 0 || idx > len(subs)+1 {
 			ui.Error("Некорректный номер")
 			continue
+		}
+
+		if idx == 0 {
+			os.Exit(0)
 		}
 
 		if idx == len(subs)+1 {

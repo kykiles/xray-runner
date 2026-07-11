@@ -41,8 +41,10 @@ geosite.dat         — база GeoSite (из релиза Xray-core)
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
-| `VLESS_URL` | — | VLESS или ss:// ссылка (обязательно, если нет `SUBSCRIPTION_URL`) |
-| `SUBSCRIPTION_URL` | — | URL подписки (обязательно, если нет `VLESS_URL`). Приоритет выше, чем `VLESS_URL` |
+| `VLESS_URL` | — | VLESS или ss:// ссылка (обязательно, если нет `SUBSCRIPTION_URL`/`SUBSCRIPTION_REMOTE_URL`) |
+| `SUBSCRIPTION_URL` | — | URL подписки (обязательно, если нет `VLESS_URL`/`SUBSCRIPTION_REMOTE_URL`). Приоритет выше, чем `VLESS_URL` |
+| `SUBSCRIPTION_REMOTE_URL` | — | Публичная ссылка на Google Doc с URL подписки. При каждом запуске скачивается содержимое и используется как URL подписки. Приоритет выше, чем `SUBSCRIPTION_URL` |
+| `SUBSCRIPTION_SECRET` | — | Пароль для AES-256-GCM шифрования URL подписки в Google Doc. Защищает ссылку от посторонних. Для шифрования: `xray-runner --encrypt "URL"` |
 | `MODE` | `proxy` | `proxy` (HTTP+SOCKS5) или `tun` (VPN) |
 | `LOG_ENABLED` | `false` | Писать лог в файл |
 | `LOG_FILE` | `xray-runner.log` | Путь к лог-файлу |
