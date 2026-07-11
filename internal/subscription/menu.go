@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"xray-runner/internal/ui"
 )
 
 var supportedProtocols = map[string]bool{
@@ -17,12 +19,12 @@ var supportedProtocols = map[string]bool{
 	"hysteria":  true,
 }
 
-func ShowMenu(entries []SubEntry) *SubEntry {
+func ShowMenu(entries []SubEntry, subURL string) *SubEntry {
 	reader := bufio.NewReader(os.Stdin)
 	var benchmarkResults []BenchmarkResult
 
 	for {
-		fmt.Println("\n── Выбор сервера ──────────────────────")
+		ui.Title("Серверы")
 		for i, e := range entries {
 			hostPort := fmt.Sprintf("%s:%d", e.Address, e.Port)
 			supported := supportedProtocols[e.Protocol]
@@ -30,52 +32,73 @@ func ShowMenu(entries []SubEntry) *SubEntry {
 			if remark != "" {
 				remark = " [" + remark + "]"
 			}
-			line := fmt.Sprintf("  %2d. %-30s  %-5s %s%s", i+1, hostPort, e.Protocol, e.Network, remark)
+			line := fmt.Sprintf("%-30s  %-5s %s%s", hostPort, e.Protocol, e.Network, remark)
 			if benchmarkResults != nil {
-				line += "  ▸ " + benchmarkResults[i].String()
+				line += "  " + ui.Dim("▸ "+benchmarkResults[i].String())
 			}
+			tags := []string{}
 			if !supported {
-				line += " ⚠️"
+				tags = append(tags, "⚠️")
 			}
-			fmt.Println(line)
+			ui.Item(i+1, line, tags...)
 		}
-		fmt.Print("  ─────────────────────────────────────\n")
+		ui.Divider()
 
 		if benchmarkResults == nil {
-			fmt.Printf("  [1-%d] выбор, 'b' бенчмарк: ", len(entries))
+			fmt.Printf("  [1-%d] выбор, 'b' бенчмарк, 'r' обновить, 's' сменить подписку: ", len(entries))
 		} else {
 			fmt.Printf("  Выберите номер (1-%d): ", len(entries))
 		}
 
 		input, err := reader.ReadString('\n')
 		if err != nil {
-			fmt.Println("  ❌ Ошибка ввода")
+			ui.Error("Ошибка ввода")
 			continue
 		}
 
 		input = strings.TrimSpace(input)
 
 		if strings.EqualFold(input, "b") {
-			fmt.Print("  ⏳ Замер latency...")
+			ui.Progress("Замер latency")
 			start := time.Now()
 			benchmarkResults = RunBenchmark(entries, 2*time.Second)
-			fmt.Printf(" готово (%.1fs)\n", time.Since(start).Seconds())
+			ui.ClearLine()
+			ui.Success(fmt.Sprintf("готово (%.1fs)", time.Since(start).Seconds()))
 			continue
+		}
+
+		if strings.EqualFold(input, "r") {
+			ui.Progress("Обновление подписки")
+			newEntries, err := Fetch(subURL)
+			if err != nil {
+				ui.ClearLine()
+				ui.Error(fmt.Sprintf("Ошибка: %v", err))
+				continue
+			}
+			entries = newEntries
+			benchmarkResults = nil
+			ui.ClearLine()
+			ui.Success(fmt.Sprintf("Подписка обновлена: %d серверов", len(entries)))
+			continue
+		}
+
+		if strings.EqualFold(input, "s") {
+			return nil
 		}
 
 		idx, err := strconv.Atoi(input)
 		if err != nil || idx < 1 || idx > len(entries) {
-			fmt.Println("  ❌ Некорректный номер. Попробуйте снова.")
+			ui.Error("Некорректный номер. Попробуйте снова.")
 			continue
 		}
 
 		selected := &entries[idx-1]
 		if !supportedProtocols[selected.Protocol] {
-			fmt.Printf("  ⚠️ Протокол %s не поддерживается. Выберите другой.\n", selected.Protocol)
+			ui.Warn(fmt.Sprintf("Протокол %s не поддерживается. Выберите другой.", selected.Protocol))
 			continue
 		}
 
-		fmt.Printf("  ✅ Выбран: %s (%s:%d)\n", selected.Protocol, selected.Address, selected.Port)
+		ui.Success(fmt.Sprintf("Выбран: %s (%s:%d)", selected.Protocol, selected.Address, selected.Port))
 		return selected
 	}
 }

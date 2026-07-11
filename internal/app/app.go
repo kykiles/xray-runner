@@ -50,7 +50,7 @@ func (a *App) resolveOutbound(ctx context.Context) (json.RawMessage, error) {
 		}
 		slog.Info("subscription loaded", "servers", len(entries))
 
-		selected := subscription.ShowMenu(entries)
+		selected := subscription.ShowMenu(entries, a.cfg.SubscriptionURL)
 		a.printSubEntryDetails(selected)
 		resolveServer(selected.Address)
 
