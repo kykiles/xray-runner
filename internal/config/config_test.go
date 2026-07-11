@@ -7,7 +7,7 @@ import (
 
 func TestLoadDefaults(t *testing.T) {
 	os.Clearenv()
-	os.Setenv("VLESS_URL", "vless://uuid@host:443")
+	_ = os.Setenv("VLESS_URL", "vless://uuid@host:443")
 
 	cfg, err := Load()
 	if err != nil {
@@ -47,7 +47,7 @@ func TestLoadMissingURLs(t *testing.T) {
 
 func TestLoadSubscriptionURL(t *testing.T) {
 	os.Clearenv()
-	os.Setenv("SUBSCRIPTION_URL", "https://example.com/sub")
+	_ = os.Setenv("SUBSCRIPTION_URL", "https://example.com/sub")
 
 	cfg, err := Load()
 	if err != nil {
@@ -60,12 +60,12 @@ func TestLoadSubscriptionURL(t *testing.T) {
 
 func TestLoadCustomValues(t *testing.T) {
 	os.Clearenv()
-	os.Setenv("VLESS_URL", "vless://u@h:1")
-	os.Setenv("LOG_ENABLED", "true")
-	os.Setenv("LOG_LEVEL", "debug")
-	os.Setenv("LOG_FILE", "custom.log")
-	os.Setenv("MASK_CREDENTIALS", "false")
-	os.Setenv("XRAY_LOG_LEVEL", "debug")
+	_ = os.Setenv("VLESS_URL", "vless://u@h:1")
+	_ = os.Setenv("LOG_ENABLED", "true")
+	_ = os.Setenv("LOG_LEVEL", "debug")
+	_ = os.Setenv("LOG_FILE", "custom.log")
+	_ = os.Setenv("MASK_CREDENTIALS", "false")
+	_ = os.Setenv("XRAY_LOG_LEVEL", "debug")
 
 	cfg, err := Load()
 	if err != nil {
@@ -90,8 +90,8 @@ func TestLoadCustomValues(t *testing.T) {
 
 func TestLoadBadBoolFallback(t *testing.T) {
 	os.Clearenv()
-	os.Setenv("VLESS_URL", "vless://u@h:1")
-	os.Setenv("LOG_ENABLED", "notabool")
+	_ = os.Setenv("VLESS_URL", "vless://u@h:1")
+	_ = os.Setenv("LOG_ENABLED", "notabool")
 
 	cfg, err := Load()
 	if err != nil {
@@ -104,8 +104,8 @@ func TestLoadBadBoolFallback(t *testing.T) {
 
 func TestLoadLogLevelToLower(t *testing.T) {
 	os.Clearenv()
-	os.Setenv("VLESS_URL", "vless://u@h:1")
-	os.Setenv("LOG_LEVEL", "WARN")
+	_ = os.Setenv("VLESS_URL", "vless://u@h:1")
+	_ = os.Setenv("LOG_LEVEL", "WARN")
 
 	cfg, err := Load()
 	if err != nil {
