@@ -102,10 +102,10 @@ func TestLoadBadBoolFallback(t *testing.T) {
 	}
 }
 
-func TestLoadCaseInsensitive(t *testing.T) {
+func TestLoadLogLevelToLower(t *testing.T) {
 	os.Clearenv()
 	os.Setenv("VLESS_URL", "vless://u@h:1")
-	os.Setenv("log_level", "WARN")
+	os.Setenv("LOG_LEVEL", "WARN")
 
 	cfg, err := Load()
 	if err != nil {

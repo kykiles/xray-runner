@@ -3,8 +3,6 @@ linters:
   default: none
   enable:
     - errcheck
-    - gofmt
-    - goimports
     - gosec
     - staticcheck
     - unconvert

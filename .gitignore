@@ -10,6 +10,9 @@ error.txt
 myxray.exe
 *.exe
 
+# Test coverage output
+*.out
+
 # Xray dependencies (download separately)
 xray.exe
 geoip.dat
