@@ -1,0 +1,15 @@
+{
+  "tag": "proxy",
+  "protocol": "shadowsocks",
+  "settings": {
+    "servers": [
+      {
+        "address": "ss.example.com",
+        "port": 8443,
+        "method": "aes-256-gcm",
+        "password": "secret",
+        "level": 0
+      }
+    ]
+  }
+}

@@ -1,0 +1,45 @@
+# Secrets
+.env
+
+# Generated runtime files
+xray_config.json
+xray-runner.log
+error.txt
+
+# Build output
+myxray.exe
+*.exe
+
+# Test coverage output
+*.out
+
+# Xray dependencies (download separately)
+xray.exe
+geoip.dat
+geosite.dat
+wintun.dll
+
+# Distribution bundles
+xray_linux/
+xray_windows/
+
+# Go build cache
+go.work
+go.work.sum
+
+# OS files
+Thumbs.db
+.DS_Store
+
+IMPLEMENTATION.md
+PLAN.md
+AGENTS.md
+PROJECT.md
+.opencode
+.superpowers/
+
+# OpenCode/Superpowers generated docs
+docs/superpowers/
+
+# Subscription URLs
+subscriptions.txt

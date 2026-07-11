@@ -1,0 +1,20 @@
+linters-settings:
+  errcheck:
+    exclude-functions:
+      - (io.Closer).Close
+      - (*os.File).Close
+  staticcheck:
+    checks:
+      - all
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - gofmt
+    - goimports
+    - gosec
+    - staticcheck
+    - unconvert
+    - unused
+issues:
+  exclude-use-default: false
