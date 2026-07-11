@@ -28,7 +28,7 @@ GOOS=linux task build               # кросс-сборка под Linux
 xray-runner(.exe)   — собранный Go-бинарник
 xray(.exe)          — Xray-core (скачать с github.com/XTLS/Xray-core/releases)
 template.json       — конфиг-шаблон (inbounds, DNS, routing)
-.env                — VLESS_URL или SUBSCRIPTION_URL
+.env                — настройки (MODE, LOG_LEVEL, MASK_CREDENTIALS и др.)
 geoip.dat           — база GeoIP (из релиза Xray-core)
 geosite.dat         — база GeoSite (из релиза Xray-core)
 ```
@@ -41,10 +41,8 @@ geosite.dat         — база GeoSite (из релиза Xray-core)
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
-| `VLESS_URL` | — | VLESS или ss:// ссылка (обязательно, если нет `SUBSCRIPTION_URL`/`SUBSCRIPTION_REMOTE_URL`) |
-| `SUBSCRIPTION_URL` | — | URL подписки (обязательно, если нет `VLESS_URL`/`SUBSCRIPTION_REMOTE_URL`). Приоритет выше, чем `VLESS_URL` |
-| `SUBSCRIPTION_REMOTE_URL` | — | Публичная ссылка на Google Doc с URL подписки. При каждом запуске скачивается содержимое и используется как URL подписки. Приоритет выше, чем `SUBSCRIPTION_URL` |
-| `SUBSCRIPTION_SECRET` | — | Пароль для AES-256-GCM шифрования URL подписки в Google Doc. Защищает ссылку от посторонних. Для шифрования: `xray-runner --encrypt "URL"` |
+| `VLESS_URL` | — | VLESS или ss:// ссылка (опционально, fallback если нет `subscriptions.txt`) |
+| `SUBSCRIPTION_URL` | — | URL подписки (опционально, fallback если нет `subscriptions.txt`). Приоритет выше, чем `VLESS_URL` |
 | `MODE` | `proxy` | `proxy` (HTTP+SOCKS5) или `tun` (VPN) |
 | `LOG_ENABLED` | `false` | Писать лог в файл |
 | `LOG_FILE` | `xray-runner.log` | Путь к лог-файлу |
@@ -71,7 +69,7 @@ geosite.dat         — база GeoSite (из релиза Xray-core)
 ## Поведение
 
 - Разбирает VLESS (TCP/gRPC/WS + REALITY/TLS/none), Shadowsocks, VMess, Hysteria2
-- Подписка: при `SUBSCRIPTION_URL` показывает меню выбора сервера
+- Подписки: интерактивный выбор из `subscriptions.txt`, с возможностью добавить/удалить/обновить
 - DNS-резолв → генерация `xray_config.json` → старт Xray → проверка портов → тестовый запрос → включение системного прокси/TUN
 - Auto-restart: до 5 попыток с exponential backoff при падении Xray
 - Health check: каждые 15с проверка портов, рестарт при 3 ошибках подряд
@@ -90,6 +88,7 @@ internal/
   xray/      — запуск/мониторинг/рестарт Xray
   xraycfg/   — генерация Xray JSON (VLESS, SS, VMess, Hysteria2)
   system/    — системный прокси и kill switch (Windows: reg+netsh, Linux: gsettings+kde+iptables)
-  subscription/ — загрузка и парсинг подписок
+  subscription/ — загрузка, парсинг и хранение подписок (store.go + menu.go)
+  ui/           — ANSI-стилизация вывода (Title, Item, Success, Error, ...)
 template.json  — базовый конфиг Xray
 ```
