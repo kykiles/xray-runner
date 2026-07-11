@@ -183,11 +183,20 @@ func TestBenchmarkResultString(t *testing.T) {
 }
 
 func TestRunBenchmarkTimeoutPropagation(t *testing.T) {
-	entry := SubEntry{Address: "10.255.255.1", Port: 443}
+	// Override the dialer to fail deterministically with a timeout error,
+	// honouring the timeout passed by RunBenchmark. Avoids relying on real
+	// network behaviour (blackhole IPs), which is flaky in CI.
+	orig := dialTimeout
+	defer func() { dialTimeout = orig }()
 
-	start := time.Now()
+	var gotTimeout time.Duration
+	dialTimeout = func(network, address string, timeout time.Duration) (net.Conn, error) {
+		gotTimeout = timeout
+		return nil, &net.OpError{Op: "dial", Err: &timeoutError{}}
+	}
+
+	entry := SubEntry{Address: "10.255.255.1", Port: 443}
 	results := RunBenchmark([]SubEntry{entry}, 200*time.Millisecond)
-	elapsed := time.Since(start)
 
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
@@ -195,10 +204,18 @@ func TestRunBenchmarkTimeoutPropagation(t *testing.T) {
 	if results[0].Error == nil {
 		t.Fatal("expected timeout error")
 	}
-	if !strings.Contains(results[0].Error.Error(), "timeout") && !strings.Contains(results[0].Error.Error(), "deadline") {
-		t.Logf("expected timeout-like error, got: %v", results[0].Error)
+	if gotTimeout != 200*time.Millisecond {
+		t.Errorf("timeout not propagated to dialer: got %v, want 200ms", gotTimeout)
 	}
-	if elapsed >= 2*time.Second {
-		t.Errorf("benchmark took too long: %v, want ~200ms", elapsed)
+	if !strings.Contains(results[0].Error.Error(), "timeout") {
+		t.Errorf("expected timeout-like error, got: %v", results[0].Error)
 	}
 }
+
+// timeoutError is a net.Error whose Timeout() reports true, matching how the
+// standard library signals dial timeouts.
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "i/o timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }

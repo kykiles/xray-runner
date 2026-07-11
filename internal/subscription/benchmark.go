@@ -10,6 +10,10 @@ import (
 
 var ErrProtocolNotSupported = errors.New("protocol not supported for TCP ping")
 
+// dialTimeout is overridable in tests to exercise timeout handling
+// deterministically without touching the real network.
+var dialTimeout = net.DialTimeout
+
 type BenchmarkResult struct {
 	Index   int
 	Latency time.Duration
@@ -28,7 +32,7 @@ func RunBenchmark(entries []SubEntry, timeout time.Duration) []BenchmarkResult {
 			addr := net.JoinHostPort(entries[idx].Address, fmt.Sprintf("%d", entries[idx].Port))
 
 			start := time.Now()
-			conn, err := net.DialTimeout("tcp", addr, timeout)
+			conn, err := dialTimeout("tcp", addr, timeout)
 			if err != nil {
 				results[idx] = BenchmarkResult{Index: idx, Error: err}
 				return
