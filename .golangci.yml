@@ -1,25 +1,20 @@
-version: "2"
+linters-settings:
+  errcheck:
+    exclude-functions:
+      - (io.Closer).Close
+      - (*os.File).Close
+  staticcheck:
+    checks:
+      - all
 linters:
-  default: none
+  disable-all: true
   enable:
     - errcheck
+    - gofmt
+    - goimports
     - gosec
     - staticcheck
     - unconvert
     - unused
-  settings:
-    errcheck:
-      exclude-functions:
-        - (io.Closer).Close
-        - (*os.File).Close
-    staticcheck:
-      checks:
-        - all
-  exclusions:
-    presets:
-      - comments
-      - stdlib
-formatters:
-  enable:
-    - gofmt
-    - goimports
+issues:
+  exclude-use-default: false

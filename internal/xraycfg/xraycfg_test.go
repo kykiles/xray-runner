@@ -140,7 +140,9 @@ func runTests(t *testing.T, tests []testCase) {
 				t.Fatalf("read golden %s: %v (run with -update to create)", tc.golden, err)
 			}
 
-			if strings.TrimSpace(string(got)) != strings.TrimSpace(string(want)) {
+			gotStr := strings.ReplaceAll(strings.TrimSpace(string(got)), "\r\n", "\n")
+			wantStr := strings.ReplaceAll(strings.TrimSpace(string(want)), "\r\n", "\n")
+			if gotStr != wantStr {
 				t.Errorf("mismatch for %s\n  got:  %s\n  want: %s", tc.name, string(got), string(want))
 			}
 		})
