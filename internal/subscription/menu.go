@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -19,11 +20,38 @@ var supportedProtocols = map[string]bool{
 	"hysteria":  true,
 }
 
-func ShowMenu(entries []SubEntry, subURL string) *SubEntry {
-	reader := bufio.NewReader(os.Stdin)
+func readStdin(ctx context.Context) (string, error) {
+	ch := make(chan string, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		reader := bufio.NewReader(os.Stdin)
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			errCh <- err
+		} else {
+			ch <- input
+		}
+	}()
+
+	select {
+	case input := <-ch:
+		return strings.TrimSpace(input), nil
+	case err := <-errCh:
+		return "", err
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func ShowMenu(ctx context.Context, entries []SubEntry, subURL string) *SubEntry {
 	var benchmarkResults []BenchmarkResult
 
 	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+
 		ui.Title("Серверы")
 		for i, e := range entries {
 			hostPort := fmt.Sprintf("%s:%d", e.Address, e.Port)
@@ -50,13 +78,14 @@ func ShowMenu(entries []SubEntry, subURL string) *SubEntry {
 			fmt.Printf("  Выберите номер (1-%d): ", len(entries))
 		}
 
-		input, err := reader.ReadString('\n')
+		input, err := readStdin(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			ui.Error("Ошибка ввода")
 			continue
 		}
-
-		input = strings.TrimSpace(input)
 
 		if strings.EqualFold(input, "b") {
 			ui.Progress("Замер latency")

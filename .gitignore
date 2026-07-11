@@ -31,6 +31,11 @@ IMPLEMENTATION.md
 PLAN.md
 AGENTS.md
 PROJECT.md
+.opencode
+.superpowers/
+
+# OpenCode/Superpowers generated docs
+docs/superpowers/
 
 # Subscription URLs
 subscriptions.txt

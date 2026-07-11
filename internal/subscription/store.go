@@ -54,6 +54,52 @@ func LoadSubscriptions() ([]NamedSubscription, error) {
 	return subs, nil
 }
 
+func RemoveSubscription(index int) error {
+	data, err := os.ReadFile(subscriptionsFile)
+	if err != nil {
+		return fmt.Errorf("read subscriptions: %w", err)
+	}
+
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+
+	type entry struct {
+		comment string
+		url     string
+	}
+
+	var entries []entry
+	var pendingComment string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			pendingComment = line
+			continue
+		}
+		entries = append(entries, entry{comment: pendingComment, url: line})
+		pendingComment = ""
+	}
+
+	if index < 0 || index >= len(entries) {
+		return fmt.Errorf("invalid index %d (max %d)", index, len(entries)-1)
+	}
+
+	entries = append(entries[:index], entries[index+1:]...)
+
+	var sb strings.Builder
+	for _, e := range entries {
+		if e.comment != "" {
+			sb.WriteString(e.comment + "\n")
+		}
+		sb.WriteString(e.url + "\n")
+	}
+
+	return os.WriteFile(subscriptionsFile, []byte(sb.String()), 0644)
+}
+
 func SaveSubscription(rawURL string) error {
 	f, err := os.OpenFile(subscriptionsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {

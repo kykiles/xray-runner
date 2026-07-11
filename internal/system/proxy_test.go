@@ -22,11 +22,7 @@ func setupRegMock(t *testing.T, mockScript string) {
 }
 
 func TestReadProxyStateDisabled(t *testing.T) {
-	mockScript := `@echo off
-echo.
-echo HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
-echo     ProxyEnable    REG_DWORD    0x0
-`
+	mockScript := "@echo off\r\necho.\r\necho HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\r\necho     ProxyEnable    REG_DWORD    0x0\r\n"
 	setupRegMock(t, mockScript)
 
 	s := ReadProxyState()
@@ -36,13 +32,7 @@ echo     ProxyEnable    REG_DWORD    0x0
 }
 
 func TestReadProxyStateEnabled(t *testing.T) {
-	mockScript := `@echo off
-echo.
-echo HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
-echo     ProxyEnable    REG_DWORD    0x1
-echo     ProxyServer    REG_SZ       127.0.0.1:8888
-echo     ProxyOverride  REG_SZ       <-loopback>;*.local
-`
+	mockScript := "@echo off\r\necho.\r\necho HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\r\nif /i \"%4\"==\"ProxyEnable\" echo     ProxyEnable    REG_DWORD    0x1\r\nif /i \"%4\"==\"ProxyServer\" echo     ProxyServer    REG_SZ       127.0.0.1:8888\r\nif /i \"%4\"==\"ProxyOverride\" echo     ProxyOverride  REG_SZ       ^<-loopback^>;*.local\r\n"
 	setupRegMock(t, mockScript)
 
 	s := ReadProxyState()

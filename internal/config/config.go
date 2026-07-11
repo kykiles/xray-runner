@@ -22,7 +22,7 @@ type Config struct {
 }
 
 func Load(filenames ...string) (*Config, error) {
-	if err := godotenv.Load(filenames...); err != nil {
+	if err := godotenv.Load(filenames...); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("load .env: %w", err)
 	}
 
@@ -40,10 +40,6 @@ func Load(filenames ...string) (*Config, error) {
 
 	if cfg.Mode != "proxy" && cfg.Mode != "tun" {
 		return nil, fmt.Errorf("MODE must be 'proxy' or 'tun', got %q", cfg.Mode)
-	}
-
-	if cfg.VlessURL == "" && cfg.SubscriptionURL == "" {
-		return nil, fmt.Errorf("either VLESS_URL or SUBSCRIPTION_URL must be set in .env")
 	}
 
 	return cfg, nil

@@ -70,11 +70,9 @@ func TestRunnerRunWithRetry(t *testing.T) {
 	os.WriteFile(configPath, []byte("{}"), 0644)
 
 	r := New(mockBinary, configPath)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
-	// Should give up after 5 retries for a constantly crashing binary
-	err := r.RunWithRetry(ctx, 3)
+	// Should give up after 3 retries for a constantly crashing binary
+	err := r.RunWithRetry(context.Background(), 3)
 	if err == nil {
 		t.Fatal("expected error from RunWithRetry, got nil")
 	}

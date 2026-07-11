@@ -33,9 +33,15 @@ func TestLoadDefaults(t *testing.T) {
 func TestLoadMissingURLs(t *testing.T) {
 	os.Clearenv()
 
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for missing VLESS_URL/SUBSCRIPTION_URL, got nil")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.VlessURL != "" {
+		t.Errorf("VlessURL = %q, want empty", cfg.VlessURL)
+	}
+	if cfg.SubscriptionURL != "" {
+		t.Errorf("SubscriptionURL = %q, want empty", cfg.SubscriptionURL)
 	}
 }
 

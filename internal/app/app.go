@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -48,7 +49,7 @@ func (a *App) resolveOutbound(ctx context.Context) (json.RawMessage, error) {
 		return nil, fmt.Errorf("load subscriptions: %w", err)
 	}
 
-	if len(subs) == 0 {
+	if len(subs) == 0 && (a.cfg.SubscriptionURL != "" || a.cfg.VlessURL != "") {
 		return a.resolveLegacyOutbound(ctx)
 	}
 
@@ -69,7 +70,12 @@ func (a *App) resolveOutbound(ctx context.Context) (json.RawMessage, error) {
 
 		outbound, err := a.fetchAndSelectServer(ctx, subURL)
 		if err != nil {
-			ui.Error(err.Error())
+			if errors.Is(err, context.Canceled) {
+				return nil, err
+			}
+			if err.Error() != "switch subscription" {
+				ui.Error(err.Error())
+			}
 			continue
 		}
 		return outbound, nil
@@ -78,20 +84,22 @@ func (a *App) resolveOutbound(ctx context.Context) (json.RawMessage, error) {
 
 func (a *App) resolveLegacyOutbound(ctx context.Context) (json.RawMessage, error) {
 	if a.cfg.SubscriptionURL != "" {
-		fmt.Println("📡 Загрузка подписки...")
-		entries, err := subscription.Fetch(a.cfg.SubscriptionURL)
-		if err != nil {
-			return nil, fmt.Errorf("subscription: %w", err)
-		}
-		slog.Info("subscription loaded", "servers", len(entries))
+		for {
+			fmt.Println("📡 Загрузка подписки...")
+			entries, err := subscription.Fetch(a.cfg.SubscriptionURL)
+			if err != nil {
+				return nil, fmt.Errorf("subscription: %w", err)
+			}
+			slog.Info("subscription loaded", "servers", len(entries))
 
-		selected := subscription.ShowMenu(entries, a.cfg.SubscriptionURL)
-		if selected == nil {
-			return nil, fmt.Errorf("subscription selection cancelled")
+			selected := subscription.ShowMenu(ctx, entries, a.cfg.SubscriptionURL)
+			if selected == nil {
+				continue
+			}
+			a.printSubEntryDetails(selected)
+			resolveServer(selected.Address)
+			return subscription.BuildOutboundJSON(selected)
 		}
-		a.printSubEntryDetails(selected)
-		resolveServer(selected.Address)
-		return subscription.BuildOutboundJSON(selected)
 	}
 
 	u, err := url.Parse(a.cfg.VlessURL)
@@ -122,35 +130,55 @@ func (a *App) resolveLegacyOutbound(ctx context.Context) (json.RawMessage, error
 func (a *App) selectSubscription(subs []subscription.NamedSubscription) string {
 	for {
 		ui.Title("Подписки")
+		fmt.Printf("  %s ✚%s  %s\n", ui.ColorGreen, ui.ColorReset, "Добавить новую")
 		for i, s := range subs {
 			ui.Item(i+1, fmt.Sprintf("%-30s  %s", s.Name, ui.Dim(s.URL)))
 		}
-		ui.Item(len(subs)+1, ui.Colored(ui.ColorGreen, "✚ Добавить новую"))
 		fmt.Printf("  %s%2d.%s  %s\n", ui.ColorCyan, 0, ui.ColorReset, "Выход")
 		ui.Divider()
 
-		input, err := ui.StyledInput(fmt.Sprintf("Выберите [0-%d]", len(subs)+1))
+		prompt := fmt.Sprintf("[+, 1-%d, 0 - выход, d - удалить]", len(subs))
+		input, err := ui.StyledInput(prompt)
 		if err != nil {
 			ui.Error("Ошибка ввода")
 			continue
 		}
 
-		idx, err := strconv.Atoi(input)
-		if err != nil || idx < 0 || idx > len(subs)+1 {
-			ui.Error("Некорректный номер")
-			continue
-		}
-
-		if idx == 0 {
-			os.Exit(0)
-		}
-
-		if idx == len(subs)+1 {
+		switch {
+		case input == "+":
 			return ""
+		case strings.EqualFold(input, "d"):
+			if len(subs) == 0 {
+				ui.Error("Нет подписок для удаления")
+				continue
+			}
+			delInput, err := ui.StyledInput(fmt.Sprintf("Введите номер для удаления [1-%d]", len(subs)))
+			if err != nil {
+				continue
+			}
+			delIdx, err := strconv.Atoi(delInput)
+			if err != nil || delIdx < 1 || delIdx > len(subs) {
+				ui.Error("Некорректный номер")
+				continue
+			}
+			if err := subscription.RemoveSubscription(delIdx - 1); err != nil {
+				ui.Error(fmt.Sprintf("Ошибка удаления: %v", err))
+				continue
+			}
+			ui.Success(fmt.Sprintf("Подписка «%s» удалена", subs[delIdx-1].Name))
+			subs, _ = subscription.LoadSubscriptions()
+			continue
+		case input == "0":
+			os.Exit(0)
+		default:
+			idx, err := strconv.Atoi(input)
+			if err != nil || idx < 1 || idx > len(subs) {
+				ui.Error("Некорректный номер")
+				continue
+			}
+			ui.Success(fmt.Sprintf("Подписка: %s", subs[idx-1].Name))
+			return subs[idx-1].URL
 		}
-
-		ui.Success(fmt.Sprintf("Подписка: %s", subs[idx-1].Name))
-		return subs[idx-1].URL
 	}
 }
 
@@ -203,8 +231,11 @@ func (a *App) fetchAndSelectServer(ctx context.Context, subURL string) (json.Raw
 	slog.Info("subscription loaded", "servers", len(entries))
 	ui.Success(fmt.Sprintf("Загружено %d серверов", len(entries)))
 
-	selected := subscription.ShowMenu(entries, subURL)
+	selected := subscription.ShowMenu(ctx, entries, subURL)
 	if selected == nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("switch subscription")
 	}
 

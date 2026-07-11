@@ -58,25 +58,32 @@ func TestBuildSSOutbound(t *testing.T) {
 }
 
 func TestBuildVLESSOutboundErrors(t *testing.T) {
-	tests := []struct {
-		name   string
-		rawURL string
-	}{
-		{"no_port", "vless://uuid@example.com"},
-		{"ipv6", "vless://uuid@[2001:db8::1]:443"},
-		{"non_numeric_port", "vless://uuid@example.com:abc"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			u, err := url.Parse(tc.rawURL)
-			if err != nil {
-				t.Fatalf("parse URL: %v", err)
-			}
-			if _, err := BuildVLESSOutbound(u); err == nil {
-				t.Fatal("expected error, got nil")
-			}
-		})
-	}
+	t.Run("no_port", func(t *testing.T) {
+		u, err := url.Parse("vless://uuid@example.com")
+		if err != nil {
+			t.Fatalf("parse URL: %v", err)
+		}
+		if _, err := BuildVLESSOutbound(u); err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("ipv6", func(t *testing.T) {
+		u, err := url.Parse("vless://uuid@[2001:db8::1]:443")
+		if err != nil {
+			t.Fatalf("parse URL: %v", err)
+		}
+		if _, err := BuildVLESSOutbound(u); err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("non_numeric_port", func(t *testing.T) {
+		u := &url.URL{Scheme: "vless", Host: "example.com:abc", User: url.User("uuid")}
+		if _, err := BuildVLESSOutbound(u); err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
 }
 
 func TestBuildSSOutboundErrors(t *testing.T) {
