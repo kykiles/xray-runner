@@ -12,6 +12,8 @@ myxray.exe
 
 # Test coverage output
 *.out
+cov
+out
 
 # Xray dependencies (download separately)
 xray.exe
@@ -43,3 +45,6 @@ docs/superpowers/
 
 # Subscription URLs
 subscriptions.txt
+
+# Per-machine device identifier (generated on first run)
+hwid.txt
