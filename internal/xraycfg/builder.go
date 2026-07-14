@@ -61,31 +61,39 @@ func validateTemplate(cfg *XrayConfig) error {
 	return nil
 }
 
+// AddCatchAllRule appends a catch-all rule sending all tcp/udp traffic to the
+// "proxy" outbound. Shared by MergeConfig and the benchmarker so the routing
+// logic lives in exactly one place (A-3).
+func AddCatchAllRule(routing json.RawMessage) json.RawMessage {
+	var r map[string]interface{}
+	if routing != nil {
+		json.Unmarshal(routing, &r)
+	}
+	if r == nil {
+		r = map[string]interface{}{}
+	}
+	rules, _ := r["rules"].([]interface{})
+	rules = append(rules, map[string]interface{}{
+		"type": "field", "outboundTag": "proxy", "network": "tcp,udp",
+	})
+	r["rules"] = rules
+	modified, _ := json.Marshal(r)
+	return modified
+}
+
+// MergeConfig injects the proxy outbound and catch-all route. Log is left unset
+// on purpose: the caller sets the loglevel (Q-5), so MergeConfig no longer
+// writes a value that would only be overwritten.
 func MergeConfig(tc *XrayConfig, proxyOutbound json.RawMessage) *XrayConfig {
 	outbounds := []json.RawMessage{proxyOutbound}
 	for _, ob := range tc.Outbounds {
 		outbounds = append(outbounds, ob)
 	}
 
-	var routing map[string]interface{}
-	if tc.Routing != nil {
-		json.Unmarshal(tc.Routing, &routing)
-	}
-	if routing == nil {
-		routing = map[string]interface{}{}
-	}
-	rules, _ := routing["rules"].([]interface{})
-	rules = append(rules, map[string]interface{}{
-		"type": "field", "outboundTag": "proxy", "network": "tcp,udp",
-	})
-	routing["rules"] = rules
-	modifiedRouting, _ := json.Marshal(routing)
-
 	return &XrayConfig{
-		Log: &LogConfig{Loglevel: "warning"},
-		DNS: tc.DNS,
-		Inbounds: tc.Inbounds,
+		DNS:       tc.DNS,
+		Inbounds:  tc.Inbounds,
 		Outbounds: outbounds,
-		Routing: modifiedRouting,
+		Routing:   AddCatchAllRule(tc.Routing),
 	}
 }

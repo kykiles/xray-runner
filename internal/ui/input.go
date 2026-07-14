@@ -9,6 +9,10 @@ import (
 	"golang.org/x/term"
 )
 
+// ErrInterrupted is returned by ReadKey when the user presses Ctrl+C, so the
+// caller can unwind to main for a single clean exit instead of os.Exit (R-4).
+var ErrInterrupted = fmt.Errorf("interrupted")
+
 func StyledInput(prompt string) (string, error) {
 	fmt.Printf("  %s▸%s %s: ", ColorCyan, ColorReset, prompt)
 	reader := bufio.NewReader(os.Stdin)
@@ -35,7 +39,7 @@ func ReadKey() (string, error) {
 		b[0] = '\n'
 	}
 	if b[0] == 0x03 {
-		os.Exit(0)
+		return "", ErrInterrupted
 	}
 	return string(b[0]), nil
 }

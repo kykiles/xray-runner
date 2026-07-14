@@ -38,7 +38,3 @@ func (pm *ProxyManager) Enable(port int) error {
 	}
 	return nil
 }
-
-func (pm *ProxyManager) Disable() error {
-	return execReg("add", regKey, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "0", "/f")
-}

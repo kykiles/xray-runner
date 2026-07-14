@@ -85,7 +85,7 @@ func parseXrayJSON(obj map[string]interface{}) SubEntry {
 		SNI:         getString(obj, "sni"),
 		Fingerprint: getString(obj, "fp"),
 		PublicKey:   getString(obj, "publicKey"),
-		ShortID:     getStringFirst(obj, "shortId", "sid", "shortID", "short_id"),
+		ShortID:     firstNonEmpty(getString(obj, "shortId"), getString(obj, "sid"), getString(obj, "shortID"), getString(obj, "short_id")),
 		ALPN:        getString(obj, "alpn"),
 		ServiceName: getString(obj, "serviceName"),
 		Method:      getString(obj, "method"),
@@ -264,13 +264,7 @@ func parseVlessURL(u *url.URL, e *SubEntry) {
 	if e.Network == "" {
 		e.Network = "tcp"
 	}
-	if u.Fragment != "" {
-		if decoded, err := url.QueryUnescape(u.Fragment); err == nil {
-			e.Remarks = decoded
-		} else {
-			e.Remarks = u.Fragment
-		}
-	}
+	e.Remarks = decodeFragment(u)
 
 	if e.Security == "reality" && e.ShortID == "" {
 		slog.Debug("REALITY URL has empty shortId (server may accept any)",
@@ -289,11 +283,7 @@ func parseSSURL(u *url.URL, e *SubEntry) error {
 		e.Address = u.Host
 	}
 
-	b64 := u.User.Username()
-	if m := len(b64) % 4; m != 0 {
-		b64 += strings.Repeat("=", 4-m)
-	}
-	decoded, err := base64.StdEncoding.DecodeString(b64)
+	decoded, err := b64DecodeAnyPadding(u.User.Username())
 	if err != nil {
 		return fmt.Errorf("decode ss base64 userinfo: %w", err)
 	}
@@ -303,13 +293,7 @@ func parseSSURL(u *url.URL, e *SubEntry) error {
 	}
 	e.Method = parts[0]
 	e.Password = parts[1]
-	if u.Fragment != "" {
-		if decoded, err := url.QueryUnescape(u.Fragment); err == nil {
-			e.Remarks = decoded
-		} else {
-			e.Remarks = u.Fragment
-		}
-	}
+	e.Remarks = decodeFragment(u)
 	return nil
 }
 
@@ -326,11 +310,7 @@ func parseVMessURL(u *url.URL, e *SubEntry) {
 		}
 	}
 
-	if m := len(b64) % 4; m != 0 {
-		b64 += strings.Repeat("=", 4-m)
-	}
-
-	decoded, err := base64.StdEncoding.DecodeString(b64)
+	decoded, err := b64DecodeAnyPadding(b64)
 	if err == nil {
 		var vmessObj map[string]interface{}
 		if err := json.Unmarshal(decoded, &vmessObj); err == nil {
@@ -369,28 +349,36 @@ func parseHysteria2URL(u *url.URL, e *SubEntry) {
 		e.Down = e.Down + " mbps"
 	}
 
-	if u.Fragment != "" {
-		if decoded, err := url.QueryUnescape(u.Fragment); err == nil {
-			e.Remarks = decoded
-		} else {
-			e.Remarks = u.Fragment
-		}
+	e.Remarks = decodeFragment(u)
+}
+
+// decodeFragment returns the URL fragment with percent-encoding removed,
+// falling back to the raw fragment when unescaping fails (Q-1).
+func decodeFragment(u *url.URL) string {
+	if u.Fragment == "" {
+		return ""
 	}
+	if decoded, err := url.QueryUnescape(u.Fragment); err == nil {
+		return decoded
+	}
+	return u.Fragment
+}
+
+// b64DecodeAnyPadding decodes base64 in either the standard or URL-safe
+// alphabet, with or without padding — subscription sources use all four
+// combinations (Q-1).
+func b64DecodeAnyPadding(s string) ([]byte, error) {
+	s = strings.TrimRight(s, "=")
+	if d, err := base64.RawStdEncoding.DecodeString(s); err == nil {
+		return d, nil
+	}
+	return base64.RawURLEncoding.DecodeString(s)
 }
 
 func getString(obj map[string]interface{}, key string) string {
 	if v, ok := obj[key]; ok {
 		if s, ok := v.(string); ok {
 			return s
-		}
-	}
-	return ""
-}
-
-func getStringFirst(obj map[string]interface{}, keys ...string) string {
-	for _, k := range keys {
-		if v := getString(obj, k); v != "" {
-			return v
 		}
 	}
 	return ""

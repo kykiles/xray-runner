@@ -29,6 +29,13 @@ func RunBenchmark(entries []SubEntry, timeout time.Duration) []BenchmarkResult {
 		go func(idx int) {
 			defer wg.Done()
 
+			// A-5: hysteria2 is UDP-only, a TCP ping says nothing about it —
+			// report "n/a" instead of a misleading timeout.
+			if entries[idx].Protocol == "hysteria2" {
+				results[idx] = BenchmarkResult{Index: idx, Error: ErrProtocolNotSupported}
+				return
+			}
+
 			addr := net.JoinHostPort(entries[idx].Address, fmt.Sprintf("%d", entries[idx].Port))
 
 			start := time.Now()

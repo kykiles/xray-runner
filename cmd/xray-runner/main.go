@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -40,6 +41,13 @@ func main() {
 
 	application := app.New(cfg)
 	if err := application.Run(ctx); err != nil {
+		// R-4: user-initiated exits (quit key, Ctrl+C) are not failures; App.Run's
+		// deferred cleanup has already released proxies/firewall by this point.
+		if errors.Is(err, app.ErrUserQuit) || errors.Is(err, context.Canceled) {
+			slog.Info("session ended by user")
+			fmt.Println("\n👋 До встречи!")
+			return
+		}
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}

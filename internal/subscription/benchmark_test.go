@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -156,8 +157,10 @@ func TestRunBenchmarkMixedProtocols(t *testing.T) {
 	if results[0].Error != nil {
 		t.Errorf("entry 0 (vless): unexpected error: %v", results[0].Error)
 	}
-	if results[1].Error != nil {
-		t.Errorf("entry 1 (hysteria2): unexpected error: %v", results[1].Error)
+	// A-5: UDP-only protocols are not TCP-pingable and must report "n/a"
+	// via ErrProtocolNotSupported instead of a misleading latency/timeout.
+	if !errors.Is(results[1].Error, ErrProtocolNotSupported) {
+		t.Errorf("entry 1 (hysteria2): expected ErrProtocolNotSupported, got %v", results[1].Error)
 	}
 }
 

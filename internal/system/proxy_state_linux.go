@@ -56,24 +56,10 @@ func writeGsettings(s ProxyState) bool {
 		if exec.Command("gsettings", "set", "org.gnome.system.proxy", "mode", "manual").Run() != nil {
 			return false
 		}
-		host, port, _ := strings.Cut(s.Server, ":")
-		if host == "" {
-			host = "127.0.0.1"
-			port = "10809"
-		}
-		if exec.Command("gsettings", "set", "org.gnome.system.proxy.http", "host", host).Run() != nil {
-			return false
-		}
-		if exec.Command("gsettings", "set", "org.gnome.system.proxy.http", "port", port).Run() != nil {
-			return false
-		}
-		if exec.Command("gsettings", "set", "org.gnome.system.proxy.https", "host", host).Run() != nil {
-			return false
-		}
-		if exec.Command("gsettings", "set", "org.gnome.system.proxy.https", "port", port).Run() != nil {
-			return false
-		}
-		if err := setGSettingsIgnoreHosts(s.Overrides); err != nil {
+		if !writeGsettingsManual(s) {
+			// R-2: mode is already "manual" — roll back to "none" so the desktop
+			// isn't left pointing at a half-configured proxy.
+			exec.Command("gsettings", "set", "org.gnome.system.proxy", "mode", "none").Run()
 			return false
 		}
 	} else {
@@ -82,6 +68,29 @@ func writeGsettings(s ProxyState) bool {
 		}
 	}
 	return true
+}
+
+// writeGsettingsManual applies host/port/ignore-hosts for the already-enabled
+// manual mode; false means the caller must roll the mode back (R-2).
+func writeGsettingsManual(s ProxyState) bool {
+	host, port, _ := strings.Cut(s.Server, ":")
+	if host == "" {
+		host = "127.0.0.1"
+		port = "10809"
+	}
+	if exec.Command("gsettings", "set", "org.gnome.system.proxy.http", "host", host).Run() != nil {
+		return false
+	}
+	if exec.Command("gsettings", "set", "org.gnome.system.proxy.http", "port", port).Run() != nil {
+		return false
+	}
+	if exec.Command("gsettings", "set", "org.gnome.system.proxy.https", "host", host).Run() != nil {
+		return false
+	}
+	if exec.Command("gsettings", "set", "org.gnome.system.proxy.https", "port", port).Run() != nil {
+		return false
+	}
+	return setGSettingsIgnoreHosts(s.Overrides) == nil
 }
 
 func readKDE() (ProxyState, bool) {
@@ -105,25 +114,37 @@ func writeKDE(s ProxyState) bool {
 		if exec.Command("kwriteconfig5", "--group", "Proxy", "--key", "ProxyType", "1").Run() != nil {
 			return false
 		}
-		host, port, _ := strings.Cut(s.Server, ":")
-		if host == "" {
-			host = "127.0.0.1"
-			port = "10809"
-		}
-		proxyVal := host + ":" + port
-		if exec.Command("kwriteconfig5", "--group", "Proxy", "--key", "httpProxy", proxyVal).Run() != nil {
+		if !writeKDEManual(s) {
+			// R-2: same rollback as gsettings — don't leave ProxyType=1 with a
+			// half-configured proxy.
+			exec.Command("kwriteconfig5", "--group", "Proxy", "--key", "ProxyType", "0").Run()
 			return false
-		}
-		if exec.Command("kwriteconfig5", "--group", "Proxy", "--key", "httpsProxy", proxyVal).Run() != nil {
-			return false
-		}
-		if s.Overrides != "" {
-			if exec.Command("kwriteconfig5", "--group", "Proxy", "--key", "NoProxyFor", s.Overrides).Run() != nil {
-				return false
-			}
 		}
 	} else {
 		if exec.Command("kwriteconfig5", "--group", "Proxy", "--key", "ProxyType", "0").Run() != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// writeKDEManual applies the proxy values for the already-enabled ProxyType=1;
+// false means the caller must roll ProxyType back (R-2).
+func writeKDEManual(s ProxyState) bool {
+	host, port, _ := strings.Cut(s.Server, ":")
+	if host == "" {
+		host = "127.0.0.1"
+		port = "10809"
+	}
+	proxyVal := host + ":" + port
+	if exec.Command("kwriteconfig5", "--group", "Proxy", "--key", "httpProxy", proxyVal).Run() != nil {
+		return false
+	}
+	if exec.Command("kwriteconfig5", "--group", "Proxy", "--key", "httpsProxy", proxyVal).Run() != nil {
+		return false
+	}
+	if s.Overrides != "" {
+		if exec.Command("kwriteconfig5", "--group", "Proxy", "--key", "NoProxyFor", s.Overrides).Run() != nil {
 			return false
 		}
 	}

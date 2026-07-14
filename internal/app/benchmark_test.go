@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -15,16 +16,25 @@ import (
 	"xray-runner/internal/xraycfg"
 )
 
-func TestPortAllocator(t *testing.T) {
-	a := newPortAllocator(10810)
-	p0 := a.alloc()
-	p1 := a.alloc()
-
-	if p0.socks != 10810 || p0.http != 10910 {
-		t.Errorf("first alloc: expected (10810, 10910), got (%d, %d)", p0.socks, p0.http)
+func TestFreePortPair(t *testing.T) {
+	p, err := freePortPair()
+	if err != nil {
+		t.Fatalf("freePortPair: %v", err)
 	}
-	if p1.socks != 10811 || p1.http != 10911 {
-		t.Errorf("second alloc: expected (10811, 10911), got (%d, %d)", p1.socks, p1.http)
+	if p.socks == 0 || p.http == 0 {
+		t.Errorf("expected non-zero ports, got (%d, %d)", p.socks, p.http)
+	}
+	if p.socks == p.http {
+		t.Errorf("expected distinct ports, got %d twice", p.socks)
+	}
+	// The reported ports must actually be bindable (i.e. were released).
+	for _, port := range []int{p.socks, p.http} {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			t.Errorf("port %d not free after freePortPair: %v", port, err)
+			continue
+		}
+		ln.Close()
 	}
 }
 
@@ -45,14 +55,22 @@ func TestWaitPortReachable(t *testing.T) {
 	}()
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	if !waitPort(port, 500*time.Millisecond) {
+	if !waitPort(context.Background(), port, 500*time.Millisecond) {
 		t.Error("expected true for open port")
 	}
 }
 
 func TestWaitPortUnreachable(t *testing.T) {
-	if waitPort(19999, 100*time.Millisecond) {
+	if waitPort(context.Background(), 19999, 100*time.Millisecond) {
 		t.Error("expected false for closed port")
+	}
+}
+
+func TestWaitPortContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if waitPort(ctx, 19999, 5*time.Second) {
+		t.Error("expected false when context is already canceled")
 	}
 }
 
@@ -97,7 +115,7 @@ func TestProxyBenchmarkerMeasureOne(t *testing.T) {
 
 	pb := NewProxyBenchmarker(tc, xrayBin, 1, 8*time.Second, false)
 	pb.tmpDir = t.TempDir()
-	result := pb.measureOne(entry, portPair{socks: 10850, http: 10860})
+	result := pb.measureOne(context.Background(), entry, portPair{socks: 10850, http: 10860})
 
 	if result.Error != nil {
 		t.Fatalf("unexpected error: %v", result.Error)
@@ -116,7 +134,7 @@ func xrayCanRunTemplate(t *testing.T, xrayBin string, tc *xraycfg.XrayConfig) bo
 		DNS:       tc.DNS,
 		Inbounds:  []xraycfg.Inbound{{Tag: "http", Port: 10870, Listen: "127.0.0.1", Protocol: "http", Settings: []byte(`{"allowTransparent":false}`)}},
 		Outbounds: append([]json.RawMessage{[]byte(`{"tag":"proxy","protocol":"freedom"}`)}, tc.Outbounds...),
-		Routing:   addCatchAllRouting(tc.Routing),
+		Routing:   xraycfg.AddCatchAllRule(tc.Routing),
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

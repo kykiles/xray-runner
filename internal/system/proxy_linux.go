@@ -26,11 +26,6 @@ func (pm *ProxyManager) Enable(port int) error {
 	return fmt.Errorf("no supported desktop environment found (tried GNOME gsettings and KDE kwriteconfig5)")
 }
 
-func (pm *ProxyManager) Disable() error {
-	unsetDesktopProxy()
-	return nil
-}
-
 func setDesktopProxy(host string, port int, overrides string) bool {
 	if writeGsettings(ProxyState{
 		Enabled:   true,

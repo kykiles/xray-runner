@@ -17,41 +17,33 @@ import (
 	"xray-runner/internal/xraycfg"
 )
 
-func addCatchAllRouting(templateRouting json.RawMessage) json.RawMessage {
-	var routing map[string]interface{}
-	if templateRouting != nil {
-		json.Unmarshal(templateRouting, &routing)
-	}
-	if routing == nil {
-		routing = map[string]interface{}{}
-	}
-	rules, _ := routing["rules"].([]interface{})
-	rules = append(rules, map[string]interface{}{
-		"type": "field", "outboundTag": "proxy", "network": "tcp,udp",
-	})
-	routing["rules"] = rules
-	modifiedRouting, _ := json.Marshal(routing)
-	return modifiedRouting
-}
-
 type portPair struct{ socks, http int }
 
-type portAllocator struct {
-	mu   sync.Mutex
-	base int
-	next int
+// freePort asks the OS for an unused TCP port on loopback by binding :0 and
+// reading back the assigned port, then releasing it. This is racy (TOCTOU: the
+// port can be taken between close and xray's bind), but far more reliable than
+// handing out incrementing numbers that may already be in use (P-2).
+func freePort() (int, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port, nil
 }
 
-func newPortAllocator(base int) *portAllocator {
-	return &portAllocator{base: base, next: 0}
-}
-
-func (a *portAllocator) alloc() portPair {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	n := a.next
-	a.next++
-	return portPair{socks: a.base + n, http: a.base + 100 + n}
+// freePortPair returns two distinct free loopback ports for the socks/http
+// inbounds of a benchmark instance.
+func freePortPair() (portPair, error) {
+	socks, err := freePort()
+	if err != nil {
+		return portPair{}, err
+	}
+	http, err := freePort()
+	if err != nil {
+		return portPair{}, err
+	}
+	return portPair{socks: socks, http: http}, nil
 }
 
 type ProxyBenchmarker struct {
@@ -73,7 +65,7 @@ func NewProxyBenchmarker(template *xraycfg.XrayConfig, binary string, concurrenc
 	}
 }
 
-func waitPort(port int, timeout time.Duration) bool {
+func waitPort(ctx context.Context, port int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
@@ -81,12 +73,18 @@ func waitPort(port int, timeout time.Duration) bool {
 			conn.Close()
 			return true
 		}
-		time.Sleep(200 * time.Millisecond)
+		// P-1: abort the wait promptly when the benchmark is cancelled instead
+		// of sleeping out the whole timeout.
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 	return false
 }
 
-func (pb *ProxyBenchmarker) measureOne(entry subscription.SubEntry, ports portPair) subscription.BenchmarkResult {
+func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.SubEntry, ports portPair) subscription.BenchmarkResult {
 	if err := entry.Validate(); err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
@@ -127,7 +125,7 @@ func (pb *ProxyBenchmarker) measureOne(entry subscription.SubEntry, ports portPa
 		DNS:       pb.template.DNS,
 		Inbounds:  inbounds,
 		Outbounds: outbounds,
-		Routing:   addCatchAllRouting(pb.template.Routing),
+		Routing:   xraycfg.AddCatchAllRule(pb.template.Routing),
 	}
 
 	tmpFile := filepath.Join(pb.tmpDir, fmt.Sprintf("xray-bench-%d-%d.json", ports.socks, ports.http))
@@ -143,12 +141,13 @@ func (pb *ProxyBenchmarker) measureOne(entry subscription.SubEntry, ports portPa
 	defer os.Remove(tmpFile)
 
 	runner := xray.New(pb.xrayBinary, tmpFile)
-	if err := runner.Start(context.Background()); err != nil {
+	// P-1: propagate ctx so Ctrl+C tears down the xray instance mid-measure.
+	if err := runner.Start(ctx); err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
 	defer runner.Stop()
 
-	if !waitPort(ports.http, pb.timeout) {
+	if !waitPort(ctx, ports.http, pb.timeout) {
 		return subscription.BenchmarkResult{Error: fmt.Errorf("port %d not ready within timeout", ports.http)}
 	}
 
@@ -164,7 +163,7 @@ func (pb *ProxyBenchmarker) measureOne(entry subscription.SubEntry, ports portPa
 	}
 
 	start := time.Now()
-	req, _ := http.NewRequest("GET", "https://www.google.com/generate_204", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://www.google.com/generate_204", nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
@@ -195,7 +194,9 @@ func (pb *ProxyBenchmarker) Run(ctx context.Context, entries []subscription.SubE
 	results := make([]subscription.BenchmarkResult, len(entries))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, pb.concurrency)
-	alloc := newPortAllocator(10810)
+	// Q-3: onResult runs from worker goroutines; serialize the callbacks here so
+	// consumers (e.g. the progress line in menu.go) don't need their own locking.
+	var resultMu sync.Mutex
 
 	for i := range entries {
 		wg.Add(1)
@@ -204,16 +205,24 @@ func (pb *ProxyBenchmarker) Run(ctx context.Context, entries []subscription.SubE
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			var result subscription.BenchmarkResult
 			select {
 			case <-ctx.Done():
-				results[idx] = subscription.BenchmarkResult{Index: idx, Error: ctx.Err()}
+				result = subscription.BenchmarkResult{Error: ctx.Err()}
 			default:
-				result := pb.measureOne(entries[idx], alloc.alloc())
-				result.Index = idx
-				results[idx] = result
-				if onResult != nil {
-					onResult(result)
+				ports, err := freePortPair()
+				if err != nil {
+					result = subscription.BenchmarkResult{Error: err}
+				} else {
+					result = pb.measureOne(ctx, entries[idx], ports)
 				}
+			}
+			result.Index = idx
+			results[idx] = result
+			if onResult != nil {
+				resultMu.Lock()
+				onResult(result)
+				resultMu.Unlock()
 			}
 		}(i)
 	}
