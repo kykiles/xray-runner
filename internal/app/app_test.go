@@ -5,7 +5,57 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"xray-runner/internal/xraycfg"
 )
+
+func TestResolvePorts(t *testing.T) {
+	a := &App{}
+
+	t.Run("by protocol regardless of order", func(t *testing.T) {
+		cfg := &xraycfg.XrayConfig{Inbounds: []xraycfg.Inbound{
+			{Tag: "http", Protocol: "http", Port: 10809},
+			{Tag: "socks", Protocol: "socks", Port: 10808},
+		}}
+		socks, httpP, err := a.resolvePorts(cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if socks != 10808 || httpP != 10809 {
+			t.Errorf("got socks=%d http=%d, want 10808/10809", socks, httpP)
+		}
+	})
+
+	t.Run("missing http is an error", func(t *testing.T) {
+		cfg := &xraycfg.XrayConfig{Inbounds: []xraycfg.Inbound{
+			{Tag: "socks", Protocol: "socks", Port: 10808},
+		}}
+		if _, _, err := a.resolvePorts(cfg); err == nil {
+			t.Error("expected error when http inbound is missing")
+		}
+	})
+}
+
+func TestMaskURL(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		mask bool
+		want string
+	}{
+		{"unmasked", "https://sub.example.com/QzWXrL3rcM2DYRoF", false, "https://sub.example.com/QzWXrL3rcM2DYRoF"},
+		{"masked long token", "https://sub.example.com/QzWXrL3rcM2DYRoF", true, "https://sub.example.com/QzWXr…"},
+		{"masked short path", "https://sub.example.com/ab", true, "https://sub.example.com/ab…"},
+		{"empty", "", true, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := maskURL(c.raw, c.mask); got != c.want {
+				t.Errorf("maskURL(%q, %v) = %q, want %q", c.raw, c.mask, got, c.want)
+			}
+		})
+	}
+}
 
 func TestMaskString(t *testing.T) {
 	cases := []struct {

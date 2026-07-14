@@ -139,7 +139,10 @@ func setGSettingsIgnoreHosts(overrides string) error {
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		if p != "" {
-			gv = append(gv, "'"+p+"'")
+			// S-4: escape single quotes so a value containing ' doesn't break the
+			// GVariant array literal passed to gsettings.
+			escaped := strings.ReplaceAll(p, "'", `\'`)
+			gv = append(gv, "'"+escaped+"'")
 		}
 	}
 	gvariantStr := "[" + strings.Join(gv, ", ") + "]"

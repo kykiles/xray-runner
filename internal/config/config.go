@@ -21,6 +21,7 @@ type Config struct {
 	KillSwitch      bool
 	HWID            string
 	HWIDDeviceModel string
+	AllowInsecure   bool
 }
 
 func Load(filenames ...string) (*Config, error) {
@@ -40,6 +41,7 @@ func Load(filenames ...string) (*Config, error) {
 		KillSwitch:      parseBool("KILL_SWITCH", false),
 		HWID:            os.Getenv("HWID"),
 		HWIDDeviceModel: envOr("HWID_DEVICE_MODEL", "xray-runner"),
+		AllowInsecure:   parseBool("ALLOW_INSECURE", false),
 	}
 
 	if cfg.Mode != "proxy" && cfg.Mode != "tun" {

@@ -32,4 +32,9 @@ type SubEntry struct {
 	Obfs         string
 	ObfsPassword string
 	Congestion   string
+
+	// AllowInsecure is the local opt-in (ALLOW_INSECURE) gating whether the
+	// subscription-provided Insecure flag is honored. Set by the app, never by
+	// the subscription itself (S-1).
+	AllowInsecure bool
 }

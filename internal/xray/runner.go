@@ -30,24 +30,38 @@ func New(binary, configPath string) *Runner {
 	return &Runner{binary: binary, config: configPath}
 }
 
-func FindBinary() string {
+// FindBinary locates the xray executable next to our own binary or on PATH.
+// H-3: the current working directory is deliberately excluded so a planted
+// ./xray cannot be executed (a real risk under sudo in a writable directory).
+func FindBinary() (string, error) {
 	name := "xray"
 	if runtime.GOOS == "windows" {
 		name = "xray.exe"
 	}
 
-	paths := []string{name}
-
 	if exe, err := osExecutable(); err == nil {
-		paths = append([]string{filepath.Join(filepath.Dir(exe), name)}, paths...)
-	}
-
-	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
-			return p
+		candidate := filepath.Join(filepath.Dir(exe), name)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
 		}
 	}
-	return name
+
+	if p, err := exec.LookPath(name); err == nil {
+		return p, nil
+	}
+
+	return "", fmt.Errorf("xray не найден: положите %s рядом с исполняемым файлом или в PATH", name)
+}
+
+// Version returns the first line of `xray version`. Failure is non-fatal; the
+// caller only logs it (X-4).
+func Version(binary string) (string, error) {
+	out, err := exec.Command(binary, "version").Output()
+	if err != nil {
+		return "", fmt.Errorf("xray version: %w", err)
+	}
+	line := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
+	return line, nil
 }
 
 func (r *Runner) Start(ctx context.Context) error {

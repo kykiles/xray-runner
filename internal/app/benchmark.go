@@ -55,18 +55,21 @@ func (a *portAllocator) alloc() portPair {
 }
 
 type ProxyBenchmarker struct {
-	template    *xraycfg.XrayConfig
-	xrayBinary  string
-	concurrency int
-	timeout     time.Duration
+	template      *xraycfg.XrayConfig
+	xrayBinary    string
+	concurrency   int
+	timeout       time.Duration
+	allowInsecure bool
+	tmpDir        string
 }
 
-func NewProxyBenchmarker(template *xraycfg.XrayConfig, binary string, concurrency int, timeout time.Duration) *ProxyBenchmarker {
+func NewProxyBenchmarker(template *xraycfg.XrayConfig, binary string, concurrency int, timeout time.Duration, allowInsecure bool) *ProxyBenchmarker {
 	return &ProxyBenchmarker{
-		template:    template,
-		xrayBinary:  binary,
-		concurrency: concurrency,
-		timeout:     timeout,
+		template:      template,
+		xrayBinary:    binary,
+		concurrency:   concurrency,
+		timeout:       timeout,
+		allowInsecure: allowInsecure,
 	}
 }
 
@@ -84,6 +87,10 @@ func waitPort(port int, timeout time.Duration) bool {
 }
 
 func (pb *ProxyBenchmarker) measureOne(entry subscription.SubEntry, ports portPair) subscription.BenchmarkResult {
+	if err := entry.Validate(); err != nil {
+		return subscription.BenchmarkResult{Error: err}
+	}
+	entry.AllowInsecure = pb.allowInsecure
 	outboundJSON, err := subscription.BuildOutboundJSON(&entry)
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
@@ -123,12 +130,14 @@ func (pb *ProxyBenchmarker) measureOne(entry subscription.SubEntry, ports portPa
 		Routing:   addCatchAllRouting(pb.template.Routing),
 	}
 
-	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("xray-bench-%d-%d.json", ports.socks, ports.http))
+	tmpFile := filepath.Join(pb.tmpDir, fmt.Sprintf("xray-bench-%d-%d.json", ports.socks, ports.http))
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+	// H-2: bench configs carry the same secrets as the main config; keep them
+	// 0600 inside a private 0700 dir instead of world-readable /tmp.
+	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
 	defer os.Remove(tmpFile)
@@ -172,6 +181,17 @@ func (pb *ProxyBenchmarker) measureOne(entry subscription.SubEntry, ports portPa
 }
 
 func (pb *ProxyBenchmarker) Run(ctx context.Context, entries []subscription.SubEntry, onResult func(subscription.BenchmarkResult)) []subscription.BenchmarkResult {
+	dir, err := os.MkdirTemp("", "xray-bench-*")
+	if err != nil {
+		results := make([]subscription.BenchmarkResult, len(entries))
+		for i := range results {
+			results[i] = subscription.BenchmarkResult{Index: i, Error: err}
+		}
+		return results
+	}
+	pb.tmpDir = dir
+	defer os.RemoveAll(dir)
+
 	results := make([]subscription.BenchmarkResult, len(entries))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, pb.concurrency)

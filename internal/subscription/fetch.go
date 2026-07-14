@@ -8,35 +8,27 @@ import (
 	"time"
 )
 
-func Fetch(rawURL string) ([]SubEntry, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
+// FetchOption customizes the subscription request, e.g. to add HWID headers.
+type FetchOption func(*http.Request)
 
-	resp, err := client.Get(rawURL)
-	if err != nil {
-		return nil, fmt.Errorf("subscription fetch: %w", err)
+// WithHWID attaches the device-identifying headers the panel uses to bind the
+// subscription to a device (A-4). The same headers must be sent on refresh.
+func WithHWID(hwid, deviceOS, deviceModel string) FetchOption {
+	return func(req *http.Request) {
+		req.Header.Set("x-hwid", hwid)
+		req.Header.Set("x-device-os", deviceOS)
+		req.Header.Set("x-device-model", deviceModel)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("subscription fetch: HTTP %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("subscription read: %w", err)
-	}
-
-	return parse(body)
 }
 
-func FetchWithHWID(rawURL, hwid, deviceOS, deviceModel string) ([]SubEntry, error) {
+func Fetch(rawURL string, opts ...FetchOption) ([]SubEntry, error) {
 	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("subscription request: %w", err)
 	}
-	req.Header.Set("x-hwid", hwid)
-	req.Header.Set("x-device-os", deviceOS)
-	req.Header.Set("x-device-model", deviceModel)
+	for _, opt := range opts {
+		opt(req)
+	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
@@ -55,6 +47,11 @@ func FetchWithHWID(rawURL, hwid, deviceOS, deviceModel string) ([]SubEntry, erro
 	}
 
 	return parse(body)
+}
+
+// FetchWithHWID is a thin wrapper kept for existing callers.
+func FetchWithHWID(rawURL, hwid, deviceOS, deviceModel string) ([]SubEntry, error) {
+	return Fetch(rawURL, WithHWID(hwid, deviceOS, deviceModel))
 }
 
 func parse(raw []byte) ([]SubEntry, error) {

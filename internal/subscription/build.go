@@ -201,7 +201,9 @@ func buildHysteria2(e *SubEntry) (json.RawMessage, error) {
 		sni = e.Address
 	}
 	tls.ServerName = sni
-	if e.Insecure {
+	// S-1: only honor the subscription's insecure flag when the user opted in
+	// locally; a compromised subscription must not disable TLS verification.
+	if e.Insecure && e.AllowInsecure {
 		tls.AllowInsecure = true
 	}
 	stream.TLSSettings = tls

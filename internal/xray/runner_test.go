@@ -233,8 +233,24 @@ func TestFindBinary(t *testing.T) {
 	}
 
 	// Should find our mock binary since we're "running" from its directory
-	path := FindBinary()
+	path, err := FindBinary()
+	if err != nil {
+		t.Fatalf("FindBinary() error: %v", err)
+	}
 	if path == "" {
 		t.Fatal("FindBinary() returned empty")
+	}
+}
+
+func TestFindBinaryNotFound(t *testing.T) {
+	origExe := osExecutable
+	defer func() { osExecutable = origExe }()
+	// Point at an empty temp dir and clear PATH so nothing is found.
+	dir := t.TempDir()
+	osExecutable = func() (string, error) { return filepath.Join(dir, "test.exe"), nil }
+	t.Setenv("PATH", "")
+
+	if _, err := FindBinary(); err == nil {
+		t.Fatal("expected error when xray is not found, got nil")
 	}
 }

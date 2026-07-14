@@ -109,6 +109,38 @@ func TestBuildSSOutboundErrors(t *testing.T) {
 	}
 }
 
+func TestLoadTemplateValidation(t *testing.T) {
+	write := func(t *testing.T, content string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "template.json")
+		if err := os.WriteFile(p, []byte(content), 0600); err != nil {
+			t.Fatalf("write template: %v", err)
+		}
+		return p
+	}
+
+	t.Run("valid", func(t *testing.T) {
+		p := write(t, `{"outbounds":[{"tag":"direct","protocol":"freedom"},{"tag":"block","protocol":"blackhole"}],"routing":{"rules":[{"outboundTag":"direct"},{"outboundTag":"proxy"}]}}`)
+		if _, err := LoadTemplate(p); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("broken routing json", func(t *testing.T) {
+		p := write(t, `{"outbounds":[{"tag":"direct","protocol":"freedom"}],"routing":{"rules":"not-an-array"}}`)
+		if _, err := LoadTemplate(p); err == nil {
+			t.Fatal("expected error for malformed routing")
+		}
+	})
+
+	t.Run("dangling outboundTag", func(t *testing.T) {
+		p := write(t, `{"outbounds":[{"tag":"direct","protocol":"freedom"}],"routing":{"rules":[{"outboundTag":"nope"}]}}`)
+		if _, err := LoadTemplate(p); err == nil {
+			t.Fatal("expected error for unknown outboundTag")
+		}
+	})
+}
+
 func runTests(t *testing.T, tests []testCase) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

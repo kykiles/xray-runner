@@ -48,7 +48,9 @@ func readStdin(ctx context.Context) (string, error) {
 // onResult is called from worker goroutines for progress display.
 type BenchmarkFunc func(ctx context.Context, entries []SubEntry, onResult func(BenchmarkResult)) []BenchmarkResult
 
-func ShowMenu(ctx context.Context, entries []SubEntry, subURL string, benchmarkFn BenchmarkFunc) *SubEntry {
+// refresh re-fetches the subscription (with the same HWID headers as the
+// initial load); nil disables the 'r' key.
+func ShowMenu(ctx context.Context, entries []SubEntry, refresh func() ([]SubEntry, error), benchmarkFn BenchmarkFunc) *SubEntry {
 	var benchmarkResults []BenchmarkResult
 
 	for {
@@ -61,6 +63,7 @@ func ShowMenu(ctx context.Context, entries []SubEntry, subURL string, benchmarkF
 		for i, e := range entries {
 			hostPort := fmt.Sprintf("%s:%d", e.Address, e.Port)
 			supported := supportedProtocols[e.Protocol]
+			valid := e.Validate() == nil
 			remark := e.Remarks
 			if remark != "" {
 				remark = " [" + remark + "]"
@@ -72,6 +75,8 @@ func ShowMenu(ctx context.Context, entries []SubEntry, subURL string, benchmarkF
 			tags := []string{}
 			if !supported {
 				tags = append(tags, "⚠️")
+			} else if !valid {
+				tags = append(tags, "⚠ invalid")
 			}
 			ui.Item(i+1, line, tags...)
 		}
@@ -113,8 +118,11 @@ func ShowMenu(ctx context.Context, entries []SubEntry, subURL string, benchmarkF
 		}
 
 		if strings.EqualFold(input, "r") {
+			if refresh == nil {
+				continue
+			}
 			ui.Progress("Обновление подписки")
-			newEntries, err := Fetch(subURL)
+			newEntries, err := refresh()
 			if err != nil {
 				ui.ClearLine()
 				ui.Error(fmt.Sprintf("Ошибка: %v", err))
@@ -140,6 +148,10 @@ func ShowMenu(ctx context.Context, entries []SubEntry, subURL string, benchmarkF
 		selected := &entries[idx-1]
 		if !supportedProtocols[selected.Protocol] {
 			ui.Warn(fmt.Sprintf("Протокол %s не поддерживается. Выберите другой.", selected.Protocol))
+			continue
+		}
+		if err := selected.Validate(); err != nil {
+			ui.Warn(fmt.Sprintf("Запись невалидна: %v. Выберите другую.", err))
 			continue
 		}
 

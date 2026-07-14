@@ -101,10 +101,17 @@ func (a *App) resolveLegacyOutbound(ctx context.Context, tc *xraycfg.XrayConfig)
 			}
 			slog.Info("subscription loaded", "servers", len(entries))
 
-			selected := subscription.ShowMenu(ctx, entries, a.cfg.SubscriptionURL, nil)
+			refresh := func() ([]subscription.SubEntry, error) {
+				return subscription.FetchWithHWID(a.cfg.SubscriptionURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
+			}
+			selected := subscription.ShowMenu(ctx, entries, refresh, nil)
 			if selected == nil {
 				continue
 			}
+			if err := selected.Validate(); err != nil {
+				return nil, fmt.Errorf("выбранный сервер невалиден: %w", err)
+			}
+			selected.AllowInsecure = a.cfg.AllowInsecure
 			a.printSubEntryDetails(selected)
 			a.setServerEndpoint(selected)
 			resolveServer(selected.Address)
@@ -146,7 +153,7 @@ func (a *App) selectSubscription(subs []subscription.NamedSubscription) string {
 		ui.ClearScreen()
 		ui.Title("Список моих подписок")
 		for i, s := range subs {
-			ui.Item(i+1, fmt.Sprintf("%-30s  %s", s.Name, ui.Dim(s.URL)))
+			ui.Item(i+1, fmt.Sprintf("%-30s  %s", s.Name, ui.Dim(maskURL(s.URL, a.cfg.MaskCreds))))
 		}
 		ui.Divider()
 
@@ -210,11 +217,20 @@ func (a *App) addSubFlow() error {
 		return fmt.Errorf("URL не может быть пустым")
 	}
 
+	// S-2: reject anything that isn't an http(s) subscription URL outright
+	// instead of warning and saving it anyway.
 	parsed, err := url.Parse(rawURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		ui.Warn("URL должен начинаться с http:// или https://")
+	if err != nil {
+		return fmt.Errorf("некорректный URL: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("URL должен начинаться с http:// или https:// (получено %q)", parsed.Scheme)
+	}
+	if parsed.Scheme == "http" {
+		ui.Warn("URL использует http без шифрования — предпочтительнее https")
 	}
 
+	ui.Warn("Проверка URL идёт напрямую, вне VPN-туннеля")
 	ui.Progress("Проверка URL")
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, headErr := client.Head(rawURL)
@@ -249,8 +265,13 @@ func (a *App) fetchAndSelectServer(ctx context.Context, subURL string, tc *xrayc
 	slog.Info("subscription loaded", "servers", len(entries))
 	ui.Success(fmt.Sprintf("Загружено %d серверов", len(entries)))
 
-	pb := NewProxyBenchmarker(tc, xray.FindBinary(), 3, 8*time.Second)
-	selected := subscription.ShowMenu(ctx, entries, subURL, pb.Run)
+	// A-4: refresh re-fetches with the same HWID headers as the initial load.
+	refresh := func() ([]subscription.SubEntry, error) {
+		return subscription.FetchWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
+	}
+
+	pb := NewProxyBenchmarker(tc, a.binary, 3, 8*time.Second, a.cfg.AllowInsecure)
+	selected := subscription.ShowMenu(ctx, entries, refresh, pb.Run)
 	if selected == nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -258,6 +279,10 @@ func (a *App) fetchAndSelectServer(ctx context.Context, subURL string, tc *xrayc
 		return nil, fmt.Errorf("switch subscription")
 	}
 
+	if err := selected.Validate(); err != nil {
+		return nil, fmt.Errorf("выбранный сервер невалиден: %w", err)
+	}
+	selected.AllowInsecure = a.cfg.AllowInsecure
 	a.printSubEntryDetails(selected)
 	a.setServerEndpoint(selected)
 	resolveServer(selected.Address)
@@ -278,6 +303,21 @@ func (a *App) Run(ctx context.Context) error {
 	tc, err := xraycfg.LoadTemplate("template.json")
 	if err != nil {
 		return fmt.Errorf("load template: %w", err)
+	}
+
+	// H-3: resolve the binary up front (before the benchmarker needs it) and
+	// fail fast with a clear error if xray is missing.
+	binary, err := xray.FindBinary()
+	if err != nil {
+		return err
+	}
+	a.binary = binary
+
+	// X-4: log the xray version; incompatibility is diagnosed here, not via retries.
+	if v, err := xray.Version(binary); err == nil {
+		slog.Info("xray version", "version", v)
+	} else {
+		slog.Warn("could not determine xray version", "error", err)
 	}
 
 	proxyOutbound, err := a.resolveOutbound(ctx, tc)
@@ -302,7 +342,10 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	if a.cfg.Mode != "tun" {
-		socksPort, httpPort := a.checkPorts(cfg)
+		socksPort, httpPort, err := a.resolvePorts(cfg)
+		if err != nil {
+			return err
+		}
 		for _, p := range []int{socksPort, httpPort} {
 			if portInUse(p) {
 				return fmt.Errorf("порт %d уже занят другим процессом — возможно, запущен второй экземпляр", p)
@@ -318,8 +361,6 @@ func (a *App) Run(ctx context.Context) error {
 	fmt.Println("── Routing ──────────────────────────────")
 	printRoutingRules(cfg)
 
-	binary := xray.FindBinary()
-	a.binary = binary
 	slog.Info("starting xray", "binary", binary, "mode", a.cfg.Mode)
 
 	a.runner = xray.New(binary, a.tmpFile)
@@ -358,7 +399,10 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 func (a *App) runProxy(ctx context.Context, cfg *xraycfg.XrayConfig) error {
-	socksPort, httpPort := a.checkPorts(cfg)
+	socksPort, httpPort, err := a.resolvePorts(cfg)
+	if err != nil {
+		return err
+	}
 	slog.Info("proxy listening", "socks5", socksPort, "http", httpPort)
 
 	if !awaitPort(ctx, socksPort, "SOCKS5", 10*time.Second) {
@@ -550,23 +594,31 @@ func (a *App) writeConfig(cfg *xraycfg.XrayConfig) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	if err := os.WriteFile(a.tmpFile, data, 0644); err != nil {
+	// H-2: the config holds UUIDs, passwords and keys — keep it owner-only, and
+	// never write the full (unmasked) config to the log, only its path.
+	if err := os.WriteFile(a.tmpFile, data, 0600); err != nil {
 		return err
 	}
-	slog.Debug("generated xray config", "path", a.tmpFile, "config", string(data))
+	slog.Debug("generated xray config", "path", a.tmpFile)
 	return nil
 }
 
-func (a *App) checkPorts(cfg *xraycfg.XrayConfig) (socksPort, httpPort int) {
-	socksPort = 10808
-	httpPort = 10809
-	if len(cfg.Inbounds) > 0 {
-		socksPort = cfg.Inbounds[0].Port
+// resolvePorts finds the SOCKS and HTTP inbound ports by protocol/tag rather
+// than by position, so reordering inbounds in the template can't silently swap
+// them (Q-2).
+func (a *App) resolvePorts(cfg *xraycfg.XrayConfig) (socksPort, httpPort int, err error) {
+	for _, in := range cfg.Inbounds {
+		switch {
+		case in.Protocol == "socks" || in.Tag == "socks":
+			socksPort = in.Port
+		case in.Protocol == "http" || in.Tag == "http":
+			httpPort = in.Port
+		}
 	}
-	if len(cfg.Inbounds) > 1 {
-		httpPort = cfg.Inbounds[1].Port
+	if socksPort == 0 || httpPort == 0 {
+		return 0, 0, fmt.Errorf("в конфиге не найдены socks/http inbound-порты (socks=%d http=%d)", socksPort, httpPort)
 	}
-	return
+	return socksPort, httpPort, nil
 }
 
 func hostFromURL(u *url.URL) string {
@@ -612,6 +664,14 @@ func (a *App) printSubEntryDetails(e *subscription.SubEntry) {
 	if e.ShortID != "" {
 		fmt.Printf("  ShortID:   %s\n", a.maskIfNeeded(e.ShortID))
 	}
+	// S-1: warn when the subscription requested skipping TLS verification.
+	if e.Insecure {
+		if a.cfg.AllowInsecure {
+			ui.Warn("Сервер запросил insecure — проверка TLS-сертификата ОТКЛЮЧЕНА (ALLOW_INSECURE=true)")
+		} else {
+			ui.Warn("Сервер запросил insecure — флаг проигнорирован (задайте ALLOW_INSECURE=true, чтобы разрешить)")
+		}
+	}
 	fmt.Println("─────────────────────────────────────────")
 }
 
@@ -650,6 +710,25 @@ func printParam(q url.Values, key, label string) {
 
 func (a *App) maskIfNeeded(s string) string {
 	return maskString(s, a.cfg.MaskCreds)
+}
+
+// maskURL hides the personal token in a subscription URL, keeping only the
+// host and the first few path characters for recognizability (S-3).
+func maskURL(raw string, mask bool) string {
+	if !mask || raw == "" {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return maskString(raw, true)
+	}
+	path := u.Path
+	if len(path) > 6 {
+		path = path[:6] + "…"
+	} else if path != "" {
+		path += "…"
+	}
+	return u.Scheme + "://" + u.Host + path
 }
 
 func maskString(s string, mask bool) string {
