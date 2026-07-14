@@ -14,6 +14,9 @@ import (
 func tryParseJSON(raw []byte) ([]SubEntry, error) {
 	var arr []json.RawMessage
 	if err := json.Unmarshal(raw, &arr); err == nil {
+		if isXrayConfigArray(arr) {
+			return parseXrayConfigArray(arr)
+		}
 		return parseJSONArray(arr)
 	}
 

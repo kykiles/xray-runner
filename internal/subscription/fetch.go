@@ -21,11 +21,18 @@ func WithHWID(hwid, deviceOS, deviceModel string) FetchOption {
 	}
 }
 
+// defaultUserAgent identifies us as a known subscription client. Some panels
+// return an empty body (or a stub) unless the request carries a recognized
+// client User-Agent, so we send one by default; callers may override via a
+// FetchOption.
+const defaultUserAgent = "v2rayNG/1.8.5"
+
 func Fetch(rawURL string, opts ...FetchOption) ([]SubEntry, error) {
 	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("subscription request: %w", err)
 	}
+	req.Header.Set("User-Agent", defaultUserAgent)
 	for _, opt := range opts {
 		opt(req)
 	}

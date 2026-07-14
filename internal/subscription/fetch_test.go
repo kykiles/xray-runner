@@ -31,6 +31,23 @@ func TestFetchWithHWID_SetsHeaders(t *testing.T) {
 	}
 }
 
+func TestFetch_SetsClientUserAgent(t *testing.T) {
+	var ua string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ua = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	_, _ = Fetch(server.URL)
+
+	// Some subscription panels return an empty body unless a recognized client
+	// User-Agent is sent; the Go default ("Go-http-client/...") must not leak.
+	if ua == "" || len(ua) < 5 || ua[:2] == "Go" {
+		t.Errorf("User-Agent = %q, want a recognized subscription client UA", ua)
+	}
+}
+
 func TestFetchWithHWID_ParsesSubscription(t *testing.T) {
 	encodedSub := "dmxlc3M6Ly91dWlkQGhvc3Q6NDQzP3R5cGU9dGNwJnNlY3VyaXR5PXJlbGl0eQ=="
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
