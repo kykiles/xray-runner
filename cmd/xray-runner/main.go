@@ -20,6 +20,10 @@ var Version = "dev"
 func main() {
 	flagVersion := flag.Bool("version", false, "show version")
 	flagConfig := flag.String("config", ".env", "path to .env file")
+	// U-2: scripted/non-interactive selection.
+	flagServer := flag.String("server", "", "server to use: 1-based index or name (skips the menu)")
+	flagLast := flag.Bool("last", false, "reuse the last selected subscription/server")
+	flagNonInteractive := flag.Bool("non-interactive", false, "never prompt; fail if a choice is required")
 	flag.Parse()
 
 	if *flagVersion {
@@ -39,7 +43,11 @@ func main() {
 
 	slog.Info("starting xray-runner", "version", Version)
 
-	application := app.New(cfg)
+	application := app.New(cfg, app.Options{
+		Server:         *flagServer,
+		UseLast:        *flagLast,
+		NonInteractive: *flagNonInteractive,
+	})
 	if err := application.Run(ctx); err != nil {
 		// R-4: user-initiated exits (quit key, Ctrl+C) are not failures; App.Run's
 		// deferred cleanup has already released proxies/firewall by this point.
@@ -49,6 +57,11 @@ func main() {
 			return
 		}
 		slog.Error("fatal", "error", err)
+		// U-2: distinct exit codes for scripts/systemd — 2 means the requested
+		// server/subscription could not be selected, 1 is a runtime failure.
+		if errors.Is(err, app.ErrSelection) {
+			os.Exit(2)
+		}
 		os.Exit(1)
 	}
 

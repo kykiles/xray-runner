@@ -25,10 +25,21 @@ import (
 var (
 	ErrSwitchSubscription = errors.New("switch subscription")
 	ErrUserQuit           = errors.New("user quit")
+	// ErrSelection marks non-interactive selection/usage failures so main can
+	// exit with a distinct code for scripts/systemd (U-2).
+	ErrSelection = errors.New("selection failed")
 )
+
+// Options are CLI-level knobs (U-2): pick a server without the menu.
+type Options struct {
+	Server         string // index (1-based) or name of the server to use
+	UseLast        bool   // reuse the last selected subscription/server
+	NonInteractive bool   // never prompt; fail instead
+}
 
 type App struct {
 	cfg           *config.Config
+	opts          Options
 	runner        *xray.Runner
 	proxy         *system.ProxyManager
 	tmpFile       string
@@ -43,9 +54,10 @@ type App struct {
 	interfaces    func() ([]net.Interface, error)
 }
 
-func New(cfg *config.Config) *App {
+func New(cfg *config.Config, opts Options) *App {
 	return &App{
 		cfg:        cfg,
+		opts:       opts,
 		proxy:      system.New(),
 		tmpFile:    filepath.Join(".", "xray_config.json"),
 		lockFile:   filepath.Join(".", "xray_config.json.lock"),
@@ -55,6 +67,14 @@ func New(cfg *config.Config) *App {
 
 func (a *App) Run(ctx context.Context) error {
 	defer a.cleanup()
+
+	// R-5: tun mode needs root/elevation — fail immediately with a clear
+	// message instead of letting xray retry for 30 seconds.
+	if a.cfg.Mode == "tun" {
+		if err := checkTunPrivileges(); err != nil {
+			return err
+		}
+	}
 
 	tc, err := xraycfg.LoadTemplate("template.json")
 	if err != nil {
