@@ -3,13 +3,41 @@ package main
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
+	"xray-runner/internal/config"
 	"xray-runner/internal/subscription"
 )
+
+// dumpLinks fetches the subscription, reconstructs bare links, and writes them
+// to keys/<DOMAIN>.md. Returns the file path on success.
+func dumpLinks(cfg *config.Config, subURL string) (string, error) {
+	path, err := keysFilePath(subURL)
+	if err != nil {
+		return "", err
+	}
+
+	hwid := config.GetOrCreateHWID(cfg.HWID)
+	entries, err := subscription.FetchWithHWID(subURL, hwid, runtime.GOOS, cfg.HWIDDeviceModel)
+	if err != nil {
+		return "", fmt.Errorf("fetch subscription: %w", err)
+	}
+
+	md := renderMarkdown(subURL, entries, time.Now())
+
+	if err := os.MkdirAll("keys", 0o755); err != nil {
+		return "", fmt.Errorf("create keys dir: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(md), 0o600); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	return path, nil
+}
 
 // keysFilePath maps a subscription URL to keys/<HOST>.md, host uppercased,
 // port and path stripped.

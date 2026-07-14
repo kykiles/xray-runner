@@ -24,6 +24,7 @@ func main() {
 	flagServer := flag.String("server", "", "server to use: 1-based index or name (skips the menu)")
 	flagLast := flag.Bool("last", false, "reuse the last selected subscription/server")
 	flagNonInteractive := flag.Bool("non-interactive", false, "never prompt; fail if a choice is required")
+	flagDumpLinks := flag.Bool("dump-links", false, "fetch subscription and dump bare links to keys/<DOMAIN>.md, then exit")
 	flag.Parse()
 
 	if *flagVersion {
@@ -34,6 +35,24 @@ func main() {
 	cfg, err := config.Load(*flagConfig)
 	if err != nil {
 		log.Fatalf("❌ %v", err)
+	}
+
+	if *flagDumpLinks {
+		subURL := cfg.SubscriptionURL
+		if args := flag.Args(); len(args) > 0 {
+			subURL = args[0]
+		}
+		if subURL == "" {
+			fmt.Fprintln(os.Stderr, "❌ dump-links: не задан URL подписки (аргумент или SUBSCRIPTION_URL)")
+			os.Exit(2)
+		}
+		path, err := dumpLinks(cfg, subURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✅ Ссылки сохранены: %s\n", path)
+		os.Exit(0)
 	}
 
 	defer applog.Init(cfg)()
