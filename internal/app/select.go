@@ -9,15 +9,18 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"net/url"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	"xray-runner/internal/config"
 	"xray-runner/internal/subscription"
+	"xray-runner/internal/tui"
 	"xray-runner/internal/ui"
 	"xray-runner/internal/xraycfg"
 )
@@ -33,32 +36,37 @@ func (a *App) resolveOutbound(ctx context.Context, tc *xraycfg.XrayConfig) (json
 		return a.resolveOutboundAuto(subs)
 	}
 
+	// U-3: the TUI needs a terminal; without one, only scripted selection works.
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return nil, fmt.Errorf("%w: нет терминала для интерактивного выбора — используйте --server, --last или --non-interactive", ErrSelection)
+	}
+
 	if len(subs) == 0 && (a.cfg.SubscriptionURL != "" || a.cfg.VlessURL != "") {
 		return a.resolveLegacyOutbound(ctx, tc)
 	}
 
-	for {
-		subURL, err := a.selectSubscription(subs)
-		if err != nil {
-			// ErrUserQuit propagates up to main for a single clean exit (R-4).
-			return nil, err
-		}
-		if subURL == "" {
-			if err := a.addSubFlow(); err != nil {
-				ui.Error(err.Error())
-				subs, _ = subscription.LoadSubscriptions()
-				if len(subs) == 0 {
-					continue
-				}
-			} else {
-				subs, _ = subscription.LoadSubscriptions()
-			}
-			continue
-		}
+	cb := tui.SubsCallbacks{
+		Add:    addSubscription,
+		Delete: subscription.RemoveSubscription,
+		Reload: subscription.LoadSubscriptions,
+		Mask:   func(raw string) string { return maskURL(raw, a.cfg.MaskCreds) },
+	}
 
-		outbound, err := a.fetchAndSelectServer(ctx, subURL, tc)
+	for {
+		newSubs, idx, action, err := tui.SelectSubscription(subs, cb)
 		if err != nil {
-			if errors.Is(err, context.Canceled) {
+			return nil, fmt.Errorf("TUI: %w", err)
+		}
+		subs = newSubs
+		if action == tui.SubsQuit {
+			// ErrUserQuit propagates up to main for a single clean exit (R-4).
+			return nil, ErrUserQuit
+		}
+		ui.Success(fmt.Sprintf("Подписка: %s", subs[idx].Name))
+
+		outbound, err := a.fetchAndSelectServer(ctx, subs[idx].URL, tc)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, ErrUserQuit) {
 				return nil, err
 			}
 			if !errors.Is(err, ErrSwitchSubscription) {
@@ -84,7 +92,13 @@ func (a *App) resolveLegacyOutbound(ctx context.Context, tc *xraycfg.XrayConfig)
 			refresh := func() ([]subscription.SubEntry, error) {
 				return subscription.FetchWithHWID(a.cfg.SubscriptionURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
 			}
-			selected := subscription.ShowMenu(ctx, entries, refresh, nil)
+			selected, action, err := tui.SelectServer(ctx, entries, refresh, nil)
+			if err != nil {
+				return nil, fmt.Errorf("TUI: %w", err)
+			}
+			if action == tui.ServerQuit {
+				return nil, ErrUserQuit
+			}
 			if selected == nil {
 				continue
 			}
@@ -236,84 +250,9 @@ func (a *App) rememberSelection(subURL string, e *subscription.SubEntry) {
 	}
 }
 
-// selectSubscription returns the chosen subscription URL, or "" to trigger the
-// add-subscription flow. It returns ErrUserQuit when the user chooses to exit or
-// interrupts (Ctrl+C), so main can exit cleanly instead of via os.Exit (R-4).
-func (a *App) selectSubscription(subs []subscription.NamedSubscription) (string, error) {
-	for {
-		ui.ClearScreen()
-		ui.Title("Список моих подписок")
-		for i, s := range subs {
-			ui.Item(i+1, fmt.Sprintf("%-30s  %s", s.Name, ui.Dim(maskURL(s.URL, a.cfg.MaskCreds))))
-		}
-		ui.Divider()
-
-		prompt := fmt.Sprintf("[ + - добавить, 0 - выход, 1-%d - выбор подписки, d - удалить ]", len(subs))
-		fmt.Printf("  %s▸%s %s ", ui.ColorCyan, ui.ColorReset, prompt)
-		input, err := ui.ReadKey()
-		fmt.Println()
-		if err != nil {
-			if errors.Is(err, ui.ErrInterrupted) {
-				return "", ErrUserQuit
-			}
-			ui.Error("Ошибка ввода")
-			continue
-		}
-
-		switch {
-		case input == "+":
-			return "", nil
-		case strings.EqualFold(input, "d"):
-			if len(subs) == 0 {
-				ui.Error("Нет подписок для удаления")
-				continue
-			}
-			fmt.Printf("  Введите номер для удаления [1-%d]: ", len(subs))
-			delKey, err := ui.ReadKey()
-			fmt.Println()
-			if err != nil {
-				if errors.Is(err, ui.ErrInterrupted) {
-					return "", ErrUserQuit
-				}
-				continue
-			}
-			delIdx, err := strconv.Atoi(delKey)
-			if err != nil || delIdx < 1 || delIdx > len(subs) {
-				ui.Error("Некорректный номер")
-				continue
-			}
-			if err := subscription.RemoveSubscription(delIdx - 1); err != nil {
-				ui.Error(fmt.Sprintf("Ошибка удаления: %v", err))
-				continue
-			}
-			ui.Success(fmt.Sprintf("Подписка «%s» удалена", subs[delIdx-1].Name))
-			subs, _ = subscription.LoadSubscriptions()
-			continue
-		case input == "0":
-			return "", ErrUserQuit
-		default:
-			idx, err := strconv.Atoi(input)
-			if err != nil || idx < 1 || idx > len(subs) {
-				ui.Error("Некорректный номер")
-				continue
-			}
-			ui.Success(fmt.Sprintf("Подписка: %s", subs[idx-1].Name))
-			return subs[idx-1].URL, nil
-		}
-	}
-}
-
-func (a *App) addSubFlow() error {
-	ui.Title("Добавление подписки")
-
-	rawURL, err := ui.StyledInput("Вставьте URL подписки")
-	if err != nil {
-		return fmt.Errorf("ввод отменён")
-	}
-	if rawURL == "" {
-		return fmt.Errorf("URL не может быть пустым")
-	}
-
+// addSubscription validates and stores a subscription URL; it runs inside the
+// TUI, so it must not print — problems come back as errors.
+func addSubscription(rawURL string) error {
 	// S-2: reject anything that isn't an http(s) subscription URL outright
 	// instead of warning and saving it anyway.
 	parsed, err := url.Parse(rawURL)
@@ -323,31 +262,10 @@ func (a *App) addSubFlow() error {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return fmt.Errorf("URL должен начинаться с http:// или https:// (получено %q)", parsed.Scheme)
 	}
-	if parsed.Scheme == "http" {
-		ui.Warn("URL использует http без шифрования — предпочтительнее https")
-	}
-
-	ui.Warn("Проверка URL идёт напрямую, вне VPN-туннеля")
-	ui.Progress("Проверка URL")
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, headErr := client.Head(rawURL)
-	ui.ClearLine()
-	if headErr != nil {
-		ui.Warn(fmt.Sprintf("Не удалось проверить URL: %v (всё равно сохраню)", headErr))
-	} else {
-		resp.Body.Close()
-		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-			ui.Success("URL доступен")
-		} else {
-			ui.Warn(fmt.Sprintf("URL вернул HTTP %d (всё равно сохраню)", resp.StatusCode))
-		}
-	}
 
 	if err := subscription.SaveSubscription(rawURL); err != nil {
 		return fmt.Errorf("ошибка сохранения: %w", err)
 	}
-
-	ui.Success("Подписка добавлена")
 	return nil
 }
 
@@ -368,11 +286,18 @@ func (a *App) fetchAndSelectServer(ctx context.Context, subURL string, tc *xrayc
 	}
 
 	pb := NewProxyBenchmarker(tc, a.binary, 3, 8*time.Second, a.cfg.AllowInsecure)
-	selected := subscription.ShowMenu(ctx, entries, refresh, pb.Run)
-	if selected == nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
+	selected, action, err := tui.SelectServer(ctx, entries, refresh, pb.Run)
+	if err != nil {
+		return nil, fmt.Errorf("TUI: %w", err)
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	switch action {
+	case tui.ServerQuit:
+		// U-1: q/Ctrl+C exits the whole app, not just the screen.
+		return nil, ErrUserQuit
+	case tui.ServerBack:
 		return nil, ErrSwitchSubscription
 	}
 
