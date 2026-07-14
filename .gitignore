@@ -48,3 +48,6 @@ subscriptions.txt
 
 # Per-machine device identifier (generated on first run)
 hwid.txt
+
+# dumped bare links (contain UUIDs/passwords)
+keys/
