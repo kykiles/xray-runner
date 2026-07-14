@@ -52,6 +52,11 @@ type App struct {
 	originalProxy system.ProxyState
 	proxyTouched  bool
 	interfaces    func() ([]net.Interface, error)
+
+	// U-5: status line data, written by health loops, read by statusLoop.
+	statusMu    sync.Mutex
+	lastCheck   time.Time
+	lastCheckOK bool
 }
 
 func New(cfg *config.Config, opts Options) *App {
@@ -204,7 +209,7 @@ func (a *App) runProxy(ctx context.Context, cfg *xraycfg.XrayConfig) error {
 	fmt.Println("──────────────────────────────────────────")
 	go a.healthCheckLoopPorts(ctx, socksPort, httpPort)
 
-	<-ctx.Done()
+	a.statusLoop(ctx)
 	slog.Info("shutting down xray")
 	return nil
 }
@@ -240,7 +245,7 @@ func (a *App) runTun(ctx context.Context, cfg *xraycfg.XrayConfig) error {
 	fmt.Println("──────────────────────────────────────────")
 	go a.healthCheckLoopConnectivity(ctx)
 
-	<-ctx.Done()
+	a.statusLoop(ctx)
 	slog.Info("shutting down xray")
 	return nil
 }

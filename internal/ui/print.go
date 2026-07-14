@@ -36,6 +36,11 @@ func Progress(text string) {
 }
 
 func ClearLine() {
+	// U-3: no cursor control on a non-ANSI target — just finish the line.
+	if plain {
+		fmt.Println()
+		return
+	}
 	fmt.Print("\033[2K\r")
 }
 
@@ -44,5 +49,10 @@ func Divider() {
 }
 
 func ClearScreen() {
+	// U-3: no cursor control on a non-ANSI target — separate visually instead.
+	if plain {
+		fmt.Println()
+		return
+	}
 	fmt.Print("\033[H\033[2J")
 }

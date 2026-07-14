@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"xray-runner/internal/system"
+	"xray-runner/internal/ui"
 )
 
 func (a *App) awaitTUNInterface(ctx context.Context, name string, timeout time.Duration) bool {
@@ -178,6 +179,7 @@ func (a *App) healthCheckLoopPorts(ctx context.Context, socksPort, httpPort int)
 
 		socksOK := checkPort(ctx, socksPort)
 		httpOK := checkPort(ctx, httpPort)
+		a.recordHealth(socksOK && httpOK)
 
 		if socksOK && httpOK {
 			consecutiveFails = 0
@@ -189,7 +191,7 @@ func (a *App) healthCheckLoopPorts(ctx context.Context, socksPort, httpPort int)
 			"consecutive_fails", consecutiveFails)
 
 		if consecutiveFails >= 3 {
-			slog.Warn("3 consecutive health check failures, requesting xray restart")
+			a.announceRestart()
 			if a.runner != nil {
 				a.runner.RequestRestart()
 			}
@@ -214,11 +216,12 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
 
 		req, _ := http.NewRequestWithContext(ctx, "GET", "https://www.google.com/generate_204", nil)
 		resp, err := client.Do(req)
+		a.recordHealth(err == nil)
 		if err != nil {
 			consecutiveFails++
 			slog.Warn("TUN connectivity check failed", "consecutive_fails", consecutiveFails)
 			if consecutiveFails >= 3 {
-				slog.Warn("3 consecutive TUN failures, requesting xray restart")
+				a.announceRestart()
 				if a.runner != nil {
 					a.runner.RequestRestart()
 				}
@@ -228,6 +231,65 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
 		}
 		resp.Body.Close()
 		consecutiveFails = 0
+	}
+}
+
+// recordHealth stores the result of the latest health probe for the status
+// line (U-5).
+func (a *App) recordHealth(ok bool) {
+	a.statusMu.Lock()
+	a.lastCheck = time.Now()
+	a.lastCheckOK = ok
+	a.statusMu.Unlock()
+}
+
+// announceRestart tells the user (not just the log) that xray is being
+// restarted after failed health checks (U-5).
+func (a *App) announceRestart() {
+	fmt.Println("\n  🔁 Health-check не прошёл 3 раза подряд — перезапускаю xray...")
+	slog.Warn("3 consecutive health check failures, requesting xray restart")
+}
+
+// statusLoop keeps a single in-place status line under the connected session:
+// uptime, server, last health probe (U-5). Returns when ctx is cancelled.
+func (a *App) statusLoop(ctx context.Context) {
+	started := time.Now()
+	// U-3: without ANSI (non-TTY/systemd) an in-place line is impossible —
+	// print a full line once a minute instead of \r-updating every 5s.
+	interval := 5 * time.Second
+	if ui.IsPlain() {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Println()
+			return
+		case <-ticker.C:
+		}
+
+		a.statusMu.Lock()
+		last, ok := a.lastCheck, a.lastCheckOK
+		a.statusMu.Unlock()
+
+		health := "ещё не было"
+		if !last.IsZero() {
+			mark := "✅"
+			if !ok {
+				mark = "❌"
+			}
+			health = fmt.Sprintf("%s %s назад", mark, time.Since(last).Round(time.Second))
+		}
+		line := fmt.Sprintf("  ⏱ uptime %s │ сервер %s:%d │ health: %s",
+			time.Since(started).Round(time.Second), a.serverHost, a.serverPort, health)
+		if ui.IsPlain() {
+			fmt.Println(line)
+		} else {
+			fmt.Print("\r" + line + "   ")
+		}
 	}
 }
 
