@@ -4,6 +4,7 @@ package system
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -77,11 +78,25 @@ func withFakeFirewall(t *testing.T, f *fakeIPTables) {
 	t.Cleanup(func() { fwCmd = orig })
 }
 
+// ipv4Cfg is a representative kill-switch config with an IPv4 server endpoint.
+var ipv4Cfg = KillSwitchConfig{ServerIP: "203.0.113.5", ServerPort: 443}
+
+// chainHasServerAccept reports whether the chain contains an ACCEPT rule for
+// the given server IP.
+func chainHasServerAccept(rules []string, ip string) bool {
+	for _, r := range rules {
+		if strings.Contains(r, "-d "+ip) && strings.Contains(r, "ACCEPT") {
+			return true
+		}
+	}
+	return false
+}
+
 func TestEnableKillSwitchAppliesBothStacks(t *testing.T) {
 	f := newFakeIPTables("iptables", "ip6tables")
 	withFakeFirewall(t, f)
 
-	if err := EnableKillSwitch(); err != nil {
+	if err := EnableKillSwitch(ipv4Cfg); err != nil {
 		t.Fatalf("EnableKillSwitch: %v", err)
 	}
 
@@ -89,9 +104,20 @@ func TestEnableKillSwitchAppliesBothStacks(t *testing.T) {
 		if got := f.jumps[bin]; got != 1 {
 			t.Errorf("%s: OUTPUT jumps = %d, want 1", bin, got)
 		}
-		if got := len(f.chains[bin].rules); got != 4 {
-			t.Errorf("%s: chain rules = %d, want 4", bin, got)
-		}
+	}
+	// iptables (IPv4 stack) gets the server ACCEPT rule; ip6tables doesn't
+	// (IPv4 -d would be invalid there), so it has one rule fewer.
+	if got := len(f.chains["iptables"].rules); got != 7 {
+		t.Errorf("iptables: chain rules = %d, want 7", got)
+	}
+	if got := len(f.chains["ip6tables"].rules); got != 6 {
+		t.Errorf("ip6tables: chain rules = %d, want 6", got)
+	}
+	if !chainHasServerAccept(f.chains["iptables"].rules, ipv4Cfg.ServerIP) {
+		t.Errorf("iptables: missing ACCEPT rule for server %s", ipv4Cfg.ServerIP)
+	}
+	if chainHasServerAccept(f.chains["ip6tables"].rules, ipv4Cfg.ServerIP) {
+		t.Errorf("ip6tables: unexpected IPv4 server ACCEPT rule")
 	}
 }
 
@@ -100,7 +126,7 @@ func TestEnableKillSwitchIsIdempotent(t *testing.T) {
 	withFakeFirewall(t, f)
 
 	for i := 0; i < 3; i++ {
-		if err := EnableKillSwitch(); err != nil {
+		if err := EnableKillSwitch(ipv4Cfg); err != nil {
 			t.Fatalf("EnableKillSwitch run %d: %v", i, err)
 		}
 	}
@@ -111,9 +137,12 @@ func TestEnableKillSwitchIsIdempotent(t *testing.T) {
 		if got := f.jumps[bin]; got != 1 {
 			t.Errorf("%s: OUTPUT jumps after 3 enables = %d, want 1", bin, got)
 		}
-		if got := len(f.chains[bin].rules); got != 4 {
-			t.Errorf("%s: chain rules after 3 enables = %d, want 4", bin, got)
-		}
+	}
+	if got := len(f.chains["iptables"].rules); got != 7 {
+		t.Errorf("iptables: chain rules after 3 enables = %d, want 7", got)
+	}
+	if got := len(f.chains["ip6tables"].rules); got != 6 {
+		t.Errorf("ip6tables: chain rules after 3 enables = %d, want 6", got)
 	}
 }
 
@@ -121,7 +150,7 @@ func TestEnableKillSwitchSkipsMissingBinary(t *testing.T) {
 	f := newFakeIPTables("iptables") // ip6tables unavailable
 	withFakeFirewall(t, f)
 
-	if err := EnableKillSwitch(); err != nil {
+	if err := EnableKillSwitch(ipv4Cfg); err != nil {
 		t.Fatalf("EnableKillSwitch: %v", err)
 	}
 

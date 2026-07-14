@@ -11,15 +11,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
 
 type Runner struct {
-	binary string
-	config string
-	mu     sync.Mutex
-	cmd    *exec.Cmd
+	binary  string
+	config  string
+	mu      sync.Mutex
+	cmd     *exec.Cmd
+	restart bool // set by RequestRestart, consumed by RunWithRetry
 }
 
 var osExecutable = os.Executable
@@ -93,6 +95,44 @@ func (r *Runner) Stop() error {
 	return nil
 }
 
+// RequestRestart asks RunWithRetry to restart xray regardless of the exit
+// code, then stops the current process. Without this explicit flag a SIGINT
+// stop makes xray exit with code 0, which RunWithRetry would treat as a clean
+// shutdown and never restart.
+func (r *Runner) RequestRestart() {
+	r.mu.Lock()
+	r.restart = true
+	r.mu.Unlock()
+	r.Stop()
+}
+
+// takeRestart reports whether a restart was requested and clears the flag.
+func (r *Runner) takeRestart() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	v := r.restart
+	r.restart = false
+	return v
+}
+
+// TestConfig validates the config without starting the tunnel. A failure here
+// is a deterministic config error and must not be retried.
+func (r *Runner) TestConfig(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, r.binary, "run", "-test", "-c", r.config).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("config test failed: %w\n%s", err, lastLines(out, 10))
+	}
+	return nil
+}
+
+func lastLines(b []byte, n int) string {
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (r *Runner) Wait() error {
 	r.mu.Lock()
 	cmd := r.cmd
@@ -113,19 +153,50 @@ func (r *Runner) PID() int {
 }
 
 func (r *Runner) RunWithRetry(ctx context.Context, maxRetries int) error {
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	attempt := 0
+	for attempt < maxRetries {
+		start := time.Now()
 		if err := r.Start(ctx); err != nil {
 			return err
 		}
 		slog.Info("xray started", "pid", r.PID())
 
 		err := r.Wait()
-		if err == nil || ctx.Err() != nil {
+
+		if ctx.Err() != nil {
 			return nil
 		}
 
+		// Explicit restart request (health check): restart regardless of exit
+		// code — xray exits 0 on SIGINT, so exit code alone can't signal it.
+		if r.takeRestart() {
+			slog.Info("restart requested by health check, restarting xray")
+			attempt = 0
+			continue
+		}
+
+		// Natural exit with code 0 and no restart requested: nothing to
+		// recover. Return so the caller cancels its context and shuts down
+		// cleanly instead of hanging with a dead xray behind a live proxy.
+		if err == nil {
+			return nil
+		}
+
+		// An almost-immediate exit is a deterministic config/runtime error;
+		// retrying it just burns the budget without changing the outcome.
+		if time.Since(start) < 2*time.Second {
+			return fmt.Errorf("xray exited immediately (%v), likely a config error: %w", time.Since(start), err)
+		}
+
+		// R-1: a process that stayed up long enough counts as stable; isolated
+		// crashes after long uptime shouldn't exhaust the retry budget.
+		if time.Since(start) > 60*time.Second {
+			attempt = 0
+		}
+
 		delay := time.Duration(math.Pow(2, float64(attempt))) * time.Second
-		slog.Warn("xray crashed", "attempt", attempt+1, "max_retries", maxRetries, "error", err, "retry_in", delay)
+		attempt++
+		slog.Warn("xray crashed", "attempt", attempt, "max_retries", maxRetries, "error", err, "retry_in", delay)
 
 		select {
 		case <-time.After(delay):

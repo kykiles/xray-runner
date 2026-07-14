@@ -30,6 +30,12 @@ type App struct {
 	runner          *xray.Runner
 	proxy           *system.ProxyManager
 	tmpFile         string
+	lockFile        string
+	lockHeld        bool
+	binary          string
+	serverHost      string
+	serverPort      int
+	serverUDP       bool
 	originalProxy   system.ProxyState
 	proxyTouched    bool
 	interfaces      func() ([]net.Interface, error)
@@ -40,6 +46,7 @@ func New(cfg *config.Config) *App {
 		cfg:        cfg,
 		proxy:      system.New(),
 		tmpFile:    filepath.Join(".", "xray_config.json"),
+		lockFile:   filepath.Join(".", "xray_config.json.lock"),
 		interfaces: net.Interfaces,
 	}
 }
@@ -99,6 +106,7 @@ func (a *App) resolveLegacyOutbound(ctx context.Context, tc *xraycfg.XrayConfig)
 				continue
 			}
 			a.printSubEntryDetails(selected)
+			a.setServerEndpoint(selected)
 			resolveServer(selected.Address)
 			return subscription.BuildOutboundJSON(selected)
 		}
@@ -109,7 +117,11 @@ func (a *App) resolveLegacyOutbound(ctx context.Context, tc *xraycfg.XrayConfig)
 		return nil, fmt.Errorf("parse VLESS_URL: %w", err)
 	}
 	a.printURLDetails(u)
-	resolveServer(hostFromURL(u))
+	a.serverHost = hostFromURL(u)
+	if _, portStr, err := net.SplitHostPort(u.Host); err == nil {
+		a.serverPort, _ = strconv.Atoi(portStr)
+	}
+	resolveServer(a.serverHost)
 
 	switch u.Scheme {
 	case "vless":
@@ -247,8 +259,17 @@ func (a *App) fetchAndSelectServer(ctx context.Context, subURL string, tc *xrayc
 	}
 
 	a.printSubEntryDetails(selected)
+	a.setServerEndpoint(selected)
 	resolveServer(selected.Address)
 	return subscription.BuildOutboundJSON(selected)
+}
+
+// setServerEndpoint records the selected server so the kill switch can allow
+// xray's own traffic to it (H-1). hysteria2 uses UDP; everything else TCP.
+func (a *App) setServerEndpoint(e *subscription.SubEntry) {
+	a.serverHost = e.Address
+	a.serverPort = e.Port
+	a.serverUDP = e.Protocol == "hysteria2"
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -276,6 +297,19 @@ func (a *App) Run(ctx context.Context) error {
 	cfg := xraycfg.MergeConfig(tc, proxyOutbound)
 	cfg.Log = &xraycfg.LogConfig{Loglevel: a.cfg.XrayLogLvl}
 
+	// R-3: refuse to start a second instance racing over the same config/ports.
+	if err := a.acquireLock(); err != nil {
+		return err
+	}
+	if a.cfg.Mode != "tun" {
+		socksPort, httpPort := a.checkPorts(cfg)
+		for _, p := range []int{socksPort, httpPort} {
+			if portInUse(p) {
+				return fmt.Errorf("порт %d уже занят другим процессом — возможно, запущен второй экземпляр", p)
+			}
+		}
+	}
+
 	if err := a.writeConfig(cfg); err != nil {
 		return err
 	}
@@ -285,9 +319,16 @@ func (a *App) Run(ctx context.Context) error {
 	printRoutingRules(cfg)
 
 	binary := xray.FindBinary()
+	a.binary = binary
 	slog.Info("starting xray", "binary", binary, "mode", a.cfg.Mode)
 
 	a.runner = xray.New(binary, a.tmpFile)
+
+	// X-1: validate the config up front; a test failure is a deterministic
+	// error and must not be retried.
+	if err := a.runner.TestConfig(ctx); err != nil {
+		return fmt.Errorf("проверка конфигурации xray не прошла: %w", err)
+	}
 
 	xrayCtx, xrayCancel := context.WithCancel(ctx)
 	defer xrayCancel()
@@ -360,7 +401,13 @@ func (a *App) runTun(ctx context.Context, cfg *xraycfg.XrayConfig) error {
 
 	if a.cfg.KillSwitch {
 		fmt.Print("  ⛔ Включение Kill Switch... ")
-		if err := system.EnableKillSwitch(); err != nil {
+		ksCfg := system.KillSwitchConfig{
+			ServerIP:   resolveFirstIP(a.serverHost),
+			ServerPort: a.serverPort,
+			UDP:        a.serverUDP,
+			XrayPath:   a.binary,
+		}
+		if err := system.EnableKillSwitch(ksCfg); err != nil {
 			fmt.Printf("❌ %v\n", err)
 			slog.Warn("kill switch failed", "error", err)
 		} else {
@@ -450,6 +497,52 @@ func (a *App) cleanup() {
 		_ = a.runner.Stop()
 	}
 	os.Remove(a.tmpFile)
+	if a.lockHeld {
+		os.Remove(a.lockFile)
+	}
+}
+
+// acquireLock creates an exclusive lock file next to the config so a second
+// instance from the same directory refuses to start (R-3).
+func (a *App) acquireLock() error {
+	f, err := os.OpenFile(a.lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("обнаружен lock-файл %s — возможно, уже запущен другой экземпляр; удалите файл, если это не так", a.lockFile)
+		}
+		return fmt.Errorf("создание lock-файла: %w", err)
+	}
+	f.Close()
+	a.lockHeld = true
+	return nil
+}
+
+// portInUse reports whether something is already listening on the local port,
+// which before xray starts means another process (likely a second instance).
+func portInUse(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// resolveFirstIP resolves host to a single IP for the kill-switch server rule.
+// It runs before the kill switch is active, so DNS still works.
+func resolveFirstIP(host string) string {
+	if host == "" {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return host
+	}
+	addrs, err := net.LookupHost(host)
+	if err != nil || len(addrs) == 0 {
+		slog.Warn("kill switch: could not resolve server, no server exception added", "host", host, "error", err)
+		return ""
+	}
+	return addrs[0]
 }
 
 func (a *App) writeConfig(cfg *xraycfg.XrayConfig) error {
@@ -745,7 +838,7 @@ func (a *App) healthCheckLoopPorts(ctx context.Context, socksPort, httpPort int)
 		if consecutiveFails >= 3 {
 			slog.Warn("3 consecutive health check failures, requesting xray restart")
 			if a.runner != nil {
-				a.runner.Stop()
+				a.runner.RequestRestart()
 			}
 			consecutiveFails = 0
 		}
@@ -774,7 +867,7 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
 			if consecutiveFails >= 3 {
 				slog.Warn("3 consecutive TUN failures, requesting xray restart")
 				if a.runner != nil {
-					a.runner.Stop()
+					a.runner.RequestRestart()
 				}
 				consecutiveFails = 0
 			}
