@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -16,24 +15,6 @@ const killSwitchChain = "XRAY_KILL"
 // firewallBins covers both IPv4 and IPv6. Leaving ip6tables unmanaged would
 // let traffic leak over IPv6 while the kill switch is active.
 var firewallBins = []string{"iptables", "ip6tables"}
-
-// commander abstracts firewall command execution so the kill-switch logic can
-// be unit-tested without root privileges or a real iptables binary.
-type commander interface {
-	lookPath(bin string) error
-	run(bin string, args ...string) ([]byte, error)
-}
-
-type execCommander struct{}
-
-func (execCommander) lookPath(bin string) error {
-	_, err := exec.LookPath(bin)
-	return err
-}
-
-func (execCommander) run(bin string, args ...string) ([]byte, error) {
-	return exec.Command(bin, args...).CombinedOutput()
-}
 
 // fwCmd is overridable in tests.
 var fwCmd commander = execCommander{}

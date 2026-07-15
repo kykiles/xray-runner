@@ -7,6 +7,10 @@ import (
 
 const TunInterfaceName = "xray-tun"
 
+// TunAddr is the TUN interface address. The routing layer needs it as the next
+// hop when pointing the system's default traffic at the tunnel.
+const TunAddr = "10.0.0.1"
+
 type XrayConfig struct {
 	Log       *LogConfig       `json:"log,omitempty"`
 	DNS       json.RawMessage  `json:"dns,omitempty"`
@@ -166,7 +170,7 @@ type TUNSettings struct {
 }
 
 func BuildTUNInbound() Inbound {
-	settings := fmt.Sprintf(`{"mtu":9000,"address":["10.0.0.1/24"],"networks":["tcp","udp"],"name":%q}`, TunInterfaceName)
+	settings := fmt.Sprintf(`{"mtu":9000,"address":["%s/24"],"networks":["tcp","udp"],"name":%q}`, TunAddr, TunInterfaceName)
 	return Inbound{
 		Tag:      "tun",
 		Protocol: "tun",

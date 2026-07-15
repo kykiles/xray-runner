@@ -116,6 +116,13 @@ func (a *App) watchSession(ctx context.Context, t *target, ports sessionPorts) (
 		return tui.StatusQuit, nil
 	}
 
+	// A note left by bring-up (e.g. the tun→proxy fallback) has had no screen to
+	// appear on until now. The channel is buffered, so this cannot block.
+	if a.pendingNote != "" {
+		ch <- tui.StatusUpdate{Note: a.pendingNote, Err: true}
+		a.pendingNote = ""
+	}
+
 	// If the core dies (or Ctrl+C arrives), close the screen instead of leaving
 	// the user staring at a dead session. The channel is closed only after every
 	// publisher has stopped, so no health loop can send on a closed channel.
@@ -196,13 +203,24 @@ func (a *App) headless() bool {
 func (a *App) switchMode() error {
 	if a.mode == "tun" {
 		a.mode = "proxy"
+		a.rememberMode()
 		return nil
 	}
-	if err := checkTunPrivileges(); err != nil {
+	if err := a.checkPrivileges(); err != nil {
 		return err
 	}
 	a.mode = "tun"
+	a.rememberMode()
 	return nil
+}
+
+// rememberMode persists the switch so the next start comes up the same way. A
+// refused switch never reaches here: only a mode the user actually got is worth
+// restoring.
+func (a *App) rememberMode() {
+	if err := updateState(func(s *LastState) { s.Mode = a.mode }); err != nil {
+		slog.Warn("failed to save mode state", "error", err)
+	}
 }
 
 type sessionPorts struct {
@@ -305,6 +323,22 @@ func (a *App) bringUpTun(ctx context.Context, t *target) error {
 	}
 	slog.Info("tun interface activated")
 
+	// The interface being up means nothing on its own: xray creates it and
+	// reads packets off it, but never touches the routing table, so until the
+	// routes below exist the tunnel receives no traffic at all.
+	routeCfg := system.TunRouteConfig{
+		Iface:     xraycfg.TunInterfaceName,
+		Addr:      xraycfg.TunAddr,
+		ServerIPs: resolveAllIPs(t.serverHosts()),
+	}
+	if len(routeCfg.ServerIPs) == 0 {
+		return fmt.Errorf("не удалось определить IP VPN-сервера — без него маршрутизация TUN оставит машину без сети")
+	}
+	if err := system.EnableTunRouting(routeCfg); err != nil {
+		return fmt.Errorf("настроить маршрутизацию TUN: %w", err)
+	}
+	a.tunRouted = true
+
 	if a.cfg.KillSwitch && t.isProfile() {
 		// The kill switch whitelists exactly one server endpoint; a balancer
 		// profile rotates across many, so enabling it here would blackhole the
@@ -336,6 +370,14 @@ func (a *App) bringUpTun(ctx context.Context, t *target) error {
 // releaseSession undoes everything bringUp did, leaving the OS clean for the
 // next session (or for exit).
 func (a *App) releaseSession() {
+	// Routes first: they are what stands between the user and a working
+	// network, so restore the physical path before anything else can fail.
+	if a.tunRouted {
+		if err := system.DisableTunRouting(); err != nil {
+			slog.Warn("failed to remove tun routes", "error", err)
+		}
+		a.tunRouted = false
+	}
 	if a.mode == "tun" {
 		system.DisableKillSwitch()
 	} else if a.proxyTouched {

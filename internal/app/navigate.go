@@ -23,11 +23,30 @@ import (
 type target struct {
 	subURL      string
 	profileName string
-	entry       *subscription.SubEntry // nil for a balancer profile
-	profileRaw  json.RawMessage        // nil for a single server
+	entry       *subscription.SubEntry  // nil for a balancer profile
+	profileRaw  json.RawMessage         // nil for a single server
+	profileSrvs []subscription.SubEntry // servers behind the profile's balancer
 }
 
 func (t target) isProfile() bool { return t.entry == nil }
+
+// serverHosts lists every server the session may connect to. TUN routing must
+// keep all of them on the physical path: a balancer rotates across the whole
+// list, and a server left inside the tunnel deadlocks xray's own uplink.
+func (t target) serverHosts() []string {
+	if !t.isProfile() {
+		return []string{t.entry.Address}
+	}
+	hosts := make([]string, 0, len(t.profileSrvs))
+	seen := map[string]bool{}
+	for _, e := range t.profileSrvs {
+		if e.Address != "" && !seen[e.Address] {
+			seen[e.Address] = true
+			hosts = append(hosts, e.Address)
+		}
+	}
+	return hosts
+}
 
 // title names the target for the status screen.
 func (t target) title() string {
@@ -51,6 +70,16 @@ const (
 	levelProfiles
 	levelServers
 )
+
+// backLevel is where "back" from a running session lands. A profile was picked
+// on the profile screen, so its server list is not a level the user ever passed
+// through — returning there would show servers they never chose from.
+func backLevel(t *target) navLevel {
+	if t.isProfile() {
+		return levelProfiles
+	}
+	return levelServers
+}
 
 // nav holds the menu position between sessions.
 type nav struct {
@@ -114,7 +143,8 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				a.nav.level = levelServers
 				continue
 			}
-			idx, action, err := tui.SelectProfile(a.nav.profiles)
+			pb := NewProxyBenchmarker(a.template, a.binary, 3, 8*time.Second, a.cfg.AllowInsecure)
+			idx, action, err := tui.SelectProfile(ctx, a.nav.profiles, pb.RunProfiles)
 			if err != nil {
 				return nil, fmt.Errorf("TUI: %w", err)
 			}
@@ -133,6 +163,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 					subURL:      a.nav.subs[a.nav.subIdx].URL,
 					profileName: p.Name,
 					profileRaw:  p.Raw,
+					profileSrvs: p.Entries,
 				}, nil
 			}
 

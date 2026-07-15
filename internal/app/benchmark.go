@@ -84,17 +84,11 @@ func waitPort(ctx context.Context, port int, timeout time.Duration) bool {
 	return false
 }
 
-func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.SubEntry, ports portPair) subscription.BenchmarkResult {
-	if err := entry.Validate(); err != nil {
-		return subscription.BenchmarkResult{Error: err}
-	}
-	entry.AllowInsecure = pb.allowInsecure
-	outboundJSON, err := subscription.BuildOutboundJSON(&entry)
-	if err != nil {
-		return subscription.BenchmarkResult{Error: err}
-	}
-
-	inbounds := []xraycfg.Inbound{
+// benchInbounds are the loopback inbounds a measured instance listens on. They
+// replace whatever inbounds the config came with: only the outbound path is
+// under test, and the real ports may be in use by the running session.
+func benchInbounds(ports portPair) []xraycfg.Inbound {
+	return []xraycfg.Inbound{
 		{
 			Tag: "socks", Port: ports.socks, Listen: "127.0.0.1",
 			Protocol: "socks",
@@ -114,6 +108,26 @@ func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.S
 			},
 		},
 	}
+}
+
+// buildProfileBenchConfig measures the profile the way it will actually run:
+// its own outbounds, routing and balancer are kept untouched, so the number
+// reflects the provider's balancing rules rather than one server picked by us.
+func buildProfileBenchConfig(p subscription.Profile, ports portPair, logLevel string) (json.RawMessage, error) {
+	return xraycfg.MergeProfile(p.Raw, benchInbounds(ports), logLevel)
+}
+
+func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.SubEntry, ports portPair) subscription.BenchmarkResult {
+	if err := entry.Validate(); err != nil {
+		return subscription.BenchmarkResult{Error: err}
+	}
+	entry.AllowInsecure = pb.allowInsecure
+	outboundJSON, err := subscription.BuildOutboundJSON(&entry)
+	if err != nil {
+		return subscription.BenchmarkResult{Error: err}
+	}
+
+	inbounds := benchInbounds(ports)
 
 	outbounds := []json.RawMessage{outboundJSON}
 	for _, ob := range pb.template.Outbounds {
@@ -128,14 +142,38 @@ func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.S
 		Routing:   xraycfg.AddCatchAllRule(pb.template.Routing),
 	}
 
-	tmpFile := filepath.Join(pb.tmpDir, fmt.Sprintf("xray-bench-%d-%d.json", ports.socks, ports.http))
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
+	return pb.runAndMeasure(ctx, data, ports)
+}
+
+// measureProfile times the profile as a whole, through its own balancer.
+func (pb *ProxyBenchmarker) measureProfile(ctx context.Context, p subscription.Profile, ports portPair) subscription.BenchmarkResult {
+	// A bare link carries no panel config: it is a single server wearing a
+	// profile's clothes, so measure it as one.
+	if len(p.Raw) == 0 {
+		if len(p.Entries) == 0 {
+			return subscription.BenchmarkResult{Error: fmt.Errorf("профиль без серверов")}
+		}
+		return pb.measureOne(ctx, p.Entries[0], ports)
+	}
+
+	data, err := buildProfileBenchConfig(p, ports, "error")
+	if err != nil {
+		return subscription.BenchmarkResult{Error: err}
+	}
+	return pb.runAndMeasure(ctx, data, ports)
+}
+
+// runAndMeasure starts xray on the given config and times a single request
+// through its http inbound.
+func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, ports portPair) subscription.BenchmarkResult {
+	tmpFile := filepath.Join(pb.tmpDir, fmt.Sprintf("xray-bench-%d-%d.json", ports.socks, ports.http))
 	// H-2: bench configs carry the same secrets as the main config; keep them
 	// 0600 inside a private 0700 dir instead of world-readable /tmp.
-	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
+	if err := os.WriteFile(tmpFile, cfgJSON, 0600); err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
 	defer os.Remove(tmpFile)
@@ -180,9 +218,28 @@ func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.S
 }
 
 func (pb *ProxyBenchmarker) Run(ctx context.Context, entries []subscription.SubEntry, onResult func(subscription.BenchmarkResult)) []subscription.BenchmarkResult {
+	return runBatch(ctx, pb, entries, pb.measureOne, onResult)
+}
+
+// RunProfiles measures whole profiles instead of single servers: each one is
+// timed through its own balancer, which is what the user actually connects to.
+func (pb *ProxyBenchmarker) RunProfiles(ctx context.Context, profiles []subscription.Profile, onResult func(subscription.BenchmarkResult)) []subscription.BenchmarkResult {
+	return runBatch(ctx, pb, profiles, pb.measureProfile, onResult)
+}
+
+// runBatch measures items concurrently into a private temp dir. Servers and
+// profiles differ only in how one item is measured, so everything around that —
+// the temp dir, the worker pool, the result plumbing — is shared.
+func runBatch[T any](
+	ctx context.Context,
+	pb *ProxyBenchmarker,
+	items []T,
+	measure func(context.Context, T, portPair) subscription.BenchmarkResult,
+	onResult func(subscription.BenchmarkResult),
+) []subscription.BenchmarkResult {
 	dir, err := os.MkdirTemp("", "xray-bench-*")
 	if err != nil {
-		results := make([]subscription.BenchmarkResult, len(entries))
+		results := make([]subscription.BenchmarkResult, len(items))
 		for i := range results {
 			results[i] = subscription.BenchmarkResult{Index: i, Error: err}
 		}
@@ -191,14 +248,14 @@ func (pb *ProxyBenchmarker) Run(ctx context.Context, entries []subscription.SubE
 	pb.tmpDir = dir
 	defer os.RemoveAll(dir)
 
-	results := make([]subscription.BenchmarkResult, len(entries))
+	results := make([]subscription.BenchmarkResult, len(items))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, pb.concurrency)
 	// Q-3: onResult runs from worker goroutines; serialize the callbacks here so
 	// consumers (e.g. the progress line in menu.go) don't need their own locking.
 	var resultMu sync.Mutex
 
-	for i := range entries {
+	for i := range items {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(idx int) {
@@ -214,7 +271,7 @@ func (pb *ProxyBenchmarker) Run(ctx context.Context, entries []subscription.SubE
 				if err != nil {
 					result = subscription.BenchmarkResult{Error: err}
 				} else {
-					result = pb.measureOne(ctx, entries[idx], ports)
+					result = measure(ctx, items[idx], ports)
 				}
 			}
 			result.Index = idx

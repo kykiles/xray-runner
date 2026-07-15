@@ -157,13 +157,14 @@ func pickEntry(entries []subscription.SubEntry, sel string, state *LastState, us
 	return nil, fmt.Errorf("%w: не указан сервер (--server или --last)", ErrSelection)
 }
 
-// rememberSelection persists the choice for later --last runs (U-2).
+// rememberSelection persists the choice for later --last runs (U-2). It edits
+// the saved state rather than replacing it, so the remembered mode survives.
 func (a *App) rememberSelection(subURL string, e *subscription.SubEntry) {
-	if err := saveLastState(LastState{
-		SubscriptionURL: subURL,
-		ServerRemarks:   e.Remarks,
-		ServerAddress:   e.Address,
-		ServerPort:      e.Port,
+	if err := updateState(func(s *LastState) {
+		s.SubscriptionURL = subURL
+		s.ServerRemarks = e.Remarks
+		s.ServerAddress = e.Address
+		s.ServerPort = e.Port
 	}); err != nil {
 		slog.Warn("failed to save last-server state", "error", err)
 	}

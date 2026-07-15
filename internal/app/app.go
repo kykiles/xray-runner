@@ -51,14 +51,20 @@ type App struct {
 	lockHeld      bool
 	binary        string
 	template      *xraycfg.XrayConfig
-	mode          string // active mode; starts at cfg.Mode, toggled by the m key
+	mode          string // active mode; starts at cfg.Mode or the saved mode, toggled by the m key
+	modeFromState bool   // mode came from the saved state, not from cfg.Mode
+	pendingNote   string // shown on the next status screen (e.g. a mode fallback)
 	nav           nav    // menu position, kept across sessions
 	serverHost    string
 	serverPort    int
 	serverUDP     bool
 	originalProxy system.ProxyState
 	proxyTouched  bool
+	tunRouted     bool // tun routes installed; teardown must remove them
 	interfaces    func() ([]net.Interface, error)
+	// checkPrivileges reports whether tun mode may be used; a field so tests can
+	// exercise both outcomes without being root.
+	checkPrivileges func() error
 
 	// U-5: status data, written by health loops, read by the status screen.
 	statusMu    sync.Mutex
@@ -69,25 +75,22 @@ type App struct {
 
 func New(cfg *config.Config, opts Options) *App {
 	return &App{
-		cfg:        cfg,
-		opts:       opts,
-		mode:       cfg.Mode,
-		proxy:      system.New(),
-		tmpFile:    filepath.Join(".", "xray_config.json"),
-		lockFile:   filepath.Join(".", "xray_config.json.lock"),
-		interfaces: net.Interfaces,
+		cfg:             cfg,
+		opts:            opts,
+		mode:            cfg.Mode,
+		proxy:           system.New(),
+		tmpFile:         filepath.Join(".", "xray_config.json"),
+		lockFile:        filepath.Join(".", "xray_config.json.lock"),
+		interfaces:      net.Interfaces,
+		checkPrivileges: checkTunPrivileges,
 	}
 }
 
 func (a *App) Run(ctx context.Context) error {
 	defer a.cleanup()
 
-	// R-5: tun mode needs root/elevation — fail immediately with a clear
-	// message instead of letting xray retry for 30 seconds.
-	if a.mode == "tun" {
-		if err := checkTunPrivileges(); err != nil {
-			return err
-		}
+	if err := a.resolveMode(); err != nil {
+		return err
 	}
 
 	tc, err := xraycfg.LoadTemplate("template.json")
@@ -138,6 +141,53 @@ func (a *App) Run(ctx context.Context) error {
 	return a.menuLoop(ctx)
 }
 
+// resolveMode settles which mode this run starts in, before anything is built
+// on top of the answer.
+//
+// R-5: tun mode needs root/elevation — decide here with a clear message instead
+// of letting xray retry for 30 seconds.
+func (a *App) resolveMode() error {
+	a.applySavedMode()
+	if a.mode != "tun" {
+		return nil
+	}
+	err := a.checkPrivileges()
+	if err == nil {
+		return nil
+	}
+	// A mode the user asked for explicitly (MODE=tun) is a demand, so it still
+	// fails loudly. A remembered mode is only a preference: falling back beats
+	// refusing to start over a choice made last time.
+	if !a.modeFromState {
+		return err
+	}
+	slog.Warn("saved tun mode unavailable, falling back to proxy", "error", err)
+	a.pendingNote = "⚠ Прошлый режим TUN недоступен: " + err.Error() + ". Работаем в PROXY."
+	a.mode = "proxy"
+	return nil
+}
+
+// applySavedMode brings the app up in the mode the user last switched to,
+// overriding cfg.Mode: MODE in .env seeds the first run, after that the m key is
+// what the user expects to be remembered. A mode that is saved but unusable is
+// left on disk untouched — the fallback in Run is for this run only, so a
+// restart with sudo returns to tun without re-selecting it.
+func (a *App) applySavedMode() {
+	s, err := loadLastState()
+	if err != nil || s.Mode == "" {
+		return
+	}
+	if s.Mode != "proxy" && s.Mode != "tun" {
+		slog.Warn("saved mode is not proxy/tun, ignoring", "mode", s.Mode)
+		return
+	}
+	if s.Mode != a.mode {
+		slog.Info("restored mode from the last session", "mode", s.Mode, "env_mode", a.cfg.Mode)
+	}
+	a.mode = s.Mode
+	a.modeFromState = true
+}
+
 // menuLoop alternates between the menu and a connected session: the session
 // screen can send the user back to the server list (esc) or restart the core in
 // the other mode (m), which is why selection is not a one-shot step.
@@ -158,7 +208,7 @@ func (a *App) menuLoop(ctx context.Context) error {
 				// user pick another server.
 				slog.Error("session failed", "error", err)
 				ui.Error(err.Error())
-				a.nav.level = levelServers
+				a.nav.level = backLevel(t)
 				break
 			}
 
@@ -166,8 +216,8 @@ func (a *App) menuLoop(ctx context.Context) error {
 			case tui.StatusQuit:
 				return ErrUserQuit
 			case tui.StatusBack:
-				// Resume at the server list of the same profile.
-				a.nav.level = levelServers
+				// Resume at the screen the target was picked on.
+				a.nav.level = backLevel(t)
 			case tui.StatusSwitchMode, tui.StatusRestart:
 				continue
 			}
@@ -219,6 +269,43 @@ func resolveFirstIP(host string) string {
 		return ""
 	}
 	return addrs[0]
+}
+
+// resolveAllIPs resolves every host to every one of its addresses, for the TUN
+// route exceptions. Unlike the kill switch, one address is not enough: xray may
+// dial any record the name resolves to, and a missed one would route the
+// tunnel's own uplink back into the tunnel. It must run before the routes are
+// installed, while DNS still takes the physical path.
+func resolveAllIPs(hosts []string) []string {
+	var ips []string
+	seen := map[string]bool{}
+	for _, host := range hosts {
+		if host == "" {
+			continue
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			if !seen[host] {
+				seen[host] = true
+				ips = append(ips, host)
+			}
+			continue
+		}
+		addrs, err := net.LookupHost(host)
+		if err != nil || len(addrs) == 0 {
+			slog.Warn("tun routing: could not resolve server", "host", host, "error", err)
+			continue
+		}
+		for _, a := range addrs {
+			// An IPv6 exception can't be expressed with the IPv4 routes we
+			// install; skipping it is safe because the tunnel only claims IPv4.
+			if ip := net.ParseIP(a); ip == nil || ip.To4() == nil || seen[a] {
+				continue
+			}
+			seen[a] = true
+			ips = append(ips, a)
+		}
+	}
+	return ips
 }
 
 // writeConfigJSON stores the generated config for xray to read.

@@ -15,6 +15,9 @@ type LastState struct {
 	ServerRemarks   string `json:"server_remarks"`
 	ServerAddress   string `json:"server_address"`
 	ServerPort      int    `json:"server_port"`
+	// Mode is the proxy/tun mode the user last switched to, so a restart comes
+	// back up the way they left it. Empty means "never switched" — cfg.Mode wins.
+	Mode string `json:"mode,omitempty"`
 }
 
 func loadLastState() (*LastState, error) {
@@ -37,4 +40,18 @@ func saveLastState(s LastState) error {
 		return err
 	}
 	return os.WriteFile(stateFile, data, 0600)
+}
+
+// updateState edits the saved state in place. The server selection and the mode
+// are written by unrelated actions, so each one must read what the other left
+// behind instead of overwriting the whole file from its own partial view.
+// A missing or corrupted file starts from an empty state rather than failing:
+// this is a convenience record, not something worth blocking a connection over.
+func updateState(edit func(*LastState)) error {
+	s, err := loadLastState()
+	if err != nil {
+		s = &LastState{}
+	}
+	edit(s)
+	return saveLastState(*s)
 }
