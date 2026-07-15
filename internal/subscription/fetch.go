@@ -28,6 +28,17 @@ func WithHWID(hwid, deviceOS, deviceModel string) FetchOption {
 const defaultUserAgent = "v2rayNG/1.8.5"
 
 func Fetch(rawURL string, opts ...FetchOption) ([]SubEntry, error) {
+	// A bare link carries the server inline — there is nothing to fetch, and the
+	// branch lives here so every caller (menu, scripted selection, --dump-links)
+	// gets it without repeating the check.
+	if IsBareLink(rawURL) {
+		e, err := ParseBareLink(rawURL)
+		if err != nil {
+			return nil, err
+		}
+		return []SubEntry{*e}, nil
+	}
+
 	body, err := fetchBody(rawURL, opts...)
 	if err != nil {
 		return nil, err

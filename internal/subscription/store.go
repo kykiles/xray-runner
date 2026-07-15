@@ -39,6 +39,9 @@ func LoadSubscriptions() ([]NamedSubscription, error) {
 		}
 		name := pendingComment
 		if name == "" {
+			name = bareLinkName(line)
+		}
+		if name == "" {
 			if u, err := url.Parse(line); err == nil {
 				name = u.Host
 			} else {

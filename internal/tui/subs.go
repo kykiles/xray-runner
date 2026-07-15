@@ -49,7 +49,7 @@ type subsModel struct {
 // index points into the (possibly reloaded) list, which is also returned.
 func SelectSubscription(subs []subscription.NamedSubscription, cb SubsCallbacks) ([]subscription.NamedSubscription, int, SubsAction, error) {
 	ti := textinput.New()
-	ti.Placeholder = "https://..."
+	ti.Placeholder = "https://... или vless://..."
 	ti.CharLimit = 512
 	ti.Width = 60
 
@@ -184,7 +184,8 @@ func (m subsModel) View() string {
 	b.WriteString(titleStyle.Render("── Мои подписки") + "\n\n")
 
 	if m.mode == subsAdding {
-		b.WriteString("  Вставьте URL подписки (http/https):\n")
+		b.WriteString("  Вставьте URL подписки (http/https) или ссылку на сервер\n")
+		b.WriteString("  (vless/vmess/ss/hysteria2):\n")
 		b.WriteString("  " + m.input.View() + "\n")
 		if m.status != "" {
 			b.WriteString("\n  " + m.status + "\n")

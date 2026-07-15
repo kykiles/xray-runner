@@ -37,6 +37,18 @@ func (p Profile) Mode() string {
 // stays flat for callers that only need the server list (--dump-links, scripted
 // selection).
 func FetchProfiles(rawURL string, opts ...FetchOption) ([]Profile, error) {
+	// A bare link is one server and nothing to fetch. It becomes an unnamed
+	// profile with no Raw, so the menu skips the profile screen and the session
+	// runs it as a single server (with the template's routing) rather than as a
+	// panel profile.
+	if IsBareLink(rawURL) {
+		e, err := ParseBareLink(rawURL)
+		if err != nil {
+			return nil, err
+		}
+		return []Profile{{Entries: []SubEntry{*e}}}, nil
+	}
+
 	body, err := fetchBody(rawURL, opts...)
 	if err != nil {
 		return nil, err

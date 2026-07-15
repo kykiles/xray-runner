@@ -65,9 +65,9 @@ func (a *App) resolveScriptedTarget() (*target, error) {
 	return &target{subURL: subURL, entry: selected}, nil
 }
 
-// migrateLegacyURL saves SUBSCRIPTION_URL from .env as a subscription so the
-// menu has something to show. VLESS_URL has no menu equivalent and stays a
-// scripted-only path.
+// migrateLegacyURL seeds an empty list from .env: SUBSCRIPTION_URL as a
+// subscription, VLESS_URL as a bare link. Both are one-time imports — once the
+// list has entries, .env is not consulted again.
 func (a *App) migrateLegacyURL() error {
 	if len(a.nav.subs) > 0 {
 		return nil
@@ -80,21 +80,31 @@ func (a *App) migrateLegacyURL() error {
 		a.nav.subs = subs
 		return nil
 	}
-	if a.cfg.SubscriptionURL == "" {
-		if a.cfg.VlessURL != "" {
-			return fmt.Errorf("%w: VLESS_URL работает только с --non-interactive; для меню добавьте подписку", ErrSelection)
+
+	legacy := []struct{ name, value string }{
+		{"SUBSCRIPTION_URL", a.cfg.SubscriptionURL},
+		{"VLESS_URL", a.cfg.VlessURL},
+	}
+	imported := false
+	for _, l := range legacy {
+		if l.value == "" {
+			continue
 		}
+		if err := addSubscription(l.value); err != nil {
+			return fmt.Errorf("%s: %w", l.name, err)
+		}
+		slog.Info("migrated legacy url from .env into the subscription list", "var", l.name)
+		imported = true
+	}
+	if !imported {
 		return nil // the menu will prompt for the first subscription
 	}
-	if err := addSubscription(a.cfg.SubscriptionURL); err != nil {
-		return fmt.Errorf("SUBSCRIPTION_URL: %w", err)
-	}
+
 	subs, err = subscription.LoadSubscriptions()
 	if err != nil {
 		return fmt.Errorf("load subscriptions: %w", err)
 	}
 	a.nav.subs = subs
-	slog.Info("migrated SUBSCRIPTION_URL from .env into the subscription list")
 	return nil
 }
 
@@ -162,20 +172,37 @@ func (a *App) rememberSelection(subURL string, e *subscription.SubEntry) {
 // addSubscription validates and stores a subscription URL; it runs inside the
 // TUI, so it must not print — problems come back as errors.
 func addSubscription(rawURL string) error {
-	// S-2: reject anything that isn't an http(s) subscription URL outright
-	// instead of warning and saving it anyway.
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return fmt.Errorf("некорректный URL: %w", err)
+	if err := validateSubscriptionInput(rawURL); err != nil {
+		return err
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("URL должен начинаться с http:// или https:// (получено %q)", parsed.Scheme)
-	}
-
 	if err := subscription.SaveSubscription(rawURL); err != nil {
 		return fmt.Errorf("ошибка сохранения: %w", err)
 	}
 	return nil
+}
+
+// validateSubscriptionInput accepts the two things the list can hold: an
+// http(s) subscription URL, or a bare link to a single server. S-2: reject
+// anything else outright instead of saving it and failing at connect time.
+func validateSubscriptionInput(rawURL string) error {
+	if subscription.IsBareLink(rawURL) {
+		e, err := subscription.ParseBareLink(rawURL)
+		if err != nil {
+			return err
+		}
+		// A link the parser accepts can still be missing the fields xray needs,
+		// so it is checked here rather than after it is saved.
+		if err := e.Validate(); err != nil {
+			return fmt.Errorf("ссылка неполная: %w", err)
+		}
+		return nil
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+		return nil
+	}
+	return fmt.Errorf("нужна ссылка на подписку (http/https) или на сервер (vless/vmess/ss/hysteria2), получено %q", rawURL)
 }
 
 // setServerEndpoint records the selected server so the kill switch can allow
