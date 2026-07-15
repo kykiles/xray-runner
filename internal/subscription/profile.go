@@ -80,6 +80,36 @@ func parseProfiles(raw []byte) ([]Profile, error) {
 	return []Profile{{Entries: entries}}, nil
 }
 
+// AllSingle reports whether no profile balances anything. Panels that publish
+// one config per location produce exactly this: a list of "profiles" that each
+// hold a single server, which is a server list wearing a profile costume.
+func AllSingle(profiles []Profile) bool {
+	for _, p := range profiles {
+		if p.Balancer != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// FlattenNamed merges profiles into a server list, naming a lone server after
+// its profile. The Xray-config parser seeds Remarks with the address, so the
+// location name the panel put in "remarks" would otherwise be lost — unlike
+// Flatten, which only fills an empty Remarks. Profiles holding several servers
+// keep per-server Remarks: one shared name would make them indistinguishable.
+func FlattenNamed(profiles []Profile) []SubEntry {
+	var out []SubEntry
+	for _, p := range profiles {
+		for _, e := range p.Entries {
+			if p.Name != "" && len(p.Entries) == 1 {
+				e.Remarks = p.Name
+			}
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // Flatten merges profile servers into one list, tagging each server with its
 // profile name so a flat consumer can still tell them apart.
 func Flatten(profiles []Profile) []SubEntry {

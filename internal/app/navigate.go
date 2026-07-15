@@ -88,6 +88,28 @@ type nav struct {
 	profiles []subscription.Profile
 	profIdx  int
 	level    navLevel
+	// flat marks a subscription whose profiles balance nothing: a URL list, or
+	// a panel publishing one config per location. Its profile screen would be a
+	// server list in disguise, so the menu shows the servers directly.
+	flat bool
+}
+
+// entries lists the servers the server screen shows: every server of the
+// subscription when flat, otherwise the ones inside the chosen profile.
+func (n *nav) entries() []subscription.SubEntry {
+	if n.flat {
+		return subscription.FlattenNamed(n.profiles)
+	}
+	return n.profiles[n.profIdx].Entries
+}
+
+// profileTitle names the profile the servers came from; a flat subscription has
+// no profile to name.
+func (n *nav) profileTitle() string {
+	if n.flat {
+		return ""
+	}
+	return n.profiles[n.profIdx].Name
 }
 
 // chooseTarget runs the menu until the user picks something to connect to.
@@ -133,12 +155,13 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 			}
 			a.nav.profiles = profiles
 			a.nav.profIdx = 0
+			a.nav.flat = subscription.AllSingle(profiles)
 			a.nav.level = levelProfiles
 
 		case levelProfiles:
-			// A URL-list subscription has one unnamed profile — there is nothing
-			// to choose, so the screen is skipped in both directions.
-			if len(a.nav.profiles) == 1 && a.nav.profiles[0].Name == "" {
+			// Nothing to choose when no profile balances anything — the screen is
+			// skipped in both directions.
+			if a.nav.flat {
 				a.nav.profIdx = 0
 				a.nav.level = levelServers
 				continue
@@ -181,7 +204,6 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 }
 
 func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
-	p := a.nav.profiles[a.nav.profIdx]
 	subURL := a.nav.subs[a.nav.subIdx].URL
 
 	// A-4: refresh re-fetches with the same HWID headers as the initial load,
@@ -192,14 +214,15 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 			return nil, err
 		}
 		a.nav.profiles = profiles
+		a.nav.flat = subscription.AllSingle(profiles)
 		if a.nav.profIdx >= len(profiles) {
 			a.nav.profIdx = 0
 		}
-		return profiles[a.nav.profIdx].Entries, nil
+		return a.nav.entries(), nil
 	}
 
 	pb := NewProxyBenchmarker(a.template, a.binary, 3, 8*time.Second, a.cfg.AllowInsecure)
-	selected, action, err := tui.SelectServer(ctx, p.Name, p.Entries, refresh, pb.Run)
+	selected, action, err := tui.SelectServer(ctx, a.nav.profileTitle(), a.nav.entries(), refresh, pb.Run)
 	if err != nil {
 		return nil, fmt.Errorf("TUI: %w", err)
 	}
@@ -213,7 +236,7 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 		return nil, ErrUserQuit
 	case tui.ServerBack:
 		// Nothing to go back to when the profile screen was skipped.
-		if len(a.nav.profiles) == 1 && a.nav.profiles[0].Name == "" {
+		if a.nav.flat {
 			a.nav.level = levelSubs
 		} else {
 			a.nav.level = levelProfiles
@@ -229,7 +252,7 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 
 	return &target{
 		subURL:      subURL,
-		profileName: p.Name,
+		profileName: a.nav.profileTitle(),
 		entry:       selected,
 	}, nil
 }

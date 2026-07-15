@@ -67,7 +67,7 @@ type serversModel struct {
 // came from; it may be empty.
 func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc) (*subscription.SubEntry, ServerAction, error) {
 	fi := textinput.New()
-	fi.Placeholder = "имя или хост"
+	fi.Placeholder = "имя, хост, p:vless, t:ws"
 	fi.CharLimit = 64
 	fi.Width = 40
 
@@ -105,16 +105,66 @@ func identityOrder(n int) []int {
 
 func (m serversModel) Init() tea.Cmd { return nil }
 
+// filterTerms is a parsed filter line: "p:" scopes a token to the protocol and
+// "t:" to the transport, so that "t:ws" cannot match a host that merely spells
+// "ws". Everything else keeps matching the name or the host.
+type filterTerms struct {
+	text  []string
+	proto []string
+	trans []string
+}
+
+func parseFilter(q string) filterTerms {
+	var f filterTerms
+	for _, tok := range strings.Fields(strings.ToLower(q)) {
+		switch {
+		case strings.HasPrefix(tok, "p:"):
+			if v := tok[len("p:"):]; v != "" {
+				f.proto = append(f.proto, v)
+			}
+		case strings.HasPrefix(tok, "t:"):
+			if v := tok[len("t:"):]; v != "" {
+				f.trans = append(f.trans, v)
+			}
+		default:
+			f.text = append(f.text, tok)
+		}
+	}
+	return f
+}
+
+// match reports whether the entry satisfies every token: tokens narrow the list.
+// Scoped tokens match by prefix, not substring: "p:ss" must mean shadowsocks and
+// not also vless, which happens to spell "ss" inside it.
+func (f filterTerms) match(e subscription.SubEntry) bool {
+	for _, v := range f.proto {
+		if !strings.HasPrefix(strings.ToLower(e.Protocol), v) {
+			return false
+		}
+	}
+	for _, v := range f.trans {
+		if !strings.HasPrefix(strings.ToLower(e.Network), v) {
+			return false
+		}
+	}
+	for _, v := range f.text {
+		if !strings.Contains(strings.ToLower(e.Remarks), v) && !strings.Contains(strings.ToLower(e.Address), v) {
+			return false
+		}
+	}
+	return true
+}
+
 // visible returns entry indices matching the filter, in display order.
 func (m serversModel) visible() []int {
-	q := strings.ToLower(strings.TrimSpace(m.filter.Value()))
+	q := strings.TrimSpace(m.filter.Value())
 	if q == "" {
 		return m.order
 	}
+	f := parseFilter(q)
 	var out []int
 	for _, idx := range m.order {
-		e := m.entries[idx]
-		if strings.Contains(strings.ToLower(e.Remarks), q) || strings.Contains(strings.ToLower(e.Address), q) {
+		if f.match(m.entries[idx]) {
 			out = append(out, idx)
 		}
 	}
@@ -130,7 +180,7 @@ func (m serversModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case benchDoneMsg:
 		m.benching = false
 		m.sortByLatency()
-		m.status = okStyle.Render("Бенчмарк завершён")
+		m.status = okStyle.Render("Пинг завершён")
 		return m, nil
 	case refreshDoneMsg:
 		m.refreshing = false
@@ -377,10 +427,10 @@ func (m serversModel) View() string {
 
 	keys := "  ↑/↓ выбор · enter подключить · / фильтр · esc назад · q выход"
 	if m.bench != nil {
-		keys = "  ↑/↓ выбор · enter подключить · b бенчмарк · r обновить · / фильтр · esc назад · q выход"
+		keys = "  ↑/↓ выбор · enter подключить · b пинг · r обновить · / фильтр · esc назад · q выход"
 	}
 	if m.filtering {
-		keys = "  ввод — фильтр по имени/хосту · enter применить · esc сбросить"
+		keys = "  фильтр: имя/хост · p:vless протокол · t:ws транспорт · enter применить · esc сбросить"
 	}
 	b.WriteString(legend(keys))
 	return b.String()

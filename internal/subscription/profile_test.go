@@ -133,3 +133,86 @@ func TestParseProfiles_URLListIsSingleUnnamedProfile(t *testing.T) {
 		t.Error("url list must not invent a balancer")
 	}
 }
+
+// Panels like glowshine publish one config per location, so every "profile"
+// holds a single server. The menu collapses those into a plain server list.
+const singlesFixture = `[
+  {
+    "remarks": "🇩🇪 Германия 1",
+    "outbounds": [
+      {"tag": "proxy", "protocol": "vless",
+       "settings": {"vnext": [{"address": "de1.example.ru", "port": 443,
+         "users": [{"id": "aaaaaaaa-2deb-4118-9c63-f55c7ee38d53"}]}]},
+       "streamSettings": {"network": "tcp"}}
+    ]
+  },
+  {
+    "remarks": "🇺🇸 США",
+    "outbounds": [
+      {"tag": "proxy", "protocol": "vless",
+       "settings": {"vnext": [{"address": "us1.example.ru", "port": 443,
+         "users": [{"id": "bbbbbbbb-2deb-4118-9c63-f55c7ee38d53"}]}]},
+       "streamSettings": {"network": "ws"}}
+    ]
+  }
+]`
+
+func TestAllSingle(t *testing.T) {
+	singles, err := parseProfiles([]byte(singlesFixture))
+	if err != nil {
+		t.Fatalf("parseProfiles: %v", err)
+	}
+	if !AllSingle(singles) {
+		t.Error("one-server profiles must count as all-single")
+	}
+
+	// The mixed fixture carries a balancer profile, so the profile screen stays.
+	mixed, err := parseProfiles([]byte(profileFixture))
+	if err != nil {
+		t.Fatalf("parseProfiles: %v", err)
+	}
+	if AllSingle(mixed) {
+		t.Error("a balancer profile must keep the subscription out of the flat path")
+	}
+}
+
+func TestFlattenNamed_LoneServerTakesProfileName(t *testing.T) {
+	profiles, err := parseProfiles([]byte(singlesFixture))
+	if err != nil {
+		t.Fatalf("parseProfiles: %v", err)
+	}
+	entries := FlattenNamed(profiles)
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	// Without the override Remarks would still be the address (S-2 of the task).
+	if entries[0].Remarks != "🇩🇪 Германия 1" {
+		t.Errorf("entries[0].Remarks = %q, want the profile name", entries[0].Remarks)
+	}
+	if entries[1].Remarks != "🇺🇸 США" {
+		t.Errorf("entries[1].Remarks = %q, want the profile name", entries[1].Remarks)
+	}
+	if entries[0].Address != "de1.example.ru" {
+		t.Errorf("entries[0].Address = %q", entries[0].Address)
+	}
+}
+
+// A profile with several servers must not hand them all the same name: the
+// address is the only thing telling them apart.
+func TestFlattenNamed_MultiServerProfileKeepsPerServerRemarks(t *testing.T) {
+	profiles, err := parseProfiles([]byte(profileFixture))
+	if err != nil {
+		t.Fatalf("parseProfiles: %v", err)
+	}
+	entries := FlattenNamed(profiles)
+	if len(entries) != 3 {
+		t.Fatalf("entries = %d, want 3", len(entries))
+	}
+	if entries[0].Remarks == entries[1].Remarks {
+		t.Errorf("two servers of one profile share Remarks %q", entries[0].Remarks)
+	}
+	// The lone server of the second profile still gets its location name.
+	if entries[2].Remarks != "🇲🇩 Молдова" {
+		t.Errorf("entries[2].Remarks = %q, want the profile name", entries[2].Remarks)
+	}
+}

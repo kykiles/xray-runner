@@ -16,6 +16,9 @@ var (
 	okStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	warnStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	// urlStyle renders a revealed subscription URL: underlined and unfaded so the
+	// terminal shows it as a link and the whole token can be copied.
+	urlStyle = lipgloss.NewStyle().Underline(true)
 	// legendStyle renders the uniform key legend at the bottom of every
 	// screen (U-1).
 	legendStyle = lipgloss.NewStyle().Faint(true).MarginTop(1)

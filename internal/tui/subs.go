@@ -43,6 +43,10 @@ type subsModel struct {
 	status string
 	action SubsAction
 	choice int
+	// reveal shows the selected subscription's full URL. Masking stays on by
+	// default so the personal token does not sit on screen (S-3); revealing is
+	// per-row and deliberate.
+	reveal bool
 }
 
 // SelectSubscription shows the subscription list. On SubsSelected the returned
@@ -111,6 +115,8 @@ func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.action = SubsSelected
 		m.choice = m.cursor
 		return m, tea.Quit
+	case "s":
+		m.reveal = !m.reveal
 	case "+", "a":
 		m.mode = subsAdding
 		m.input.SetValue("")
@@ -204,6 +210,14 @@ func (m subsModel) View() string {
 			cursor = cursorStyle.Render("▸ ")
 			line = selectedStyle.Render(fmt.Sprintf("%-28s ", s.Name)) + dimStyle.Render(m.cb.Mask(s.URL))
 		}
+		// The revealed URL goes on its own line: unpadded and untruncated, so it
+		// stays a working link the terminal can open.
+		if m.reveal && i == m.cursor {
+			line = selectedStyle.Render(s.Name)
+			b.WriteString("  " + cursor + line + "\n")
+			b.WriteString("      " + urlStyle.Render(s.URL) + "\n")
+			continue
+		}
 		b.WriteString("  " + cursor + line + "\n")
 	}
 
@@ -213,6 +227,10 @@ func (m subsModel) View() string {
 		b.WriteString("\n  " + m.status + "\n")
 	}
 
-	b.WriteString(legend("  ↑/↓ выбор · enter открыть · + добавить · d удалить · q выход"))
+	keys := "  ↑/↓ выбор · enter открыть · s показать URL · + добавить · d удалить · q выход"
+	if m.reveal {
+		keys = "  ↑/↓ выбор · enter открыть · s скрыть URL · + добавить · d удалить · q выход"
+	}
+	b.WriteString(legend(keys))
 	return b.String()
 }

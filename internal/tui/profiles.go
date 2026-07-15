@@ -69,7 +69,7 @@ func (m profilesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.waitBenchResult()
 	case benchDoneMsg:
 		m.benching = false
-		m.status = okStyle.Render("Бенчмарк завершён")
+		m.status = okStyle.Render("Пинг завершён")
 		return m, nil
 	case tea.KeyMsg:
 		return m.updateKey(msg)
@@ -161,7 +161,7 @@ func (m profilesModel) waitBenchResult() tea.Cmd {
 
 func (m profilesModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("── Мои серверы") + "\n\n")
+	b.WriteString(titleStyle.Render("── Серверы") + "\n\n")
 
 	b.WriteString("  " + header(fmt.Sprintf("  %s %s %s",
 		pad("ПРОФИЛЬ", 30), pad("СЕРВЕРОВ", 8), "РЕЖИМ")))
