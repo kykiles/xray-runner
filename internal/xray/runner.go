@@ -83,7 +83,9 @@ func (r *Runner) Start(ctx context.Context) error {
 		return fmt.Errorf("start xray: %w", err)
 	}
 
-	go logPipe(stdout, slog.LevelDebug)
+	// xray prints its fatal "Failed to start" on stdout, so DEBUG would hide the
+	// one line that explains why a session never came up.
+	go logPipe(stdout, slog.LevelInfo)
 	go logPipe(stderr, slog.LevelWarn)
 	return nil
 }

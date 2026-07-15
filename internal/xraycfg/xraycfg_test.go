@@ -180,3 +180,17 @@ func runTests(t *testing.T, tests []testCase) {
 		})
 	}
 }
+
+// The tun inbound names its interface via "name"; xray ignores any other key
+// and falls back to xray0, which awaitTUNInterface would then wait for forever.
+func TestBuildTUNInboundInterfaceName(t *testing.T) {
+	var settings struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(BuildTUNInbound().Settings, &settings); err != nil {
+		t.Fatalf("unmarshal tun settings: %v", err)
+	}
+	if settings.Name != TunInterfaceName {
+		t.Errorf("tun settings name = %q, want %q", settings.Name, TunInterfaceName)
+	}
+}

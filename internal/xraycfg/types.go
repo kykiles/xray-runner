@@ -162,11 +162,11 @@ type TUNSettings struct {
 	MTU           int      `json:"mtu"`
 	Address       []string `json:"address"`
 	Networks      []string `json:"networks"`
-	InterfaceName string   `json:"interfaceName"`
+	InterfaceName string   `json:"name"`
 }
 
 func BuildTUNInbound() Inbound {
-	settings := fmt.Sprintf(`{"mtu":9000,"address":["10.0.0.1/24"],"networks":["tcp","udp"],"interfaceName":%q}`, TunInterfaceName)
+	settings := fmt.Sprintf(`{"mtu":9000,"address":["10.0.0.1/24"],"networks":["tcp","udp"],"name":%q}`, TunInterfaceName)
 	return Inbound{
 		Tag:      "tun",
 		Protocol: "tun",
