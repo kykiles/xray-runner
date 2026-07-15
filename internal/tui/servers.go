@@ -41,6 +41,7 @@ type refreshDoneMsg struct {
 
 type serversModel struct {
 	ctx     context.Context
+	title   string // profile name, empty for a flat subscription
 	entries []subscription.SubEntry
 	refresh func() ([]subscription.SubEntry, error)
 	bench   BenchmarkFunc
@@ -62,8 +63,9 @@ type serversModel struct {
 }
 
 // SelectServer shows the server list and returns the chosen entry, or the
-// action that ended the screen (back/quit).
-func SelectServer(ctx context.Context, entries []subscription.SubEntry, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc) (*subscription.SubEntry, ServerAction, error) {
+// action that ended the screen (back/quit). title names the profile the servers
+// came from; it may be empty.
+func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc) (*subscription.SubEntry, ServerAction, error) {
 	fi := textinput.New()
 	fi.Placeholder = "имя или хост"
 	fi.CharLimit = 64
@@ -71,6 +73,7 @@ func SelectServer(ctx context.Context, entries []subscription.SubEntry, refresh 
 
 	m := serversModel{
 		ctx:     ctx,
+		title:   title,
 		entries: entries,
 		refresh: refresh,
 		bench:   bench,
@@ -81,7 +84,7 @@ func SelectServer(ctx context.Context, entries []subscription.SubEntry, refresh 
 		choice:  -1,
 	}
 
-	res, err := tea.NewProgram(m).Run()
+	res, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if err != nil {
 		return nil, ServerQuit, err
 	}
@@ -312,7 +315,11 @@ func (m *serversModel) sortByLatency() {
 
 func (m serversModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("── Серверы") + "\n\n")
+	title := "── Серверы"
+	if m.title != "" {
+		title = "── " + m.title + " · серверы"
+	}
+	b.WriteString(titleStyle.Render(title) + "\n\n")
 
 	if m.filtering || m.filter.Value() != "" {
 		b.WriteString("  Фильтр: " + m.filter.View() + "\n\n")
@@ -321,6 +328,9 @@ func (m serversModel) View() string {
 	vis := m.visible()
 	if len(vis) == 0 {
 		b.WriteString(dimStyle.Render("  Ничего не найдено") + "\n")
+	} else {
+		b.WriteString("  " + header(fmt.Sprintf("  %s %s %s %s",
+			pad("HOST", 28), pad("PROTOCOL", 9), pad("TRANSPORT", 9), "MARK")))
 	}
 	for pos, idx := range vis {
 		e := m.entries[idx]
@@ -330,11 +340,11 @@ func (m serversModel) View() string {
 		}
 
 		hostPort := fmt.Sprintf("%s:%d", e.Address, e.Port)
-		remark := e.Remarks
-		if remark != "" {
-			remark = " [" + remark + "]"
-		}
-		line := fmt.Sprintf("%-28s %-9s %-4s%s", hostPort, e.Protocol, e.Network, remark)
+		line := fmt.Sprintf("%s %s %s %s",
+			pad(truncate(hostPort, 28), 28),
+			pad(e.Protocol, 9),
+			pad(orDash(e.Network), 9),
+			truncate(orDash(mark(e)), 24))
 		if pos == m.cursor {
 			line = selectedStyle.Render(line)
 		}
@@ -381,4 +391,22 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// orDash keeps empty table cells visible as a placeholder instead of a hole.
+func orDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
+// mark is the server's name from the subscription. Xray-config subscriptions
+// carry no per-server name, so the parser falls back to the address — repeating
+// it in the MARK column would just duplicate HOST.
+func mark(e subscription.SubEntry) string {
+	if e.Remarks == e.Address {
+		return ""
+	}
+	return e.Remarks
 }

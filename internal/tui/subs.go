@@ -60,7 +60,7 @@ func SelectSubscription(subs []subscription.NamedSubscription, cb SubsCallbacks)
 		m.input.Focus()
 	}
 
-	res, err := tea.NewProgram(m).Run()
+	res, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if err != nil {
 		return subs, -1, SubsQuit, err
 	}

@@ -61,6 +61,7 @@ func main() {
 	defer stop()
 
 	slog.Info("starting xray-runner", "version", Version)
+	fmt.Print(banner())
 
 	application := app.New(cfg, app.Options{
 		Server:         *flagServer,
@@ -76,6 +77,8 @@ func main() {
 			return
 		}
 		slog.Error("fatal", "error", err)
+		// Logs go to the file only, so a fatal error must still reach the user.
+		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
 		// U-2: distinct exit codes for scripts/systemd — 2 means the requested
 		// server/subscription could not be selected, 1 is a runtime failure.
 		if errors.Is(err, app.ErrSelection) {

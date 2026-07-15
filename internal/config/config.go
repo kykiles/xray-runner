@@ -33,7 +33,7 @@ func Load(filenames ...string) (*Config, error) {
 		VlessURL:        os.Getenv("VLESS_URL"),
 		SubscriptionURL: os.Getenv("SUBSCRIPTION_URL"),
 		Mode:            strings.ToLower(envOr("MODE", "proxy")),
-		LogEnabled:      parseBool("LOG_ENABLED", false),
+		LogEnabled:      parseBool("LOG_ENABLED", true),
 		LogFile:         envOr("LOG_FILE", "xray-runner.log"),
 		LogLevel:        strings.ToLower(envOr("LOG_LEVEL", "info")),
 		MaskCreds:       parseBool("MASK_CREDENTIALS", true),

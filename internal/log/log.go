@@ -1,6 +1,7 @@
 package log
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -9,9 +10,11 @@ import (
 	"xray-runner/internal/config"
 )
 
+// Init routes slog to the log file only: the TUI owns the terminal, so nothing
+// may leak to stderr while a menu is on screen.
 func Init(cfg *config.Config) func() {
 	if !cfg.LogEnabled {
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 		return func() {}
 	}
 
@@ -22,11 +25,14 @@ func Init(cfg *config.Config) func() {
 
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
-		slog.Warn("cannot open log file, logging to stderr only", "file", logFile, "error", err)
+		// The only stderr write we allow: without it a broken log path would be
+		// invisible, since there is no console logging to fall back on.
+		fmt.Fprintf(os.Stderr, "⚠ не удалось открыть лог-файл %s: %v\n", logFile, err)
+		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 		return func() {}
 	}
 
-	logger := slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, f), &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}))
+	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}))
 	slog.SetDefault(logger)
 
 	return func() {

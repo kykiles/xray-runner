@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"xray-runner/internal/system"
-	"xray-runner/internal/ui"
+	"xray-runner/internal/tui"
 )
 
 func (a *App) awaitTUNInterface(ctx context.Context, name string, timeout time.Duration) bool {
@@ -59,13 +59,11 @@ func testConnectivity(ctx context.Context) {
 			}
 			resp.Body.Close()
 			if resp.StatusCode == 204 || resp.StatusCode == 200 {
-				fmt.Printf("  🌐 Проверка подключения... ✅ (HTTP %d)\n", resp.StatusCode)
 				slog.Info("connectivity check ok", "status", resp.StatusCode)
 				return
 			}
 		}
 		delay := time.Duration(1<<uint(attempt)) * time.Second
-		fmt.Printf("  🌐 Проверка подключения не удалась (попытка %d/3), повтор через %v...\n", attempt+1, delay)
 		slog.Warn("connectivity check failed", "attempt", attempt+1, "retry_in", delay)
 		// P-1: honour Ctrl+C during the backoff instead of sleeping it out.
 		select {
@@ -74,7 +72,6 @@ func testConnectivity(ctx context.Context) {
 			return
 		}
 	}
-	fmt.Println("  🌐 Проверка подключения... ❌ не удалась")
 	slog.Error("connectivity check failed after 3 attempts")
 }
 
@@ -91,25 +88,21 @@ func portInUse(port int) bool {
 
 func awaitPort(ctx context.Context, port int, label string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
-	fmt.Printf("  ⏳ Ожидание %s порта... ", label)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
 		if err == nil {
 			conn.Close()
-			fmt.Printf("✅ %s доступен\n", label)
 			slog.Info("port available", "label", label, "port", port)
 			return true
 		}
 		// P-1: abort promptly on Ctrl+C instead of sleeping out the poll interval.
 		select {
 		case <-ctx.Done():
-			fmt.Println("❌ отменено")
 			slog.Warn("port wait cancelled", "label", label, "port", port)
 			return false
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	fmt.Printf("❌ %s не отвечает за %v\n", label, timeout)
 	slog.Error("port timeout", "label", label, "port", port, "timeout", timeout)
 	return false
 }
@@ -145,13 +138,11 @@ func testProxyConnection(ctx context.Context, httpPort int) {
 			resp.Body.Close()
 
 			if resp.StatusCode == 204 || resp.StatusCode == 200 {
-				fmt.Printf("  🌐 Тестовый запрос %s... ✅ (HTTP %d)\n", proxyURL, resp.StatusCode)
 				slog.Info("proxy test ok", "proxy", proxyURL, "status", resp.StatusCode)
 				return
 			}
 		}
 		delay := time.Duration(1<<uint(attempt)) * time.Second
-		fmt.Printf("  🌐 Тестовый запрос не удался (попытка %d/3), повтор через %v...\n", attempt+1, delay)
 		slog.Warn("proxy test failed", "attempt", attempt+1, "retry_in", delay)
 		// P-1: honour Ctrl+C during the backoff instead of sleeping it out.
 		select {
@@ -160,7 +151,6 @@ func testProxyConnection(ctx context.Context, httpPort int) {
 			return
 		}
 	}
-	fmt.Println("  🌐 Тестовый запрос... ❌ не удался после 3 попыток")
 	slog.Error("proxy test failed after 3 attempts")
 }
 
@@ -169,17 +159,25 @@ func (a *App) healthCheckLoopPorts(ctx context.Context, socksPort, httpPort int)
 	defer ticker.Stop()
 
 	consecutiveFails := 0
+	// Probe once up front so the status screen shows a real result immediately
+	// instead of "проверка…" for the first interval.
+	first := true
 
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
+		if !first {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 		}
+		first = false
 
 		socksOK := checkPort(ctx, socksPort)
 		httpOK := checkPort(ctx, httpPort)
-		a.recordHealth(socksOK && httpOK)
+		// No latency: this probe dials our own local ports, so its timing says
+		// nothing about the VPN and would read as a fake "0 ms" to the server.
+		a.recordHealth(socksOK && httpOK, 0)
 
 		if socksOK && httpOK {
 			consecutiveFails = 0
@@ -206,17 +204,23 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
 
 	consecutiveFails := 0
 	client := &http.Client{Timeout: 10 * time.Second}
+	// Probe once up front so the status screen shows a real result immediately.
+	first := true
 
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
+		if !first {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 		}
+		first = false
 
+		start := time.Now()
 		req, _ := http.NewRequestWithContext(ctx, "GET", "https://www.google.com/generate_204", nil)
 		resp, err := client.Do(req)
-		a.recordHealth(err == nil)
+		a.recordHealth(err == nil, time.Since(start))
 		if err != nil {
 			consecutiveFails++
 			slog.Warn("TUN connectivity check failed", "consecutive_fails", consecutiveFails)
@@ -234,63 +238,42 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
 	}
 }
 
-// recordHealth stores the result of the latest health probe for the status
-// line (U-5).
-func (a *App) recordHealth(ok bool) {
+// recordHealth stores the latest probe result and pushes it to the connected
+// screen (U-5).
+func (a *App) recordHealth(ok bool, latency time.Duration) {
 	a.statusMu.Lock()
 	a.lastCheck = time.Now()
 	a.lastCheckOK = ok
 	a.statusMu.Unlock()
+
+	u := tui.StatusUpdate{OK: ok}
+	if ok {
+		u.Latency = latency
+	}
+	a.publishStatus(u)
+}
+
+// publishStatus hands an update to the status screen. The screen is optional
+// (scripted runs have none) and must never block a health loop, so a full or
+// absent channel simply drops the update.
+func (a *App) publishStatus(u tui.StatusUpdate) {
+	a.statusMu.Lock()
+	ch := a.statusCh
+	a.statusMu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- u:
+	default:
+	}
 }
 
 // announceRestart tells the user (not just the log) that xray is being
 // restarted after failed health checks (U-5).
 func (a *App) announceRestart() {
-	fmt.Println("\n  🔁 Health-check не прошёл 3 раза подряд — перезапускаю xray...")
 	slog.Warn("3 consecutive health check failures, requesting xray restart")
-}
-
-// statusLoop keeps a single in-place status line under the connected session:
-// uptime, server, last health probe (U-5). Returns when ctx is cancelled.
-func (a *App) statusLoop(ctx context.Context) {
-	started := time.Now()
-	// U-3: without ANSI (non-TTY/systemd) an in-place line is impossible —
-	// print a full line once a minute instead of \r-updating every 5s.
-	interval := 5 * time.Second
-	if ui.IsPlain() {
-		interval = time.Minute
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			fmt.Println()
-			return
-		case <-ticker.C:
-		}
-
-		a.statusMu.Lock()
-		last, ok := a.lastCheck, a.lastCheckOK
-		a.statusMu.Unlock()
-
-		health := "ещё не было"
-		if !last.IsZero() {
-			mark := "✅"
-			if !ok {
-				mark = "❌"
-			}
-			health = fmt.Sprintf("%s %s назад", mark, time.Since(last).Round(time.Second))
-		}
-		line := fmt.Sprintf("  ⏱ uptime %s │ сервер %s:%d │ health: %s",
-			time.Since(started).Round(time.Second), a.serverHost, a.serverPort, health)
-		if ui.IsPlain() {
-			fmt.Println(line)
-		} else {
-			fmt.Print("\r" + line + "   ")
-		}
-	}
+	a.publishStatus(tui.StatusUpdate{Note: "🔁 Health-check не прошёл 3 раза подряд — перезапускаю xray…"})
 }
 
 func checkPort(ctx context.Context, port int) bool {
@@ -303,19 +286,24 @@ func checkPort(ctx context.Context, port int) bool {
 	return true
 }
 
-func verifySystemProxy(httpPort int) {
+// verifySystemProxy reports whether the OS actually took the proxy setting; a
+// mismatch surfaces on the status screen, since it means traffic is not going
+// through xray.
+func (a *App) verifySystemProxy(httpPort int) {
 	s := system.ReadProxyState()
 	if !s.Enabled {
-		fmt.Println("  ⚠️ Системный прокси НЕ включён (реестр не подтвердил)")
-		slog.Warn("system proxy not confirmed in registry")
+		slog.Warn("system proxy not confirmed")
+		a.publishStatus(tui.StatusUpdate{Note: "⚠ Системный прокси не подтверждён системой", Err: true})
 		return
 	}
 	expected := fmt.Sprintf("127.0.0.1:%d", httpPort)
 	if s.Server != expected {
-		fmt.Printf("  ⚠️ Системный прокси: %s (ожидалось %s)\n", s.Server, expected)
 		slog.Warn("system proxy mismatch", "got", s.Server, "expected", expected)
+		a.publishStatus(tui.StatusUpdate{
+			Note: fmt.Sprintf("⚠ Системный прокси: %s (ожидался %s)", s.Server, expected),
+			Err:  true,
+		})
 		return
 	}
-	fmt.Printf("  ✅ Системный прокси 127.0.0.1:%d подтверждён\n", httpPort)
 	slog.Info("system proxy confirmed", "port", httpPort)
 }

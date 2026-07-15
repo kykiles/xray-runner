@@ -3,150 +3,28 @@ package app
 // Subscription/server selection flow, extracted from app.go (A-1).
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/url"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
-
-	"golang.org/x/term"
 
 	"xray-runner/internal/config"
 	"xray-runner/internal/subscription"
-	"xray-runner/internal/tui"
-	"xray-runner/internal/ui"
-	"xray-runner/internal/xraycfg"
 )
 
-func (a *App) resolveOutbound(ctx context.Context, tc *xraycfg.XrayConfig) (json.RawMessage, error) {
+// resolveScriptedTarget picks a subscription and server without prompting (U-2):
+// the subscription comes from the saved state (--last), the single saved entry,
+// or SUBSCRIPTION_URL; the server from --server (1-based index or name match)
+// or the saved state. Failures wrap ErrSelection for a distinct exit code.
+// Profiles are flattened here — a script names one server, not a balancer group.
+func (a *App) resolveScriptedTarget() (*target, error) {
 	subs, err := subscription.LoadSubscriptions()
 	if err != nil {
 		return nil, fmt.Errorf("load subscriptions: %w", err)
 	}
-
-	// U-2: scripted selection bypasses every menu.
-	if a.opts.Server != "" || a.opts.UseLast || a.opts.NonInteractive {
-		return a.resolveOutboundAuto(subs)
-	}
-
-	// U-3: the TUI needs a terminal; without one, only scripted selection works.
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return nil, fmt.Errorf("%w: нет терминала для интерактивного выбора — используйте --server, --last или --non-interactive", ErrSelection)
-	}
-
-	if len(subs) == 0 && (a.cfg.SubscriptionURL != "" || a.cfg.VlessURL != "") {
-		return a.resolveLegacyOutbound(ctx, tc)
-	}
-
-	cb := tui.SubsCallbacks{
-		Add:    addSubscription,
-		Delete: subscription.RemoveSubscription,
-		Reload: subscription.LoadSubscriptions,
-		Mask:   func(raw string) string { return maskURL(raw, a.cfg.MaskCreds) },
-	}
-
-	for {
-		newSubs, idx, action, err := tui.SelectSubscription(subs, cb)
-		if err != nil {
-			return nil, fmt.Errorf("TUI: %w", err)
-		}
-		subs = newSubs
-		if action == tui.SubsQuit {
-			// ErrUserQuit propagates up to main for a single clean exit (R-4).
-			return nil, ErrUserQuit
-		}
-		ui.Success(fmt.Sprintf("Подписка: %s", subs[idx].Name))
-
-		outbound, err := a.fetchAndSelectServer(ctx, subs[idx].URL, tc)
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, ErrUserQuit) {
-				return nil, err
-			}
-			if !errors.Is(err, ErrSwitchSubscription) {
-				ui.Error(err.Error())
-			}
-			continue
-		}
-		return outbound, nil
-	}
-}
-
-func (a *App) resolveLegacyOutbound(ctx context.Context, tc *xraycfg.XrayConfig) (json.RawMessage, error) {
-	if a.cfg.SubscriptionURL != "" {
-		for {
-			fmt.Println("📡 Загрузка подписки...")
-			hwid := config.GetOrCreateHWID(a.cfg.HWID)
-			entries, err := subscription.FetchWithHWID(a.cfg.SubscriptionURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
-			if err != nil {
-				return nil, fmt.Errorf("subscription: %w", err)
-			}
-			slog.Info("subscription loaded", "servers", len(entries))
-
-			refresh := func() ([]subscription.SubEntry, error) {
-				return subscription.FetchWithHWID(a.cfg.SubscriptionURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
-			}
-			selected, action, err := tui.SelectServer(ctx, entries, refresh, nil)
-			if err != nil {
-				return nil, fmt.Errorf("TUI: %w", err)
-			}
-			if action == tui.ServerQuit {
-				return nil, ErrUserQuit
-			}
-			if selected == nil {
-				continue
-			}
-			if err := selected.Validate(); err != nil {
-				return nil, fmt.Errorf("выбранный сервер невалиден: %w", err)
-			}
-			selected.AllowInsecure = a.cfg.AllowInsecure
-			a.printSubEntryDetails(selected)
-			a.setServerEndpoint(selected)
-			resolveServer(selected.Address)
-			return subscription.BuildOutboundJSON(selected)
-		}
-	}
-
-	u, err := url.Parse(a.cfg.VlessURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse VLESS_URL: %w", err)
-	}
-	a.printURLDetails(u)
-	a.serverHost = hostFromURL(u)
-	if _, portStr, err := net.SplitHostPort(u.Host); err == nil {
-		a.serverPort, _ = strconv.Atoi(portStr)
-	}
-	resolveServer(a.serverHost)
-
-	switch u.Scheme {
-	case "vless":
-		ob, err := xraycfg.BuildVLESSOutbound(u)
-		if err != nil {
-			return nil, fmt.Errorf("build vless: %w", err)
-		}
-		return json.Marshal(ob)
-	case "ss":
-		ob, err := xraycfg.BuildSSOutbound(u)
-		if err != nil {
-			return nil, fmt.Errorf("build ss: %w", err)
-		}
-		return json.Marshal(ob)
-	default:
-		return nil, fmt.Errorf("unsupported protocol: %s (vless, ss)", u.Scheme)
-	}
-}
-
-// resolveOutboundAuto picks a subscription and server without prompting (U-2):
-// the subscription comes from the saved state (--last), the single saved entry,
-// or SUBSCRIPTION_URL; the server from --server (1-based index or name match)
-// or the saved state. Failures wrap ErrSelection for a distinct exit code.
-func (a *App) resolveOutboundAuto(subs []subscription.NamedSubscription) (json.RawMessage, error) {
 	state, stateErr := loadLastState()
 
 	subURL := ""
@@ -183,10 +61,41 @@ func (a *App) resolveOutboundAuto(subs []subscription.NamedSubscription) (json.R
 	}
 	selected.AllowInsecure = a.cfg.AllowInsecure
 	a.printSubEntryDetails(selected)
-	a.setServerEndpoint(selected)
 	a.rememberSelection(subURL, selected)
-	resolveServer(selected.Address)
-	return subscription.BuildOutboundJSON(selected)
+	return &target{subURL: subURL, entry: selected}, nil
+}
+
+// migrateLegacyURL saves SUBSCRIPTION_URL from .env as a subscription so the
+// menu has something to show. VLESS_URL has no menu equivalent and stays a
+// scripted-only path.
+func (a *App) migrateLegacyURL() error {
+	if len(a.nav.subs) > 0 {
+		return nil
+	}
+	subs, err := subscription.LoadSubscriptions()
+	if err != nil {
+		return fmt.Errorf("load subscriptions: %w", err)
+	}
+	if len(subs) > 0 {
+		a.nav.subs = subs
+		return nil
+	}
+	if a.cfg.SubscriptionURL == "" {
+		if a.cfg.VlessURL != "" {
+			return fmt.Errorf("%w: VLESS_URL работает только с --non-interactive; для меню добавьте подписку", ErrSelection)
+		}
+		return nil // the menu will prompt for the first subscription
+	}
+	if err := addSubscription(a.cfg.SubscriptionURL); err != nil {
+		return fmt.Errorf("SUBSCRIPTION_URL: %w", err)
+	}
+	subs, err = subscription.LoadSubscriptions()
+	if err != nil {
+		return fmt.Errorf("load subscriptions: %w", err)
+	}
+	a.nav.subs = subs
+	slog.Info("migrated SUBSCRIPTION_URL from .env into the subscription list")
+	return nil
 }
 
 // pickEntry resolves --server (1-based index, exact or unique substring match
@@ -269,49 +178,6 @@ func addSubscription(rawURL string) error {
 	return nil
 }
 
-func (a *App) fetchAndSelectServer(ctx context.Context, subURL string, tc *xraycfg.XrayConfig) (json.RawMessage, error) {
-	ui.Progress("Загрузка подписки")
-	hwid := config.GetOrCreateHWID(a.cfg.HWID)
-	entries, err := subscription.FetchWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
-	ui.ClearLine()
-	if err != nil {
-		return nil, fmt.Errorf("загрузка подписки: %w", err)
-	}
-	slog.Info("subscription loaded", "servers", len(entries))
-	ui.Success(fmt.Sprintf("Загружено %d серверов", len(entries)))
-
-	// A-4: refresh re-fetches with the same HWID headers as the initial load.
-	refresh := func() ([]subscription.SubEntry, error) {
-		return subscription.FetchWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
-	}
-
-	pb := NewProxyBenchmarker(tc, a.binary, 3, 8*time.Second, a.cfg.AllowInsecure)
-	selected, action, err := tui.SelectServer(ctx, entries, refresh, pb.Run)
-	if err != nil {
-		return nil, fmt.Errorf("TUI: %w", err)
-	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	switch action {
-	case tui.ServerQuit:
-		// U-1: q/Ctrl+C exits the whole app, not just the screen.
-		return nil, ErrUserQuit
-	case tui.ServerBack:
-		return nil, ErrSwitchSubscription
-	}
-
-	if err := selected.Validate(); err != nil {
-		return nil, fmt.Errorf("выбранный сервер невалиден: %w", err)
-	}
-	selected.AllowInsecure = a.cfg.AllowInsecure
-	a.printSubEntryDetails(selected)
-	a.setServerEndpoint(selected)
-	a.rememberSelection(subURL, selected)
-	resolveServer(selected.Address)
-	return subscription.BuildOutboundJSON(selected)
-}
-
 // setServerEndpoint records the selected server so the kill switch can allow
 // xray's own traffic to it (H-1). hysteria2 uses UDP; everything else TCP.
 func (a *App) setServerEndpoint(e *subscription.SubEntry) {
@@ -320,27 +186,17 @@ func (a *App) setServerEndpoint(e *subscription.SubEntry) {
 	a.serverUDP = e.Protocol == "hysteria2"
 }
 
-func hostFromURL(u *url.URL) string {
-	host, _, err := net.SplitHostPort(u.Host)
-	if err != nil {
-		return u.Host
-	}
-	return host
-}
-
+// resolveServer is diagnostic only — it never blocks the connection, so its
+// outcome belongs in the log rather than on the screen.
 func resolveServer(host string) {
-	fmt.Print("🔍 DNS-резолв сервера... ")
 	addrs, err := net.LookupHost(host)
 	if err != nil {
-		fmt.Printf("❌ ОШИБКА: %v\n", err)
 		slog.Error("dns resolve failed", "host", host, "error", err)
 		return
 	}
 	if len(addrs) == 0 {
-		fmt.Println("❌ Нет записей A/AAAA")
 		slog.Warn("dns resolve returned no records", "host", host)
 		return
 	}
-	fmt.Printf("✅ %s → %s\n", host, strings.Join(addrs, ", "))
 	slog.Info("dns resolved", "host", host, "addrs", addrs)
 }

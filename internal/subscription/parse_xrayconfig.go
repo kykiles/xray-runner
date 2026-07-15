@@ -2,7 +2,6 @@ package subscription
 
 import (
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"strings"
 )
@@ -13,7 +12,18 @@ import (
 // the fields we surface as bare links.
 
 type xrayConfig struct {
+	Remarks   string         `json:"remarks"`
 	Outbounds []xrayOutbound `json:"outbounds"`
+	Routing   struct {
+		Balancers []xrayBalancer `json:"balancers"`
+	} `json:"routing"`
+}
+
+type xrayBalancer struct {
+	Tag      string `json:"tag"`
+	Strategy struct {
+		Type string `json:"type"`
+	} `json:"strategy"`
 }
 
 type xrayOutbound struct {
@@ -89,34 +99,79 @@ func isXrayConfigArray(arr []json.RawMessage) bool {
 }
 
 // parseXrayConfigArray extracts proxy outbounds from every config, deduplicating
-// servers that repeat across profiles.
+// servers that repeat across profiles. It backs the flat view (--dump-links,
+// scripted selection); the menu uses parseXrayConfigProfiles instead.
 func parseXrayConfigArray(arr []json.RawMessage) ([]SubEntry, error) {
+	profiles, err := parseXrayConfigProfiles(arr)
+	if err != nil {
+		return nil, err
+	}
+
 	var entries []SubEntry
 	seen := map[string]bool{}
+	for _, p := range Flatten(profiles) {
+		key := entryKey(p)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		entries = append(entries, p)
+	}
+	return entries, nil
+}
+
+// parseXrayConfigProfiles maps every config in the array to one profile, keeping
+// its name, balancer and raw body. Deduplication is per profile: the same server
+// legitimately appears in several profiles, and dropping it globally would empty
+// the later ones.
+func parseXrayConfigProfiles(arr []json.RawMessage) ([]Profile, error) {
+	var profiles []Profile
 
 	for _, item := range arr {
 		var cfg xrayConfig
 		if err := json.Unmarshal(item, &cfg); err != nil {
 			continue
 		}
+
+		var entries []SubEntry
+		seen := map[string]bool{}
 		for i := range cfg.Outbounds {
 			e, ok := outboundToEntry(&cfg.Outbounds[i])
 			if !ok {
 				continue
 			}
-			key := e.Protocol + "|" + e.Address + "|" + strconv.Itoa(e.Port) + "|" + e.UUID + e.Password
+			key := entryKey(e)
 			if seen[key] {
 				continue
 			}
 			seen[key] = true
 			entries = append(entries, e)
 		}
+		if len(entries) == 0 {
+			continue
+		}
+
+		p := Profile{
+			Name:    cfg.Remarks,
+			Entries: entries,
+			Raw:     item,
+		}
+		// A balancer over a single outbound adds nothing — treat it as plain.
+		if len(cfg.Routing.Balancers) > 0 && len(entries) > 1 {
+			b := cfg.Routing.Balancers[0]
+			p.Balancer = &BalancerInfo{Tag: b.Tag, Strategy: b.Strategy.Type}
+		}
+		profiles = append(profiles, p)
 	}
 
-	if len(entries) == 0 {
-		return nil, fmt.Errorf("no proxy outbounds found in xray config array")
+	if len(profiles) == 0 {
+		return nil, profileError(len(arr))
 	}
-	return entries, nil
+	return profiles, nil
+}
+
+func entryKey(e SubEntry) string {
+	return e.Protocol + "|" + e.Address + "|" + strconv.Itoa(e.Port) + "|" + e.UUID + e.Password
 }
 
 // outboundToEntry maps a single Xray outbound to a SubEntry. It returns ok=false

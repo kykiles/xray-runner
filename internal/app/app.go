@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,12 +10,15 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"time"
 
+	"golang.org/x/term"
+
 	"xray-runner/internal/config"
 	"xray-runner/internal/system"
+	"xray-runner/internal/tui"
+	"xray-runner/internal/ui"
 	"xray-runner/internal/xray"
 	"xray-runner/internal/xraycfg"
 )
@@ -46,6 +50,9 @@ type App struct {
 	lockFile      string
 	lockHeld      bool
 	binary        string
+	template      *xraycfg.XrayConfig
+	mode          string // active mode; starts at cfg.Mode, toggled by the m key
+	nav           nav    // menu position, kept across sessions
 	serverHost    string
 	serverPort    int
 	serverUDP     bool
@@ -53,16 +60,18 @@ type App struct {
 	proxyTouched  bool
 	interfaces    func() ([]net.Interface, error)
 
-	// U-5: status line data, written by health loops, read by statusLoop.
+	// U-5: status data, written by health loops, read by the status screen.
 	statusMu    sync.Mutex
 	lastCheck   time.Time
 	lastCheckOK bool
+	statusCh    chan tui.StatusUpdate
 }
 
 func New(cfg *config.Config, opts Options) *App {
 	return &App{
 		cfg:        cfg,
 		opts:       opts,
+		mode:       cfg.Mode,
 		proxy:      system.New(),
 		tmpFile:    filepath.Join(".", "xray_config.json"),
 		lockFile:   filepath.Join(".", "xray_config.json.lock"),
@@ -75,7 +84,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	// R-5: tun mode needs root/elevation — fail immediately with a clear
 	// message instead of letting xray retry for 30 seconds.
-	if a.cfg.Mode == "tun" {
+	if a.mode == "tun" {
 		if err := checkTunPrivileges(); err != nil {
 			return err
 		}
@@ -85,6 +94,7 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load template: %w", err)
 	}
+	a.template = tc
 
 	// H-3: resolve the binary up front (before the benchmarker needs it) and
 	// fail fast with a clear error if xray is missing.
@@ -101,168 +111,78 @@ func (a *App) Run(ctx context.Context) error {
 		slog.Warn("could not determine xray version", "error", err)
 	}
 
-	proxyOutbound, err := a.resolveOutbound(ctx, tc)
-	if err != nil {
-		return err
-	}
-
-	if a.cfg.Mode == "tun" {
-		tc.Inbounds = []xraycfg.Inbound{xraycfg.BuildTUNInbound()}
-		fmt.Println("  Режим: TUN (весь трафик через VPN)")
-		slog.Info("mode", "mode", "tun")
-	} else {
-		fmt.Println("  Режим: Прокси (HTTP/SOCKS5)")
-		slog.Info("mode", "mode", "proxy")
-	}
-
-	cfg := xraycfg.MergeConfig(tc, proxyOutbound)
-	cfg.Log = &xraycfg.LogConfig{Loglevel: a.cfg.XrayLogLvl}
-
 	// R-3: refuse to start a second instance racing over the same config/ports.
 	if err := a.acquireLock(); err != nil {
 		return err
 	}
-	if a.cfg.Mode != "tun" {
-		socksPort, httpPort, err := a.resolvePorts(cfg)
+
+	// U-2: scripted selection runs exactly one session and never shows a menu.
+	if a.opts.Server != "" || a.opts.UseLast || a.opts.NonInteractive {
+		t, err := a.resolveScriptedTarget()
 		if err != nil {
 			return err
 		}
-		for _, p := range []int{socksPort, httpPort} {
-			if portInUse(p) {
-				return fmt.Errorf("порт %d уже занят другим процессом — возможно, запущен второй экземпляр", p)
+		_, err = a.runSession(ctx, t)
+		return err
+	}
+
+	// U-3: the TUI needs a terminal; without one, only scripted selection works.
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return fmt.Errorf("%w: нет терминала для интерактивного выбора — используйте --server, --last или --non-interactive", ErrSelection)
+	}
+
+	if err := a.migrateLegacyURL(); err != nil {
+		return err
+	}
+
+	return a.menuLoop(ctx)
+}
+
+// menuLoop alternates between the menu and a connected session: the session
+// screen can send the user back to the server list (esc) or restart the core in
+// the other mode (m), which is why selection is not a one-shot step.
+func (a *App) menuLoop(ctx context.Context) error {
+	for {
+		t, err := a.chooseTarget(ctx)
+		if err != nil {
+			return err
+		}
+
+		for {
+			action, err := a.runSession(ctx, t)
+			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, ErrUserQuit) {
+					return err
+				}
+				// A failed session must not kill the app: report it and let the
+				// user pick another server.
+				slog.Error("session failed", "error", err)
+				ui.Error(err.Error())
+				a.nav.level = levelServers
+				break
 			}
+
+			switch action {
+			case tui.StatusQuit:
+				return ErrUserQuit
+			case tui.StatusBack:
+				// Resume at the server list of the same profile.
+				a.nav.level = levelServers
+			case tui.StatusSwitchMode, tui.StatusRestart:
+				continue
+			}
+			break
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 	}
-
-	if err := a.writeConfig(cfg); err != nil {
-		return err
-	}
-
-	printConfigSummary(cfg, a.cfg.Mode)
-	fmt.Println("── Routing ──────────────────────────────")
-	printRoutingRules(cfg)
-
-	slog.Info("starting xray", "binary", binary, "mode", a.cfg.Mode)
-
-	a.runner = xray.New(binary, a.tmpFile)
-
-	// X-1: validate the config up front; a test failure is a deterministic
-	// error and must not be retried.
-	if err := a.runner.TestConfig(ctx); err != nil {
-		return fmt.Errorf("проверка конфигурации xray не прошла: %w", err)
-	}
-
-	xrayCtx, xrayCancel := context.WithCancel(ctx)
-	defer xrayCancel()
-
-	var xrayDone sync.WaitGroup
-	xrayDone.Add(1)
-	go func() {
-		defer xrayDone.Done()
-		if err := a.runner.RunWithRetry(xrayCtx, 5); err != nil {
-			slog.Error("xray runner failed", "error", err)
-			xrayCancel()
-		}
-	}()
-
-	if a.cfg.Mode == "tun" {
-		err = a.runTun(ctx, cfg)
-	} else {
-		err = a.runProxy(ctx, cfg)
-	}
-
-	// Cancel xray context BEFORE cleanup, so exec.CommandContext kills the
-	// process and RunWithRetry returns cleanly (context.Canceled) instead
-	// of retrying after a manual Stop()
-	xrayCancel()
-	xrayDone.Wait()
-	return err
 }
 
-func (a *App) runProxy(ctx context.Context, cfg *xraycfg.XrayConfig) error {
-	socksPort, httpPort, err := a.resolvePorts(cfg)
-	if err != nil {
-		return err
-	}
-	slog.Info("proxy listening", "socks5", socksPort, "http", httpPort)
-
-	if !awaitPort(ctx, socksPort, "SOCKS5", 10*time.Second) {
-		return fmt.Errorf("SOCKS5 порт не открылся за 10с")
-	}
-	if !awaitPort(ctx, httpPort, "HTTP", 5*time.Second) {
-		return fmt.Errorf("HTTP порт не открылся за 5с")
-	}
-
-	testProxyConnection(ctx, httpPort)
-
-	a.originalProxy = system.ReadProxyState()
-
-	if err := a.proxy.Enable(httpPort); err != nil {
-		slog.Warn("failed to enable system proxy", "error", err)
-	} else {
-		a.proxyTouched = true
-		slog.Info("system proxy enabled", "port", httpPort)
-		fmt.Println("✅ Системный прокси включён (127.0.0.1:" + strconv.Itoa(httpPort) + ")")
-		verifySystemProxy(httpPort)
-	}
-
-	fmt.Println("──────────────────────────────────────────")
-	go a.healthCheckLoopPorts(ctx, socksPort, httpPort)
-
-	a.statusLoop(ctx)
-	slog.Info("shutting down xray")
-	return nil
-}
-
-func (a *App) runTun(ctx context.Context, cfg *xraycfg.XrayConfig) error {
-	fmt.Print("  ⏳ Ожидание TUN интерфейса... ")
-	if !a.awaitTUNInterface(ctx, xraycfg.TunInterfaceName, 10*time.Second) {
-		fmt.Println("❌ не поднялся")
-		slog.Error("tun interface did not come up")
-		return fmt.Errorf("TUN-интерфейс %s не поднялся за 10с", xraycfg.TunInterfaceName)
-	}
-	fmt.Println("✅ TUN активирован")
-	slog.Info("tun interface activated")
-
-	if a.cfg.KillSwitch {
-		fmt.Print("  ⛔ Включение Kill Switch... ")
-		ksCfg := system.KillSwitchConfig{
-			ServerIP:   resolveFirstIP(a.serverHost),
-			ServerPort: a.serverPort,
-			UDP:        a.serverUDP,
-			XrayPath:   a.binary,
-		}
-		if err := system.EnableKillSwitch(ksCfg); err != nil {
-			fmt.Printf("❌ %v\n", err)
-			slog.Warn("kill switch failed", "error", err)
-		} else {
-			fmt.Println("✅")
-			slog.Info("kill switch enabled")
-		}
-	}
-
-	testConnectivity(ctx)
-	fmt.Println("──────────────────────────────────────────")
-	go a.healthCheckLoopConnectivity(ctx)
-
-	a.statusLoop(ctx)
-	slog.Info("shutting down xray")
-	return nil
-}
-
+// cleanup runs once at exit. Per-session teardown already happened in
+// releaseSession; this is the last-resort net for a session that failed midway.
 func (a *App) cleanup() {
-	if a.cfg != nil && a.cfg.Mode == "tun" {
-		system.DisableKillSwitch()
-	} else {
-		if a.proxyTouched {
-			if err := a.proxy.Restore(a.originalProxy); err != nil {
-				slog.Warn("failed to restore proxy", "error", err)
-			}
-		}
-	}
-	if a.runner != nil {
-		_ = a.runner.Stop()
-	}
+	a.releaseSession()
 	os.Remove(a.tmpFile)
 	if a.lockHeld {
 		os.Remove(a.lockFile)
@@ -301,34 +221,17 @@ func resolveFirstIP(host string) string {
 	return addrs[0]
 }
 
-func (a *App) writeConfig(cfg *xraycfg.XrayConfig) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
+// writeConfigJSON stores the generated config for xray to read.
+func (a *App) writeConfigJSON(raw json.RawMessage) error {
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, raw, "", "  "); err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 	// H-2: the config holds UUIDs, passwords and keys — keep it owner-only, and
 	// never write the full (unmasked) config to the log, only its path.
-	if err := os.WriteFile(a.tmpFile, data, 0600); err != nil {
+	if err := os.WriteFile(a.tmpFile, pretty.Bytes(), 0600); err != nil {
 		return err
 	}
 	slog.Debug("generated xray config", "path", a.tmpFile)
 	return nil
-}
-
-// resolvePorts finds the SOCKS and HTTP inbound ports by protocol/tag rather
-// than by position, so reordering inbounds in the template can't silently swap
-// them (Q-2).
-func (a *App) resolvePorts(cfg *xraycfg.XrayConfig) (socksPort, httpPort int, err error) {
-	for _, in := range cfg.Inbounds {
-		switch {
-		case in.Protocol == "socks" || in.Tag == "socks":
-			socksPort = in.Port
-		case in.Protocol == "http" || in.Tag == "http":
-			httpPort = in.Port
-		}
-	}
-	if socksPort == 0 || httpPort == 0 {
-		return 0, 0, fmt.Errorf("в конфиге не найдены socks/http inbound-порты (socks=%d http=%d)", socksPort, httpPort)
-	}
-	return socksPort, httpPort, nil
 }

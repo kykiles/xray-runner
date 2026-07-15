@@ -16,8 +16,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.VlessURL != "vless://uuid@host:443" {
 		t.Errorf("VlessURL = %q, want %q", cfg.VlessURL, "vless://uuid@host:443")
 	}
-	if cfg.LogEnabled {
-		t.Errorf("LogEnabled = true, want false")
+	if !cfg.LogEnabled {
+		t.Errorf("LogEnabled = false, want true")
 	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "info")
@@ -92,13 +92,17 @@ func TestLoadBadBoolFallback(t *testing.T) {
 	os.Clearenv()
 	_ = os.Setenv("VLESS_URL", "vless://u@h:1")
 	_ = os.Setenv("LOG_ENABLED", "notabool")
+	_ = os.Setenv("KILL_SWITCH", "notabool")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.LogEnabled {
-		t.Errorf("LogEnabled = true, want false (fallback)")
+	if !cfg.LogEnabled {
+		t.Errorf("LogEnabled = false, want true (fallback)")
+	}
+	if cfg.KillSwitch {
+		t.Errorf("KillSwitch = true, want false (fallback)")
 	}
 }
 

@@ -28,6 +28,16 @@ func WithHWID(hwid, deviceOS, deviceModel string) FetchOption {
 const defaultUserAgent = "v2rayNG/1.8.5"
 
 func Fetch(rawURL string, opts ...FetchOption) ([]SubEntry, error) {
+	body, err := fetchBody(rawURL, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return parse(body)
+}
+
+// fetchBody performs the HTTP GET; parsing is left to the caller so that both
+// the flat and the profile-aware paths share one request.
+func fetchBody(rawURL string, opts ...FetchOption) ([]byte, error) {
 	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("subscription request: %w", err)
@@ -52,8 +62,7 @@ func Fetch(rawURL string, opts ...FetchOption) ([]SubEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("subscription read: %w", err)
 	}
-
-	return parse(body)
+	return body, nil
 }
 
 // FetchWithHWID is a thin wrapper kept for existing callers.

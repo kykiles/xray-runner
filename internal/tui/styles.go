@@ -2,7 +2,11 @@
 // and server list (WS-8). Non-TTY runs bypass it via --server/--last (U-2).
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 var (
 	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
@@ -19,4 +23,34 @@ var (
 
 func legend(items string) string {
 	return legendStyle.Render(items)
+}
+
+// pad right-pads s to w display columns. Server names carry flag emoji, which
+// occupy two columns each, so %-*s (byte-based) would misalign the table.
+func pad(s string, w int) string {
+	if n := lipgloss.Width(s); n < w {
+		return s + strings.Repeat(" ", w-n)
+	}
+	return s
+}
+
+// truncate shortens s to w display columns, keeping the table from wrapping on
+// narrow terminals.
+func truncate(s string, w int) string {
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if lipgloss.Width(b.String()+string(r)) > w-1 {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String() + "…"
+}
+
+// header renders a table header row for the list screens.
+func header(cols string) string {
+	return dimStyle.Render(cols) + "\n"
 }

@@ -9,29 +9,31 @@ import (
 	"xray-runner/internal/xraycfg"
 )
 
-func TestResolvePorts(t *testing.T) {
-	a := &App{}
-
+func TestPortsFromInbounds(t *testing.T) {
 	t.Run("by protocol regardless of order", func(t *testing.T) {
-		cfg := &xraycfg.XrayConfig{Inbounds: []xraycfg.Inbound{
+		inbounds := []xraycfg.Inbound{
 			{Tag: "http", Protocol: "http", Port: 10809},
 			{Tag: "socks", Protocol: "socks", Port: 10808},
-		}}
-		socks, httpP, err := a.resolvePorts(cfg)
+		}
+		p, err := portsFromInbounds(inbounds, "proxy")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if socks != 10808 || httpP != 10809 {
-			t.Errorf("got socks=%d http=%d, want 10808/10809", socks, httpP)
+		if p.socks != 10808 || p.http != 10809 {
+			t.Errorf("got socks=%d http=%d, want 10808/10809", p.socks, p.http)
 		}
 	})
 
 	t.Run("missing http is an error", func(t *testing.T) {
-		cfg := &xraycfg.XrayConfig{Inbounds: []xraycfg.Inbound{
-			{Tag: "socks", Protocol: "socks", Port: 10808},
-		}}
-		if _, _, err := a.resolvePorts(cfg); err == nil {
+		inbounds := []xraycfg.Inbound{{Tag: "socks", Protocol: "socks", Port: 10808}}
+		if _, err := portsFromInbounds(inbounds, "proxy"); err == nil {
 			t.Error("expected error when http inbound is missing")
+		}
+	})
+
+	t.Run("tun mode needs no local ports", func(t *testing.T) {
+		if _, err := portsFromInbounds(nil, "tun"); err != nil {
+			t.Errorf("tun mode should not require socks/http ports: %v", err)
 		}
 	})
 }
