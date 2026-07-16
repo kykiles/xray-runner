@@ -7,9 +7,12 @@ package updater
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,6 +21,11 @@ import (
 	"strings"
 	"time"
 )
+
+// maxUncompressedSize caps a single zip entry during extraction so a crafted
+// archive can't exhaust the disk (gosec G110). The core binary is ~40 MB; 512 MB
+// leaves generous headroom while still bounding the write.
+const maxUncompressedSize = 512 << 20
 
 // CoreRepo is the official xray-core repository; its releases carry the core zip
 // per OS/arch. GeoRepo is where the geoip.dat / geosite.dat databases are
@@ -121,6 +129,73 @@ func getJSON(ctx context.Context, url string, dst any) error {
 	return nil
 }
 
+// httpGetBytes fetches a small text asset (a checksum file) in full.
+func httpGetBytes(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := httpClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %s", resp.Status)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// fetchChecksum downloads a checksum file next to an asset and extracts the
+// expected SHA-256 hex from it using parse.
+func fetchChecksum(ctx context.Context, url string, parse func([]byte) (string, error)) (string, error) {
+	body, err := httpGetBytes(ctx, url)
+	if err != nil {
+		return "", err
+	}
+	return parse(body)
+}
+
+// parseDgst reads the SHA-256 hex from an XTLS ".dgst" file, whose lines look
+// like "SHA2-256= <hex>".
+func parseDgst(body []byte) (string, error) {
+	for _, line := range strings.Split(string(body), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "SHA2-256="); ok {
+			if h := strings.TrimSpace(rest); h != "" {
+				return h, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("в .dgst нет строки SHA2-256")
+}
+
+// parseSha256Sum reads the hex from a standard "<hex>  <name>" sha256sum file.
+func parseSha256Sum(body []byte) (string, error) {
+	fields := strings.Fields(string(body))
+	if len(fields) == 0 {
+		return "", fmt.Errorf("пустой файл контрольной суммы")
+	}
+	return fields[0], nil
+}
+
+// verifySHA256 fails unless the file at path hashes to want.
+func verifySHA256(path, want string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(got, want) {
+		return fmt.Errorf("контрольная сумма %s не совпала: ожидалось %s, получено %s", filepath.Base(path), want, got)
+	}
+	return nil
+}
+
 // coreAssetName is the core zip name XTLS publishes for the given OS/arch, e.g.
 // "Xray-linux-64.zip". An empty string means the platform is not mapped.
 func coreAssetName(goos, goarch string) string {
@@ -197,11 +272,11 @@ func download(ctx context.Context, a Asset) (string, error) {
 		return "", err
 	}
 	if _, err := io.Copy(tmp, resp.Body); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 		return "", fmt.Errorf("запись %s: %w", a.Name, err)
 	}
-	tmp.Close()
+	_ = tmp.Close()
 	return tmp.Name(), nil
 }
 
@@ -212,7 +287,17 @@ func InstallCore(ctx context.Context, a Asset, xrayPath string) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(zipPath)
+	defer func() { _ = os.Remove(zipPath) }()
+
+	// The core binary replaces our own; a corrupted or tampered download must
+	// never be installed, so a missing/invalid .dgst is a hard failure here.
+	want, err := fetchChecksum(ctx, a.URL+".dgst", parseDgst)
+	if err != nil {
+		return fmt.Errorf("контрольная сумма ядра недоступна: %w", err)
+	}
+	if err := verifySHA256(zipPath, want); err != nil {
+		return err
+	}
 
 	binName := "xray"
 	if runtime.GOOS == "windows" {
@@ -223,7 +308,7 @@ func InstallCore(ctx context.Context, a Asset, xrayPath string) error {
 		return err
 	}
 	if err := os.Chmod(newPath, 0o755); err != nil {
-		os.Remove(newPath)
+		_ = os.Remove(newPath)
 		return err
 	}
 	if err := swap(newPath, xrayPath); err != nil {
@@ -239,15 +324,24 @@ func InstallGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
 		if err != nil {
 			return err
 		}
+		// The geo repo publishes a "<name>.sha256sum" next to each database.
+		// Verify when present; if the checksum can't be fetched, warn and install
+		// anyway — a stale geo database is far less dangerous than a swapped core.
+		if want, cerr := fetchChecksum(ctx, a.URL+".sha256sum", parseSha256Sum); cerr != nil {
+			slog.Warn("контрольная сумма гео-базы недоступна, устанавливаю без проверки", "asset", a.Name, "error", cerr)
+		} else if verr := verifySHA256(src, want); verr != nil {
+			_ = os.Remove(src)
+			return verr
+		}
 		dst := filepath.Join(dir, a.Name)
 		newPath := dst + ".new"
 		if err := os.Rename(src, newPath); err != nil {
 			// os.Rename fails across filesystems; fall back to a copy.
 			if err := copyFile(src, newPath); err != nil {
-				os.Remove(src)
+				_ = os.Remove(src)
 				return err
 			}
-			os.Remove(src)
+			_ = os.Remove(src)
 		}
 		if err := swap(newPath, dst); err != nil {
 			return err
@@ -297,7 +391,7 @@ func extractZipFile(zipPath, want, dst string) error {
 	if err != nil {
 		return fmt.Errorf("открытие архива: %w", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	for _, f := range r.File {
 		if filepath.Base(f.Name) != want {
 			continue
@@ -311,10 +405,19 @@ func extractZipFile(zipPath, want, dst string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := io.Copy(out, rc); err != nil {
-			out.Close()
-			os.Remove(dst)
+		// Bound the write so a decompression bomb can't fill the disk (gosec
+		// G110). io.CopyN stops at the cap and reports io.EOF for a normal,
+		// smaller entry; hitting the cap exactly means the entry is oversized.
+		n, err := io.CopyN(out, rc, maxUncompressedSize)
+		if err != nil && err != io.EOF {
+			_ = out.Close()
+			_ = os.Remove(dst)
 			return err
+		}
+		if n == maxUncompressedSize {
+			_ = out.Close()
+			_ = os.Remove(dst)
+			return fmt.Errorf("%s в архиве превышает лимит %d байт", want, maxUncompressedSize)
 		}
 		return out.Close()
 	}
@@ -332,7 +435,7 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+		_ = out.Close()
 		return err
 	}
 	return out.Close()

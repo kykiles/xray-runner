@@ -12,11 +12,11 @@ const TunInterfaceName = "xray-tun"
 const TunAddr = "10.0.0.1"
 
 type XrayConfig struct {
-	Log       *LogConfig       `json:"log,omitempty"`
-	DNS       json.RawMessage  `json:"dns,omitempty"`
-	Inbounds  []Inbound        `json:"inbounds,omitempty"`
+	Log       *LogConfig        `json:"log,omitempty"`
+	DNS       json.RawMessage   `json:"dns,omitempty"`
+	Inbounds  []Inbound         `json:"inbounds,omitempty"`
 	Outbounds []json.RawMessage `json:"outbounds,omitempty"`
-	Routing   json.RawMessage  `json:"routing,omitempty"`
+	Routing   json.RawMessage   `json:"routing,omitempty"`
 }
 
 type LogConfig struct {
@@ -33,8 +33,8 @@ type Inbound struct {
 }
 
 type SniffingConfig struct {
-	Enabled     bool     `json:"enabled"`
-	RouteOnly   bool     `json:"routeOnly,omitempty"`
+	Enabled      bool     `json:"enabled"`
+	RouteOnly    bool     `json:"routeOnly,omitempty"`
 	DestOverride []string `json:"destOverride,omitempty"`
 }
 
@@ -62,9 +62,9 @@ type VLessUser struct {
 }
 
 type SSOutbound struct {
-	Tag      string        `json:"tag"`
-	Protocol string        `json:"protocol"`
-	Settings *SSSettings   `json:"settings,omitempty"`
+	Tag      string      `json:"tag"`
+	Protocol string      `json:"protocol"`
+	Settings *SSSettings `json:"settings,omitempty"`
 }
 
 type SSSettings struct {
@@ -103,10 +103,10 @@ type VMessUser struct {
 }
 
 type HysteriaOutbound struct {
-	Tag      string           `json:"tag"`
-	Protocol string           `json:"protocol"`
+	Tag      string                 `json:"tag"`
+	Protocol string                 `json:"protocol"`
 	Settings *HysteriaProtoSettings `json:"settings,omitempty"`
-	Stream   *StreamSettings  `json:"streamSettings,omitempty"`
+	Stream   *StreamSettings        `json:"streamSettings,omitempty"`
 }
 
 type HysteriaProtoSettings struct {
@@ -116,27 +116,27 @@ type HysteriaProtoSettings struct {
 }
 
 type HysteriaTransportSettings struct {
-	Version      int    `json:"version"`
-	Auth         string `json:"auth,omitempty"`
-	Up           string `json:"up,omitempty"`
-	Down         string `json:"down,omitempty"`
-	Congestion   string `json:"congestion,omitempty"`
+	Version    int    `json:"version"`
+	Auth       string `json:"auth,omitempty"`
+	Up         string `json:"up,omitempty"`
+	Down       string `json:"down,omitempty"`
+	Congestion string `json:"congestion,omitempty"`
 }
 
 type StreamSettings struct {
-	Network             string                      `json:"network,omitempty"`
-	Security            string                      `json:"security,omitempty"`
-	WSSettings          *WSSettings                 `json:"wsSettings,omitempty"`
-	GRPCSettings        *GRPCSettings               `json:"grpcSettings,omitempty"`
-	XHTTPSettings       *XHTTPSettings              `json:"xhttpSettings,omitempty"`
-	HTTPUpgradeSettings *HTTPUpgradeSettings        `json:"httpupgradeSettings,omitempty"`
-	TLSSettings         *TLSSettings                `json:"tlsSettings,omitempty"`
-	Reality             *RealitySettings            `json:"realitySettings,omitempty"`
-	HysteriaSettings    *HysteriaTransportSettings  `json:"hysteriaSettings,omitempty"`
+	Network             string                     `json:"network,omitempty"`
+	Security            string                     `json:"security,omitempty"`
+	WSSettings          *WSSettings                `json:"wsSettings,omitempty"`
+	GRPCSettings        *GRPCSettings              `json:"grpcSettings,omitempty"`
+	XHTTPSettings       *XHTTPSettings             `json:"xhttpSettings,omitempty"`
+	HTTPUpgradeSettings *HTTPUpgradeSettings       `json:"httpupgradeSettings,omitempty"`
+	TLSSettings         *TLSSettings               `json:"tlsSettings,omitempty"`
+	Reality             *RealitySettings           `json:"realitySettings,omitempty"`
+	HysteriaSettings    *HysteriaTransportSettings `json:"hysteriaSettings,omitempty"`
 }
 
 type WSSettings struct {
-	Path    string `json:"path,omitempty"`
+	Path    string     `json:"path,omitempty"`
 	Headers *WSHeaders `json:"headers,omitempty"`
 }
 
@@ -209,9 +209,9 @@ func BuildTUNInbound() Inbound {
 		Protocol: "tun",
 		Settings: json.RawMessage(settings),
 		Sniffing: &SniffingConfig{
-			Enabled:       true,
-			RouteOnly:     true,
-			DestOverride:  []string{"http", "tls", "quic"},
+			Enabled:      true,
+			RouteOnly:    true,
+			DestOverride: []string{"http", "tls", "quic"},
 		},
 	}
 }

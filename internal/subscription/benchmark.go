@@ -44,7 +44,7 @@ func RunBenchmark(entries []SubEntry, timeout time.Duration) []BenchmarkResult {
 				results[idx] = BenchmarkResult{Index: idx, Error: err}
 				return
 			}
-			conn.Close()
+			_ = conn.Close()
 			results[idx] = BenchmarkResult{Index: idx, Latency: time.Since(start)}
 		}(i)
 	}

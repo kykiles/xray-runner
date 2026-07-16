@@ -67,7 +67,9 @@ func validateTemplate(cfg *XrayConfig) error {
 func AddCatchAllRule(routing json.RawMessage) json.RawMessage {
 	var r map[string]interface{}
 	if routing != nil {
-		json.Unmarshal(routing, &r)
+		// Best-effort: a malformed routing block in the template degrades to just
+		// the catch-all rule rather than failing the whole merge.
+		_ = json.Unmarshal(routing, &r)
 	}
 	if r == nil {
 		r = map[string]interface{}{}

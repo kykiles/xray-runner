@@ -6,8 +6,8 @@ import "testing"
 // counts above/below, so the scroll indicators are correct (task #3).
 func TestWindow(t *testing.T) {
 	tests := []struct {
-		name                            string
-		total, cursor, height           int
+		name                             string
+		total, cursor, height            int
 		wantStart, wantEnd, wantA, wantB int
 	}{
 		{"fits", 5, 2, 10, 0, 5, 0, 0},

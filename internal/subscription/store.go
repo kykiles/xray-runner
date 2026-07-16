@@ -100,11 +100,11 @@ func RemoveSubscription(index int) error {
 		sb.WriteString(e.url + "\n")
 	}
 
-	return os.WriteFile(subscriptionsFile, []byte(sb.String()), 0644)
+	return os.WriteFile(subscriptionsFile, []byte(sb.String()), 0600)
 }
 
 func SaveSubscription(rawURL string) error {
-	f, err := os.OpenFile(subscriptionsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(subscriptionsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return fmt.Errorf("save subscription: %w", err)
 	}

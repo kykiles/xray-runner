@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"xray-runner/internal/updater"
@@ -14,7 +15,7 @@ import (
 
 // The update screen (task #8): reached from the subscription list, it downloads
 // a fresh xray core or the geo databases from the official XTLS repo and swaps
-// them in, keeping a .bak of whatever it replaces.
+// them in atomically, verifying the SHA-256 of the core before installing.
 
 type updateStage int
 
@@ -56,6 +57,7 @@ type updateModel struct {
 	status   string
 	err      error
 	width    int
+	spinner  spinner.Model
 }
 
 var updateMenu = []string{"Обновить ядро xray", "Обновить гео-базы"}
@@ -66,7 +68,8 @@ var updateMenu = []string{"Обновить ядро xray", "Обновить г
 // updating from.
 func RunUpdate(ctx context.Context, xrayPath, installed string) error {
 	dir := filepath.Dir(xrayPath)
-	m := updateModel{ctx: ctx, xrayPath: xrayPath, dir: dir, installed: installed, geoDate: geoDate(dir)}
+	sp := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(cursorStyle))
+	m := updateModel{ctx: ctx, xrayPath: xrayPath, dir: dir, installed: installed, geoDate: geoDate(dir), spinner: sp}
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }
@@ -81,13 +84,17 @@ func geoDate(dir string) string {
 	return fi.ModTime().Format("2006-01-02")
 }
 
-func (m updateModel) Init() tea.Cmd { return nil }
+func (m updateModel) Init() tea.Cmd { return m.spinner.Tick }
 
 func (m updateModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		return m, nil
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 	case releasesMsg:
 		return m.onReleases(msg)
 	case geoReleaseMsg:
@@ -336,7 +343,7 @@ func (m updateModel) View() string {
 		b.WriteString(legend("  ↑/↓ выбор · enter установить · esc назад"))
 
 	case updWorking:
-		b.WriteString("  " + dimStyle.Render("⏳ "+m.status) + "\n")
+		b.WriteString("  " + m.spinner.View() + " " + dimStyle.Render(m.status) + "\n")
 		b.WriteString(legend("  подождите…"))
 
 	case updDone:

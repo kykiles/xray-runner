@@ -30,7 +30,7 @@ func dumpLinks(cfg *config.Config, subURL string) (string, error) {
 
 	md := renderMarkdown(subURL, entries, time.Now())
 
-	if err := os.MkdirAll("keys", 0o755); err != nil {
+	if err := os.MkdirAll("keys", 0o750); err != nil {
 		return "", fmt.Errorf("create keys dir: %w", err)
 	}
 	if err := os.WriteFile(path, []byte(md), 0o600); err != nil {

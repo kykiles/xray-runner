@@ -3,6 +3,18 @@ linters-settings:
     exclude-functions:
       - (io.Closer).Close
       - (*os.File).Close
+      - (net.Conn).Close
+  gosec:
+    # These rules don't fit this project's threat model:
+    #   G204 — every exec.Command uses an explicit argument vector (never a
+    #          shell string), so command injection is structurally impossible.
+    #   G304 — file paths come from local config or our own directories, never
+    #          from remote/web input.
+    #   G302 — the xray core and its assets must be executable/readable.
+    excludes:
+      - G204
+      - G302
+      - G304
   staticcheck:
     checks:
       - all
@@ -18,3 +30,10 @@ linters:
     - unused
 issues:
   exclude-use-default: false
+  exclude-rules:
+    # Test files legitimately ignore Close/Write/Serve errors and write world-
+    # readable fixtures; gosec/errcheck noise there is not a shipping concern.
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec

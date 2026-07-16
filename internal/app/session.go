@@ -395,7 +395,7 @@ func (a *App) releaseSession() {
 		a.tunRouted = false
 	}
 	if a.mode == "tun" {
-		system.DisableKillSwitch()
+		_ = system.DisableKillSwitch()
 	} else if a.proxyTouched {
 		if err := a.proxy.Restore(a.originalProxy); err != nil {
 			slog.Warn("failed to restore proxy", "error", err)

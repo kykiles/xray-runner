@@ -2,6 +2,8 @@ package updater
 
 import (
 	"archive/zip"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -159,6 +161,45 @@ func tags(rels []Release) []string {
 		out[i] = r.Tag
 	}
 	return out
+}
+
+func TestParseDgst(t *testing.T) {
+	body := "MD5= ee4e2ff7\nSHA1= b55b06e7\nSHA2-256= 23cd9af937744d97\nSHA2-512= e8bc40a0\n"
+	got, err := parseDgst([]byte(body))
+	if err != nil || got != "23cd9af937744d97" {
+		t.Fatalf("parseDgst = %q, %v; want the SHA2-256 hex", got, err)
+	}
+	if _, err := parseDgst([]byte("MD5= abc\nSHA1= def\n")); err == nil {
+		t.Error("parseDgst without a SHA2-256 line should error")
+	}
+}
+
+func TestParseSha256Sum(t *testing.T) {
+	got, err := parseSha256Sum([]byte("07afbae04519eb7c  geoip.dat\n"))
+	if err != nil || got != "07afbae04519eb7c" {
+		t.Fatalf("parseSha256Sum = %q, %v", got, err)
+	}
+	if _, err := parseSha256Sum([]byte("   \n")); err == nil {
+		t.Error("parseSha256Sum on empty content should error")
+	}
+}
+
+func TestVerifySHA256(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blob")
+	data := []byte("hello xray")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	want := hex.EncodeToString(sum[:])
+
+	if err := verifySHA256(path, want); err != nil {
+		t.Errorf("verifySHA256 with the correct hash errored: %v", err)
+	}
+	if err := verifySHA256(path, "deadbeef"); err == nil {
+		t.Error("verifySHA256 with a wrong hash should error")
+	}
 }
 
 func writeZip(t *testing.T, path string, files map[string]string) {

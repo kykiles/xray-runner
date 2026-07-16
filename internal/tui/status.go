@@ -39,12 +39,11 @@ type statusModel struct {
 	info    StatusInfo
 	updates <-chan StatusUpdate
 
-	started  time.Time
-	last     *StatusUpdate
-	note     string
-	noteErr  bool
-	action   StatusAction
-	quitting bool
+	started time.Time
+	last    *StatusUpdate
+	note    string
+	noteErr bool
+	action  StatusAction
 }
 
 type statusTickMsg time.Time
@@ -172,8 +171,13 @@ func (m statusModel) health() string {
 }
 
 func fmtDuration(d time.Duration) string {
-	h := int(d.Hours())
-	mnt := int(d.Minutes()) % 60
-	s := int(d.Seconds()) % 60
+	total := int(d.Seconds())
+	days := total / 86400
+	h := (total % 86400) / 3600
+	mnt := (total % 3600) / 60
+	s := total % 60
+	if days > 0 {
+		return fmt.Sprintf("%dd %02d:%02d:%02d", days, h, mnt, s)
+	}
 	return fmt.Sprintf("%02d:%02d:%02d", h, mnt, s)
 }

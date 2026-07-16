@@ -43,7 +43,7 @@ func TestIsUUID(t *testing.T) {
 	invalid := []string{
 		"",
 		"550e8400e29b41d4a716446655440000",
-		"550e8400-e29b-41d4-a716-44665544000",  // too short
+		"550e8400-e29b-41d4-a716-44665544000",   // too short
 		"550e8400-e29b-41d4-a716-4466554400000", // too long
 		"550e8400-e29b-41d4-a716-44665544000g",  // non-hex
 	}

@@ -24,7 +24,7 @@ func EnableKillSwitch(cfg KillSwitchConfig) error {
 
 	// Start from a clean slate so repeated runs don't accumulate duplicate
 	// rules or OUTPUT jumps.
-	DisableKillSwitch()
+	_ = DisableKillSwitch()
 
 	for _, bin := range firewallBins {
 		if err := fwCmd.lookPath(bin); err != nil {
@@ -117,8 +117,8 @@ func DisableKillSwitch() error {
 				break
 			}
 		}
-		fwCmd.run(bin, "-F", killSwitchChain)
-		fwCmd.run(bin, "-X", killSwitchChain)
+		_, _ = fwCmd.run(bin, "-F", killSwitchChain)
+		_, _ = fwCmd.run(bin, "-X", killSwitchChain)
 	}
 
 	return nil

@@ -22,21 +22,21 @@ type testCase struct {
 func TestBuildVLESSOutbound(t *testing.T) {
 	tests := []testCase{
 		{
-			name:   "vless_ws_reality",
-			rawURL: "vless://uuid@example.com:443?type=ws&security=reality&path=%2Fvless-ws&host=example.com&sni=example.com&pbk=publickey&sid=123456&fp=chrome",
-			golden: "testdata/vless_ws_reality.json",
+			name:    "vless_ws_reality",
+			rawURL:  "vless://uuid@example.com:443?type=ws&security=reality&path=%2Fvless-ws&host=example.com&sni=example.com&pbk=publickey&sid=123456&fp=chrome",
+			golden:  "testdata/vless_ws_reality.json",
 			buildFn: func(u *url.URL) (interface{}, error) { return BuildVLESSOutbound(u) },
 		},
 		{
-			name:   "vless_grpc_tls",
-			rawURL: "vless://uuid-grpc@grpc.example.com:443?type=grpc&security=tls&serviceName=myservice&authority=grpc.example.com&sni=grpc.example.com&fp=chrome&alpn=h2,http/1.1",
-			golden: "testdata/vless_grpc_tls.json",
+			name:    "vless_grpc_tls",
+			rawURL:  "vless://uuid-grpc@grpc.example.com:443?type=grpc&security=tls&serviceName=myservice&authority=grpc.example.com&sni=grpc.example.com&fp=chrome&alpn=h2,http/1.1",
+			golden:  "testdata/vless_grpc_tls.json",
 			buildFn: func(u *url.URL) (interface{}, error) { return BuildVLESSOutbound(u) },
 		},
 		{
-			name:   "vless_ws_flow",
-			rawURL: "vless://uuid-flow@flow.example.com:443?type=ws&path=%2Fflow&flow=xtls-rprx-vision",
-			golden: "testdata/vless_ws_flow.json",
+			name:    "vless_ws_flow",
+			rawURL:  "vless://uuid-flow@flow.example.com:443?type=ws&path=%2Fflow&flow=xtls-rprx-vision",
+			golden:  "testdata/vless_ws_flow.json",
 			buildFn: func(u *url.URL) (interface{}, error) { return BuildVLESSOutbound(u) },
 		},
 	}
@@ -47,9 +47,9 @@ func TestBuildVLESSOutbound(t *testing.T) {
 func TestBuildSSOutbound(t *testing.T) {
 	tests := []testCase{
 		{
-			name:   "ss_basic",
-			rawURL: "ss://YWVzLTI1Ni1nY206c2VjcmV0@ss.example.com:8443",
-			golden: "testdata/ss_basic.json",
+			name:    "ss_basic",
+			rawURL:  "ss://YWVzLTI1Ni1nY206c2VjcmV0@ss.example.com:8443",
+			golden:  "testdata/ss_basic.json",
 			buildFn: func(u *url.URL) (interface{}, error) { return BuildSSOutbound(u) },
 		},
 	}

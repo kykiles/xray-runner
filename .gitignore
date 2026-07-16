@@ -1,5 +1,6 @@
 # Secrets
 .env
+!.env.example
 
 # Generated runtime files
 xray_config.json
@@ -25,6 +26,7 @@ wintun.dll
 # Distribution bundles
 xray_linux/
 xray_windows/
+*.zip
 
 # Go build cache
 go.work
@@ -42,8 +44,8 @@ PROJECT.md
 .claude
 .superpowers/
 
-# OpenCode/Superpowers generated docs
-docs/superpowers/
+# Working specs / audit notes — kept locally, not published
+docs/
 
 # Subscription URLs
 subscriptions.txt

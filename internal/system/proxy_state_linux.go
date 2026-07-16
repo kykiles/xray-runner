@@ -59,7 +59,7 @@ func writeGsettings(s ProxyState) bool {
 		if !writeGsettingsManual(s) {
 			// R-2: mode is already "manual" — roll back to "none" so the desktop
 			// isn't left pointing at a half-configured proxy.
-			exec.Command("gsettings", "set", "org.gnome.system.proxy", "mode", "none").Run()
+			_ = exec.Command("gsettings", "set", "org.gnome.system.proxy", "mode", "none").Run()
 			return false
 		}
 	} else {
@@ -117,7 +117,7 @@ func writeKDE(s ProxyState) bool {
 		if !writeKDEManual(s) {
 			// R-2: same rollback as gsettings — don't leave ProxyType=1 with a
 			// half-configured proxy.
-			exec.Command("kwriteconfig5", "--group", "Proxy", "--key", "ProxyType", "0").Run()
+			_ = exec.Command("kwriteconfig5", "--group", "Proxy", "--key", "ProxyType", "0").Run()
 			return false
 		}
 	} else {

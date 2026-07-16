@@ -57,7 +57,7 @@ func testConnectivity(ctx context.Context) {
 			if err != nil {
 				continue
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode == 204 || resp.StatusCode == 200 {
 				slog.Info("connectivity check ok", "status", resp.StatusCode)
 				return
@@ -82,7 +82,7 @@ func portInUse(port int) bool {
 	if err != nil {
 		return false
 	}
-	conn.Close()
+	_ = conn.Close()
 	return true
 }
 
@@ -91,7 +91,7 @@ func awaitPort(ctx context.Context, port int, label string, timeout time.Duratio
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			slog.Info("port available", "label", label, "port", port)
 			return true
 		}
@@ -135,7 +135,7 @@ func testProxyConnection(ctx context.Context, httpPort int) {
 			if err != nil {
 				continue
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 
 			if resp.StatusCode == 204 || resp.StatusCode == 200 {
 				slog.Info("proxy test ok", "proxy", proxyURL, "status", resp.StatusCode)
@@ -211,7 +211,7 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
 		if err != nil {
 			return false, time.Since(start)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return true, time.Since(start)
 	}
 
@@ -328,7 +328,7 @@ func checkPort(ctx context.Context, port int) bool {
 	if err != nil {
 		return false
 	}
-	conn.Close()
+	_ = conn.Close()
 	return true
 }
 

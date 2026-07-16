@@ -36,7 +36,7 @@ func Init(cfg *config.Config) func() {
 	slog.SetDefault(logger)
 
 	return func() {
-		f.Close()
+		_ = f.Close()
 	}
 }
 

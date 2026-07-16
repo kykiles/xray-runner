@@ -3,10 +3,15 @@ package subscription
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// maxSubscriptionBody caps how much of a subscription response we read, so a
+// broken or hostile server can't exhaust memory. Real subscriptions are a few KB.
+const maxSubscriptionBody = 10 << 20
 
 // FetchOption customizes the subscription request, e.g. to add HWID headers.
 type FetchOption func(*http.Request)
@@ -49,6 +54,12 @@ func Fetch(rawURL string, opts ...FetchOption) ([]SubEntry, error) {
 // fetchBody performs the HTTP GET; parsing is left to the caller so that both
 // the flat and the profile-aware paths share one request.
 func fetchBody(rawURL string, opts ...FetchOption) ([]byte, error) {
+	// A plain-http subscription sends the token and the x-hwid headers in the
+	// clear. We still allow it (self-hosted panels exist) but warn loudly.
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rawURL)), "http://") {
+		slog.Warn("подписка запрашивается по незашифрованному http:// — токен и заголовки устройства идут открытым текстом", "url", rawURL)
+	}
+
 	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("subscription request: %w", err)
@@ -69,9 +80,12 @@ func fetchBody(rawURL string, opts ...FetchOption) ([]byte, error) {
 		return nil, fmt.Errorf("subscription fetch: HTTP %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSubscriptionBody+1))
 	if err != nil {
 		return nil, fmt.Errorf("subscription read: %w", err)
+	}
+	if len(body) > maxSubscriptionBody {
+		return nil, fmt.Errorf("subscription too large: превышает лимит %d байт", maxSubscriptionBody)
 	}
 	return body, nil
 }

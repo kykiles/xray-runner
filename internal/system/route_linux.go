@@ -82,14 +82,14 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 		args = append(args, "dev", e.dev)
 
 		if out, err := ipCmd.run("ip", args...); err != nil {
-			DisableTunRouting()
+			_ = DisableTunRouting()
 			return fmt.Errorf("исключить сервер %s из туннеля: %w\n%s", e.ip, err, out)
 		}
 	}
 
 	for _, half := range splitDefault {
 		if out, err := ipCmd.run("ip", "route", "add", half, "dev", cfg.Iface); err != nil {
-			DisableTunRouting()
+			_ = DisableTunRouting()
 			return fmt.Errorf("направить трафик в %s: %w\n%s", cfg.Iface, err, out)
 		}
 	}
@@ -109,10 +109,10 @@ func DisableTunRouting() error {
 	}
 
 	for _, half := range splitDefault {
-		ipCmd.run("ip", "route", "del", half, "dev", installed.Iface)
+		_, _ = ipCmd.run("ip", "route", "del", half, "dev", installed.Iface)
 	}
 	for _, ip := range installed.ServerIPs {
-		ipCmd.run("ip", "route", "del", ip+"/32")
+		_, _ = ipCmd.run("ip", "route", "del", ip+"/32")
 	}
 	installed = nil
 

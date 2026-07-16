@@ -28,7 +28,7 @@ func freePort() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	return ln.Addr().(*net.TCPAddr).Port, nil
 }
 
@@ -70,7 +70,7 @@ func waitPort(ctx context.Context, port int, timeout time.Duration) bool {
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			return true
 		}
 		// P-1: abort the wait promptly when the benchmark is cancelled instead
@@ -176,14 +176,14 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 	if err := os.WriteFile(tmpFile, cfgJSON, 0600); err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
-	defer os.Remove(tmpFile)
+	defer func() { _ = os.Remove(tmpFile) }()
 
 	runner := xray.New(pb.xrayBinary, tmpFile)
 	// P-1: propagate ctx so Ctrl+C tears down the xray instance mid-measure.
 	if err := runner.Start(ctx); err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
-	defer runner.Stop()
+	defer func() { _ = runner.Stop() }()
 
 	if !waitPort(ctx, ports.http, pb.timeout) {
 		return subscription.BenchmarkResult{Error: fmt.Errorf("port %d not ready within timeout", ports.http)}
@@ -206,7 +206,7 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode != 204 && resp.StatusCode != 200 {
 		return subscription.BenchmarkResult{
@@ -246,7 +246,7 @@ func runBatch[T any](
 		return results
 	}
 	pb.tmpDir = dir
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	results := make([]subscription.BenchmarkResult, len(items))
 	var wg sync.WaitGroup

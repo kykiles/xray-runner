@@ -239,9 +239,9 @@ func (a *App) menuLoop(ctx context.Context) error {
 // releaseSession; this is the last-resort net for a session that failed midway.
 func (a *App) cleanup() {
 	a.releaseSession()
-	os.Remove(a.tmpFile)
+	_ = os.Remove(a.tmpFile)
 	if a.lockHeld {
-		os.Remove(a.lockFile)
+		_ = os.Remove(a.lockFile)
 	}
 }
 
@@ -282,7 +282,7 @@ func (a *App) createLock() error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(f, "%d\n", os.Getpid())
+	_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
 	if err := f.Close(); err != nil {
 		return err
 	}

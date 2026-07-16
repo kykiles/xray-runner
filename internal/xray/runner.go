@@ -119,7 +119,7 @@ func (r *Runner) RequestRestart() {
 	r.mu.Lock()
 	r.restart = true
 	r.mu.Unlock()
-	r.Stop()
+	_ = r.Stop()
 }
 
 // takeRestart reports whether a restart was requested and clears the flag.

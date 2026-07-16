@@ -89,3 +89,19 @@ func TestFetchWithHWID_TransportError(t *testing.T) {
 		t.Fatal("expected error for unreachable server")
 	}
 }
+
+func TestFetch_RejectsOversizedBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// Stream just over the cap so the reader trips the limit.
+		chunk := make([]byte, 1<<20)
+		for written := 0; written <= maxSubscriptionBody; written += len(chunk) {
+			w.Write(chunk)
+		}
+	}))
+	defer server.Close()
+
+	if _, err := Fetch(server.URL); err == nil {
+		t.Fatal("expected error for a body over the size cap")
+	}
+}
