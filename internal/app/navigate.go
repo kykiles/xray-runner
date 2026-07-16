@@ -149,7 +149,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 			}
 			if action == tui.SubsUpdate {
 				// Update core/geo, then return to the subscription list.
-				if err := tui.RunUpdate(ctx, a.binary); err != nil {
+				if err := tui.RunUpdate(ctx, a.binary, coreVersion(a.binary)); err != nil {
 					ui.Error(err.Error())
 				}
 				continue

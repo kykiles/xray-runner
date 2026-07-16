@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -47,6 +48,20 @@ type Release struct {
 }
 
 func httpClient() *http.Client { return &http.Client{Timeout: 60 * time.Second} }
+
+// SameVersion reports whether a release tag names the installed core version.
+// Tags carry a leading "v" (v26.6.27) while the binary reports the bare number
+// (26.6.27), so both are normalised before comparing. An empty installed
+// version never matches.
+func SameVersion(tag, installed string) bool {
+	if strings.TrimSpace(installed) == "" {
+		return false
+	}
+	norm := func(s string) string {
+		return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(s)), "v")
+	}
+	return norm(tag) == norm(installed)
+}
 
 // FetchReleases lists the most recent core releases (newest first, up to limit)
 // from the official xray-core repo.

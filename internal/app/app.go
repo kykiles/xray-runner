@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +67,9 @@ type App struct {
 	// checkPrivileges reports whether tun mode may be used; a field so tests can
 	// exercise both outcomes without being root.
 	checkPrivileges func() error
+	// pidAlive reports whether the process that owns an existing lock file is
+	// still running; a field so tests can stub liveness deterministically.
+	pidAlive func(pid int) bool
 
 	// U-5: status data, written by health loops, read by the status screen.
 	statusMu    sync.Mutex
@@ -83,6 +88,7 @@ func New(cfg *config.Config, opts Options) *App {
 		lockFile:        filepath.Join(".", "xray_config.json.lock"),
 		interfaces:      net.Interfaces,
 		checkPrivileges: checkTunPrivileges,
+		pidAlive:        processAlive,
 	}
 }
 
@@ -240,18 +246,82 @@ func (a *App) cleanup() {
 }
 
 // acquireLock creates an exclusive lock file next to the config so a second
-// instance from the same directory refuses to start (R-3).
+// instance from the same directory refuses to start (R-3). An existing lock left
+// behind by a crashed or killed run (a "stale" lock) is reclaimed automatically:
+// the file carries the owner's pid, and if that process is gone we remove the
+// lock and take it over instead of forcing the user to delete the file by hand.
 func (a *App) acquireLock() error {
-	f, err := os.OpenFile(a.lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		if os.IsExist(err) {
-			return fmt.Errorf("обнаружен lock-файл %s — возможно, уже запущен другой экземпляр; удалите файл, если это не так", a.lockFile)
-		}
+	err := a.createLock()
+	if err == nil {
+		return nil
+	}
+	if !os.IsExist(err) {
 		return fmt.Errorf("создание lock-файла: %w", err)
 	}
-	f.Close()
+
+	// A lock already exists. If its owner is still running, this is a genuine
+	// second instance and we refuse. Otherwise the lock is stale — reclaim it.
+	if pid, ok := readLockPID(a.lockFile); ok && a.pidAlive(pid) {
+		return fmt.Errorf("обнаружен lock-файл %s — уже запущен другой экземпляр (pid %d)", a.lockFile, pid)
+	}
+
+	slog.Warn("reclaiming stale lock file", "file", a.lockFile)
+	if err := os.Remove(a.lockFile); err != nil {
+		return fmt.Errorf("удаление протухшего lock-файла %s: %w", a.lockFile, err)
+	}
+	if err := a.createLock(); err != nil {
+		return fmt.Errorf("создание lock-файла: %w", err)
+	}
+	return nil
+}
+
+// createLock atomically creates the lock file and records our pid in it, so a
+// later run can tell a live owner from a stale one.
+func (a *App) createLock() error {
+	f, err := os.OpenFile(a.lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(f, "%d\n", os.Getpid())
+	if err := f.Close(); err != nil {
+		return err
+	}
 	a.lockHeld = true
 	return nil
+}
+
+// readLockPID reads the owner pid from an existing lock file. A missing, empty
+// or unparseable file returns ok=false, which callers treat as a stale lock.
+func readLockPID(path string) (int, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
+}
+
+// coreVersion returns the installed xray core version number (e.g. "26.6.27"),
+// or "" if the binary cannot be queried. It feeds the update screen so the user
+// can see which core they are currently running.
+func coreVersion(binary string) string {
+	line, err := xray.Version(binary)
+	if err != nil {
+		return ""
+	}
+	return parseCoreVersion(line)
+}
+
+// parseCoreVersion pulls the version number out of the first line of
+// `xray version`, e.g. "Xray 26.6.27 (…)" -> "26.6.27".
+func parseCoreVersion(line string) string {
+	if fields := strings.Fields(line); len(fields) >= 2 {
+		return fields[1]
+	}
+	return ""
 }
 
 // resolveFirstIP resolves host to a single IP for the kill-switch server rule.

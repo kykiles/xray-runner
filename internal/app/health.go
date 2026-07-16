@@ -204,6 +204,17 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
 
 	consecutiveFails := 0
 	client := &http.Client{Timeout: 10 * time.Second}
+	probe := func() (bool, time.Duration) {
+		start := time.Now()
+		req, _ := http.NewRequestWithContext(ctx, "GET", "https://www.google.com/generate_204", nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			return false, time.Since(start)
+		}
+		resp.Body.Close()
+		return true, time.Since(start)
+	}
+
 	// Probe once up front so the status screen shows a real result immediately.
 	first := true
 
@@ -215,13 +226,21 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
 			case <-ticker.C:
 			}
 		}
+
+		var ok bool
+		var latency time.Duration
+		if first {
+			// A freshly-established TUN route needs a moment before it carries
+			// traffic; give the first check a warm-up window of retries so a
+			// cold miss doesn't flash "нет связи" the instant we connect.
+			ok, latency = connectivityWarmup(ctx, probe, connectivityWarmupWindow, connectivityWarmupInterval)
+		} else {
+			ok, latency = probe()
+		}
 		first = false
 
-		start := time.Now()
-		req, _ := http.NewRequestWithContext(ctx, "GET", "https://www.google.com/generate_204", nil)
-		resp, err := client.Do(req)
-		a.recordHealth(err == nil, time.Since(start))
-		if err != nil {
+		a.recordHealth(ok, latency)
+		if !ok {
 			consecutiveFails++
 			slog.Warn("TUN connectivity check failed", "consecutive_fails", consecutiveFails)
 			if consecutiveFails >= 3 {
@@ -233,8 +252,35 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
 			}
 			continue
 		}
-		resp.Body.Close()
 		consecutiveFails = 0
+	}
+}
+
+const (
+	// connectivityWarmupWindow / Interval bound the first-probe warm-up: retry
+	// for up to the window, waiting the interval between tries.
+	connectivityWarmupWindow   = 12 * time.Second
+	connectivityWarmupInterval = 2 * time.Second
+)
+
+// connectivityWarmup runs probe until it succeeds or the window elapses,
+// returning the last result. It exists so the very first health check can ride
+// out a cold TUN route instead of reporting a transient failure as "нет связи".
+func connectivityWarmup(ctx context.Context, probe func() (bool, time.Duration), window, interval time.Duration) (bool, time.Duration) {
+	deadline := time.Now().Add(window)
+	for {
+		ok, latency := probe()
+		if ok {
+			return true, latency
+		}
+		if !time.Now().Before(deadline) {
+			return false, latency
+		}
+		select {
+		case <-ctx.Done():
+			return false, latency
+		case <-time.After(interval):
+		}
 	}
 }
 

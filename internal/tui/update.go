@@ -42,9 +42,10 @@ type geoReleaseMsg struct {
 type installedMsg struct{ err error }
 
 type updateModel struct {
-	ctx      context.Context
-	xrayPath string
-	dir      string
+	ctx       context.Context
+	xrayPath  string
+	dir       string
+	installed string // current core version number, e.g. "26.6.27" ("" if unknown)
 
 	stage    updateStage
 	kind     updateKind
@@ -58,9 +59,11 @@ type updateModel struct {
 var updateMenu = []string{"Обновить ядро xray", "Обновить гео-базы", "Назад"}
 
 // RunUpdate shows the update screen. xrayPath is the core binary; the geo
-// databases live next to it.
-func RunUpdate(ctx context.Context, xrayPath string) error {
-	m := updateModel{ctx: ctx, xrayPath: xrayPath, dir: filepath.Dir(xrayPath)}
+// databases live next to it. installed is the currently-running core version
+// (empty if it could not be determined), shown so the user knows what they are
+// updating from.
+func RunUpdate(ctx context.Context, xrayPath, installed string) error {
+	m := updateModel{ctx: ctx, xrayPath: xrayPath, dir: filepath.Dir(xrayPath), installed: installed}
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }
@@ -272,7 +275,12 @@ func releaseNote(i, stableIdx int, r updater.Release) string {
 
 func (m updateModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("── Обновление") + "\n\n")
+	b.WriteString(titleStyle.Render("── Обновление") + "\n")
+	cur := m.installed
+	if cur == "" {
+		cur = "неизвестно"
+	}
+	b.WriteString("  " + dimStyle.Render("Текущее ядро: ") + cur + "\n\n")
 
 	switch m.stage {
 	case updMenu:
@@ -303,7 +311,11 @@ func (m updateModel) View() string {
 				cursor = cursorStyle.Render("▸ ")
 				tag = selectedStyle.Render(r.Tag)
 			}
-			b.WriteString("  " + cursor + clip(tag+releaseNote(i, stableIdx, r), m.width-4) + "\n")
+			note := releaseNote(i, stableIdx, r)
+			if updater.SameVersion(r.Tag, m.installed) {
+				note += okStyle.Render("  (установлено)")
+			}
+			b.WriteString("  " + cursor + clip(tag+note, m.width-4) + "\n")
 		}
 		b.WriteString(legend("  ↑/↓ выбор · enter установить · esc назад"))
 

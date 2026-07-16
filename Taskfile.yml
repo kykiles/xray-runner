@@ -20,6 +20,28 @@ tasks:
     generates:
       - "{{.BINARY}}*"
 
+  build:linux:
+    desc: Build the linux binary into xray_linux/
+    cmds:
+      - go build -ldflags "-X main.Version={{.GIT_COMMIT}}" -o 'xray_linux/{{.BINARY}}' {{.CMD}}
+      - cp README.md xray_linux/README.md
+    env:
+      GOOS: linux
+      GOARCH: '{{.TARGET_ARCH}}'
+    generates:
+      - "xray_linux/{{.BINARY}}"
+
+  build:windows:
+    desc: Build the windows binary into xray_windows/
+    cmds:
+      - go build -ldflags "-X main.Version={{.GIT_COMMIT}}" -o 'xray_windows/{{.BINARY}}.exe' {{.CMD}}
+      - cp README.md xray_windows/README.md
+    env:
+      GOOS: windows
+      GOARCH: '{{.TARGET_ARCH}}'
+    generates:
+      - "xray_windows/{{.BINARY}}.exe"
+
   test:
     desc: Run all tests
     cmds:
