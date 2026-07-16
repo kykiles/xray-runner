@@ -1,5 +1,7 @@
 package subscription
 
+import "encoding/json"
+
 type SubEntry struct {
 	Remarks  string
 	Protocol string // vless | vmess | ss | hysteria2 | trojan
@@ -37,4 +39,11 @@ type SubEntry struct {
 	// subscription-provided Insecure flag is honored. Set by the app, never by
 	// the subscription itself (S-1).
 	AllowInsecure bool
+
+	// RawOutbound is the server's original outbound JSON when the entry came from
+	// a full Xray-config subscription. Non-empty entries launch this verbatim
+	// (only the tag is normalized) instead of being rebuilt from the fields above,
+	// so no transport detail is lost. Empty for URL/bare links, which have no
+	// outbound to preserve and go through BuildOutboundJSON.
+	RawOutbound json.RawMessage
 }

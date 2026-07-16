@@ -1,6 +1,10 @@
 package subscription
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 // A subscription can return an array of full Xray client configs (one per
 // "profile"), each embedding proxy outbounds. Servers repeat across profiles,
@@ -74,5 +78,70 @@ func TestParse_XrayConfigArray_ExtractsAndDedups(t *testing.T) {
 	if ss.Address != "to.the.moon" || ss.Port != 1234 ||
 		ss.Method != "chacha20-ietf-poly1305" || ss.Password != "sspass" {
 		t.Errorf("ss fields mismatch: %+v", ss)
+	}
+}
+
+// A config-array server whose transport carries settings the distilled SubEntry
+// cannot hold (here: xhttpSettings) must launch verbatim, not be rebuilt. The
+// preserved RawOutbound is what makes that lossless.
+const xhttpConfigFixture = `[
+  {
+    "remarks": "Germany xhttp",
+    "outbounds": [
+      {"tag": "proxy", "protocol": "vless",
+       "settings": {"vnext": [{"address": "de.glowshine.tech", "port": 8444,
+         "users": [{"id": "aaaa-bbbb", "encryption": "none"}]}]},
+       "streamSettings": {"network": "xhttp", "security": "reality",
+         "realitySettings": {"serverName": "example.com", "publicKey": "PBK", "shortId": "sid", "spiderX": "/spx"},
+         "xhttpSettings": {"path": "/h3probe", "mode": "stream-one", "extra": {"xmux": {"maxConcurrency": 8}}}}}
+    ]
+  }
+]`
+
+func TestProxyOutboundJSON_RawIsLaunchedVerbatim(t *testing.T) {
+	profiles, err := parseProfiles([]byte(xhttpConfigFixture))
+	if err != nil {
+		t.Fatalf("parseProfiles: %v", err)
+	}
+	if len(profiles) != 1 || len(profiles[0].Entries) != 1 {
+		t.Fatalf("expected 1 profile with 1 entry, got %+v", profiles)
+	}
+	e := profiles[0].Entries[0]
+	if len(e.RawOutbound) == 0 {
+		t.Fatal("entry lost its RawOutbound")
+	}
+
+	out, err := ProxyOutboundJSON(&e)
+	if err != nil {
+		t.Fatalf("ProxyOutboundJSON: %v", err)
+	}
+
+	var got struct {
+		Tag    string `json:"tag"`
+		Stream struct {
+			XHTTP struct {
+				Path  string          `json:"path"`
+				Mode  string          `json:"mode"`
+				Extra json.RawMessage `json:"extra"`
+			} `json:"xhttpSettings"`
+			Reality struct {
+				SpiderX string `json:"spiderX"`
+			} `json:"realitySettings"`
+		} `json:"streamSettings"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal outbound: %v", err)
+	}
+	if got.Tag != "proxy" {
+		t.Errorf("tag = %q, want proxy", got.Tag)
+	}
+	if got.Stream.XHTTP.Path != "/h3probe" || got.Stream.XHTTP.Mode != "stream-one" {
+		t.Errorf("xhttpSettings lost: %+v", got.Stream.XHTTP)
+	}
+	if !strings.Contains(string(got.Stream.XHTTP.Extra), "xmux") {
+		t.Errorf("xmux extra lost: %s", got.Stream.XHTTP.Extra)
+	}
+	if got.Stream.Reality.SpiderX != "/spx" {
+		t.Errorf("spiderX lost: %q", got.Stream.Reality.SpiderX)
 	}
 }

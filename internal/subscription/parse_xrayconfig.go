@@ -12,8 +12,8 @@ import (
 // the fields we surface as bare links.
 
 type xrayConfig struct {
-	Remarks   string         `json:"remarks"`
-	Outbounds []xrayOutbound `json:"outbounds"`
+	Remarks   string            `json:"remarks"`
+	Outbounds []json.RawMessage `json:"outbounds"`
 	Routing   struct {
 		Balancers []xrayBalancer `json:"balancers"`
 	} `json:"routing"`
@@ -135,11 +135,18 @@ func parseXrayConfigProfiles(arr []json.RawMessage) ([]Profile, error) {
 
 		var entries []SubEntry
 		seen := map[string]bool{}
-		for i := range cfg.Outbounds {
-			e, ok := outboundToEntry(&cfg.Outbounds[i])
+		for _, raw := range cfg.Outbounds {
+			var o xrayOutbound
+			if err := json.Unmarshal(raw, &o); err != nil {
+				continue
+			}
+			e, ok := outboundToEntry(&o)
 			if !ok {
 				continue
 			}
+			// Preserve the original outbound so the launcher can run it verbatim
+			// instead of rebuilding it from the distilled fields above.
+			e.RawOutbound = raw
 			key := entryKey(e)
 			if seen[key] {
 				continue

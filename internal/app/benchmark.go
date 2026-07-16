@@ -122,7 +122,7 @@ func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.S
 		return subscription.BenchmarkResult{Error: err}
 	}
 	entry.AllowInsecure = pb.allowInsecure
-	outboundJSON, err := subscription.BuildOutboundJSON(&entry)
+	outboundJSON, err := subscription.ProxyOutboundJSON(&entry)
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}

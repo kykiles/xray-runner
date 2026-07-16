@@ -245,7 +245,7 @@ func (a *App) buildSessionConfig(t *target) (json.RawMessage, sessionPorts, erro
 		return raw, ports, err
 	}
 
-	outbound, err := subscription.BuildOutboundJSON(t.entry)
+	outbound, err := subscription.ProxyOutboundJSON(t.entry)
 	if err != nil {
 		return nil, sessionPorts{}, err
 	}

@@ -12,6 +12,32 @@ import (
 	"xray-runner/internal/xraycfg"
 )
 
+// ProxyOutboundJSON returns the proxy outbound to inject into the template. When
+// the entry carries a preserved outbound (a full Xray-config subscription), it is
+// used verbatim with its tag normalized to "proxy" — no transport detail is lost.
+// Otherwise the outbound is rebuilt from the entry's fields (URL/bare links).
+func ProxyOutboundJSON(entry *SubEntry) (json.RawMessage, error) {
+	if len(entry.RawOutbound) > 0 {
+		return retagOutbound(entry.RawOutbound, "proxy")
+	}
+	return BuildOutboundJSON(entry)
+}
+
+// retagOutbound rewrites an outbound's "tag" so the template's routing (which
+// points every rule at "proxy") reaches it.
+func retagOutbound(raw json.RawMessage, tag string) (json.RawMessage, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("raw outbound: %w", err)
+	}
+	t, err := json.Marshal(tag)
+	if err != nil {
+		return nil, err
+	}
+	m["tag"] = t
+	return json.Marshal(m)
+}
+
 func BuildOutboundJSON(entry *SubEntry) (json.RawMessage, error) {
 	switch entry.Protocol {
 	case "vless":
