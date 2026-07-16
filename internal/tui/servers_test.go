@@ -1,13 +1,12 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"xray-runner/internal/subscription"
 )
 
-// A host spelling "ws" is what makes a plain substring filter useless for the
-// transport: "t:ws" must not match it.
 var filterFixture = []subscription.SubEntry{
 	{Remarks: "🇩🇪 Германия 1", Address: "de1.example.ru", Protocol: "vless", Network: "ws"},
 	{Remarks: "🇩🇪 Германия 2", Address: "de2.example.ru", Protocol: "vless", Network: "tcp"},
@@ -17,10 +16,10 @@ var filterFixture = []subscription.SubEntry{
 
 func matching(t *testing.T, query string) []string {
 	t.Helper()
-	f := parseFilter(query)
+	terms := strings.Fields(strings.ToLower(strings.TrimSpace(query)))
 	var out []string
 	for _, e := range filterFixture {
-		if f.match(e) {
+		if len(terms) == 0 || matchAll(e, terms) {
 			out = append(out, e.Address)
 		}
 	}
@@ -39,28 +38,27 @@ func equal(a, b []string) bool {
 	return true
 }
 
-func TestFilter_ProtocolAndTransport(t *testing.T) {
+// The filter is a plain substring search spanning every column (task #1): one
+// term finds the protocol, another the transport, another part of the name.
+func TestFilter_SubstringAcrossColumns(t *testing.T) {
 	tests := []struct {
 		query string
 		want  []string
 	}{
-		{"p:vless", []string{"de1.example.ru", "de2.example.ru"}},
-		{"t:ws", []string{"de1.example.ru", "nl1.example.ru"}},
-		{"p:vless t:ws", []string{"de1.example.ru"}},
-		// Free text still matches name or host...
+		// Protocol column.
+		{"vless", []string{"de1.example.ru", "de2.example.ru"}},
+		// Transport column AND the host that happens to spell "ws" — both match now.
+		{"ws", []string{"de1.example.ru", "ws-node.example.com", "nl1.example.ru"}},
+		// Name column.
 		{"герман", []string{"de1.example.ru", "de2.example.ru"}},
+		// Host column.
 		{"nl1", []string{"nl1.example.ru"}},
-		// ...and combines with the scoped tokens.
-		{"p:vless t:ws герман", []string{"de1.example.ru"}},
-		// Unscoped "ws" searches name and host only — the ws transport of de1/nl1
-		// is not part of that text, so only the host spelling "ws" matches.
-		{"ws", []string{"ws-node.example.com"}},
-		// "ss" is a prefix of no protocol but shadowsocks, so vless is excluded
-		// even though the word "vless" contains "ss".
-		{"p:ss", []string{"ws-node.example.com"}},
-		// Contradictory tokens narrow to nothing rather than widening.
-		{"p:vless p:ss", nil},
-		{"p:vless герман t:tcp", []string{"de2.example.ru"}},
+		// Multiple terms narrow (AND): vless + ws transport → only de1.
+		{"vless ws", []string{"de1.example.ru"}},
+		// Terms may land in different columns: name + transport.
+		{"герман tcp", []string{"de2.example.ru"}},
+		// No match.
+		{"zzz", nil},
 	}
 
 	for _, tt := range tests {
@@ -70,21 +68,26 @@ func TestFilter_ProtocolAndTransport(t *testing.T) {
 	}
 }
 
-// "t:ws" must never fall back to the host, or the prefix buys nothing over the
-// old substring filter.
-func TestFilter_ScopedTokenIgnoresHost(t *testing.T) {
-	for _, addr := range matching(t, "t:ws") {
-		if addr == "ws-node.example.com" {
-			t.Error("t:ws matched a host spelling ws instead of the transport")
-		}
-	}
-}
-
 func TestFilter_EmptyAndCaseInsensitive(t *testing.T) {
 	if got := matching(t, ""); len(got) != len(filterFixture) {
 		t.Errorf("empty filter = %v, want everything", got)
 	}
-	if got := matching(t, "P:VLESS T:WS"); !equal(got, []string{"de1.example.ru"}) {
-		t.Errorf("uppercase filter = %v", got)
+	if got := matching(t, "  VLESS  "); !equal(got, []string{"de1.example.ru", "de2.example.ru"}) {
+		t.Errorf("uppercase/padded filter = %v", got)
+	}
+}
+
+func TestFlagSpace(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"🇩🇪Германия", "🇩🇪 Германия"},
+		{"🇩🇪  Германия", "🇩🇪 Германия"},
+		{"🇩🇪 Германия", "🇩🇪 Германия"},
+		{"Германия", "Германия"}, // no flag, untouched
+		{"🇩🇪", "🇩🇪"},             // flag only
+	}
+	for _, tt := range tests {
+		if got := flagSpace(tt.in); got != tt.want {
+			t.Errorf("flagSpace(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }

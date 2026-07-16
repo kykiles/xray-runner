@@ -147,6 +147,13 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				// ErrUserQuit propagates up to main for a single clean exit (R-4).
 				return nil, ErrUserQuit
 			}
+			if action == tui.SubsUpdate {
+				// Update core/geo, then return to the subscription list.
+				if err := tui.RunUpdate(ctx, a.binary); err != nil {
+					ui.Error(err.Error())
+				}
+				continue
+			}
 			a.nav.subIdx = idx
 			profiles, err := a.loadProfiles(a.nav.subs[idx].URL)
 			if err != nil {

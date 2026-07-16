@@ -36,6 +36,7 @@ type profilesModel struct {
 	benching  bool
 	benchDone int
 	status    string
+	width     int // terminal width; 0 until the first WindowSizeMsg
 	benchCh   chan subscription.BenchmarkResult
 }
 
@@ -63,6 +64,9 @@ func (m profilesModel) Init() tea.Cmd { return nil }
 
 func (m profilesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		return m, nil
 	case benchResultMsg:
 		m.results[msg.Index] = subscription.BenchmarkResult(msg)
 		m.benchDone++
@@ -84,22 +88,23 @@ func (m profilesModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
+	// Cyrillic twins mirror the Russian layout (task #7): q→й, b→и, j→о, k→л, l→д.
 	switch key.String() {
-	case "q":
+	case "q", "й":
 		m.action = ProfileQuit
 		return m, tea.Quit
 	case "esc", "left":
 		m.action = ProfileBack
 		return m, tea.Quit
-	case "up", "k":
+	case "up", "k", "л":
 		if m.cursor > 0 {
 			m.cursor--
 		}
-	case "down", "j":
+	case "down", "j", "о":
 		if m.cursor < len(m.profiles)-1 {
 			m.cursor++
 		}
-	case "b":
+	case "b", "и":
 		if m.benching || m.bench == nil || len(m.profiles) == 0 {
 			return m, nil
 		}
@@ -107,7 +112,7 @@ func (m profilesModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.benchDone = 0
 		m.status = ""
 		return m, m.startBenchmark()
-	case "right", "l":
+	case "right", "l", "д":
 		if len(m.profiles) == 0 {
 			return m, nil
 		}
@@ -164,7 +169,7 @@ func (m profilesModel) View() string {
 	b.WriteString(titleStyle.Render("── Серверы") + "\n\n")
 
 	b.WriteString("  " + header(fmt.Sprintf("  %s %s %s",
-		pad("ПРОФИЛЬ", 30), pad("СЕРВЕРОВ", 8), "РЕЖИМ")))
+		pad("NAME", 30), pad("SERVERS", 8), "BALANCER")))
 
 	for i, p := range m.profiles {
 		cursor := "  "
@@ -172,7 +177,7 @@ func (m profilesModel) View() string {
 			cursor = cursorStyle.Render("▸ ")
 		}
 
-		name := p.Name
+		name := flagSpace(p.Name)
 		if name == "" {
 			name = "(без имени)"
 		}
@@ -193,7 +198,7 @@ func (m profilesModel) View() string {
 		} else if m.benching {
 			line += "  " + dimStyle.Render("▸ ...")
 		}
-		b.WriteString("  " + cursor + line + "\n")
+		b.WriteString("  " + cursor + clip(line, m.width-4) + "\n")
 	}
 
 	if m.benching {

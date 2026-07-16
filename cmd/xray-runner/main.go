@@ -13,6 +13,7 @@ import (
 	"xray-runner/internal/app"
 	"xray-runner/internal/config"
 	applog "xray-runner/internal/log"
+	"xray-runner/internal/tui"
 )
 
 var Version = "dev"
@@ -36,6 +37,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("❌ %v", err)
 	}
+	// Colors are tunable from .env (task #6); apply them once the environment is
+	// loaded, before any TUI screen renders.
+	tui.InitStyles()
 
 	if *flagDumpLinks {
 		subURL := cfg.SubscriptionURL

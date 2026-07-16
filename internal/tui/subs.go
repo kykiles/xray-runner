@@ -15,6 +15,7 @@ type SubsAction int
 
 const (
 	SubsSelected SubsAction = iota
+	SubsUpdate              // open the core/geo update screen
 	SubsQuit
 )
 
@@ -96,15 +97,17 @@ func (m subsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Cyrillic twins mirror the Russian layout (task #7): q→й, j→о, k→л, s→ы,
+	// a→ф, d→в, u→г.
 	switch key.String() {
-	case "q":
+	case "q", "й":
 		m.action = SubsQuit
 		return m, tea.Quit
-	case "up", "k":
+	case "up", "k", "л":
 		if m.cursor > 0 {
 			m.cursor--
 		}
-	case "down", "j":
+	case "down", "j", "о":
 		if m.cursor < len(m.subs)-1 {
 			m.cursor++
 		}
@@ -115,19 +118,22 @@ func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.action = SubsSelected
 		m.choice = m.cursor
 		return m, tea.Quit
-	case "s":
+	case "s", "ы":
 		m.reveal = !m.reveal
-	case "+", "a":
+	case "+", "a", "ф":
 		m.mode = subsAdding
 		m.input.SetValue("")
 		m.input.Focus()
 		m.status = ""
-	case "d":
+	case "d", "в":
 		if len(m.subs) == 0 {
 			m.status = errStyle.Render("Нет подписок для удаления")
 			return m, nil
 		}
 		m.mode = subsConfirmDelete
+	case "u", "г":
+		m.action = SubsUpdate
+		return m, tea.Quit
 	}
 	return m, nil
 }
@@ -167,7 +173,7 @@ func (m subsModel) updateAdding(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m subsModel) updateConfirmDelete(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
-	case "y", "Y", "enter":
+	case "y", "Y", "н", "Н", "enter":
 		name := m.subs[m.cursor].Name
 		if err := m.cb.Delete(m.cursor); err != nil {
 			m.status = errStyle.Render(fmt.Sprintf("Ошибка удаления: %v", err))
@@ -227,9 +233,9 @@ func (m subsModel) View() string {
 		b.WriteString("\n  " + m.status + "\n")
 	}
 
-	keys := "  ↑/↓ выбор · enter открыть · s показать URL · + добавить · d удалить · q выход"
+	keys := "  ↑/↓ выбор · enter открыть · s показать URL · + добавить · d удалить · u обновить · q выход"
 	if m.reveal {
-		keys = "  ↑/↓ выбор · enter открыть · s скрыть URL · + добавить · d удалить · q выход"
+		keys = "  ↑/↓ выбор · enter открыть · s скрыть URL · + добавить · d удалить · u обновить · q выход"
 	}
 	b.WriteString(legend(keys))
 	return b.String()

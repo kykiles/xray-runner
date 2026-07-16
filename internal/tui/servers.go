@@ -55,6 +55,7 @@ type serversModel struct {
 	benchDone  int
 	refreshing bool
 	status     string
+	width      int // terminal width; 0 until the first WindowSizeMsg
 
 	action ServerAction
 	choice int
@@ -67,7 +68,7 @@ type serversModel struct {
 // came from; it may be empty.
 func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc) (*subscription.SubEntry, ServerAction, error) {
 	fi := textinput.New()
-	fi.Placeholder = "имя, хост, p:vless, t:ws"
+	fi.Placeholder = "поиск по всем столбцам"
 	fi.CharLimit = 64
 	fi.Width = 40
 
@@ -105,50 +106,21 @@ func identityOrder(n int) []int {
 
 func (m serversModel) Init() tea.Cmd { return nil }
 
-// filterTerms is a parsed filter line: "p:" scopes a token to the protocol and
-// "t:" to the transport, so that "t:ws" cannot match a host that merely spells
-// "ws". Everything else keeps matching the name or the host.
-type filterTerms struct {
-	text  []string
-	proto []string
-	trans []string
+// entryHaystack is the entry flattened to one lowercase string spanning every
+// column, so the filter can match a substring anywhere: name, host, port,
+// protocol or transport.
+func entryHaystack(e subscription.SubEntry) string {
+	return strings.ToLower(fmt.Sprintf("%s %s %d %s %s",
+		e.Remarks, e.Address, e.Port, e.Protocol, e.Network))
 }
 
-func parseFilter(q string) filterTerms {
-	var f filterTerms
-	for _, tok := range strings.Fields(strings.ToLower(q)) {
-		switch {
-		case strings.HasPrefix(tok, "p:"):
-			if v := tok[len("p:"):]; v != "" {
-				f.proto = append(f.proto, v)
-			}
-		case strings.HasPrefix(tok, "t:"):
-			if v := tok[len("t:"):]; v != "" {
-				f.trans = append(f.trans, v)
-			}
-		default:
-			f.text = append(f.text, tok)
-		}
-	}
-	return f
-}
-
-// match reports whether the entry satisfies every token: tokens narrow the list.
-// Scoped tokens match by prefix, not substring: "p:ss" must mean shadowsocks and
-// not also vless, which happens to spell "ss" inside it.
-func (f filterTerms) match(e subscription.SubEntry) bool {
-	for _, v := range f.proto {
-		if !strings.HasPrefix(strings.ToLower(e.Protocol), v) {
-			return false
-		}
-	}
-	for _, v := range f.trans {
-		if !strings.HasPrefix(strings.ToLower(e.Network), v) {
-			return false
-		}
-	}
-	for _, v := range f.text {
-		if !strings.Contains(strings.ToLower(e.Remarks), v) && !strings.Contains(strings.ToLower(e.Address), v) {
+// matchAll reports whether every space-separated term appears somewhere in the
+// entry. Terms narrow the list (AND); each is a plain substring — typing "vless"
+// finds the protocol column, "ws" the transport, part of a name the name column.
+func matchAll(e subscription.SubEntry, terms []string) bool {
+	hay := entryHaystack(e)
+	for _, t := range terms {
+		if !strings.Contains(hay, t) {
 			return false
 		}
 	}
@@ -157,14 +129,13 @@ func (f filterTerms) match(e subscription.SubEntry) bool {
 
 // visible returns entry indices matching the filter, in display order.
 func (m serversModel) visible() []int {
-	q := strings.TrimSpace(m.filter.Value())
-	if q == "" {
+	terms := strings.Fields(strings.ToLower(strings.TrimSpace(m.filter.Value())))
+	if len(terms) == 0 {
 		return m.order
 	}
-	f := parseFilter(q)
 	var out []int
 	for _, idx := range m.order {
-		if f.match(m.entries[idx]) {
+		if matchAll(m.entries[idx], terms) {
 			out = append(out, idx)
 		}
 	}
@@ -173,6 +144,9 @@ func (m serversModel) visible() []int {
 
 func (m serversModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		return m, nil
 	case benchResultMsg:
 		m.results[msg.Index] = subscription.BenchmarkResult(msg)
 		m.benchDone++
@@ -225,8 +199,10 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// Letter hotkeys also accept their Cyrillic twin on a Russian layout, where
+	// the same physical key emits й/и/к/о/л/а instead of q/b/r/j/k/f.
 	switch key.String() {
-	case "q":
+	case "q", "й":
 		m.action = ServerQuit
 		return m, tea.Quit
 	case "esc", "left":
@@ -237,19 +213,19 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.action = ServerBack
 		return m, tea.Quit
-	case "up", "k":
+	case "up", "k", "л":
 		if m.cursor > 0 {
 			m.cursor--
 		}
-	case "down", "j":
+	case "down", "j", "о":
 		if m.cursor < len(m.visible())-1 {
 			m.cursor++
 		}
-	case "/", "f":
+	case "/", "f", "а":
 		m.filtering = true
 		m.filter.Focus()
 		m.status = ""
-	case "b":
+	case "b", "и":
 		if m.benching || m.bench == nil {
 			return m, nil
 		}
@@ -257,7 +233,7 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.benchDone = 0
 		m.status = ""
 		return m, m.startBenchmark()
-	case "r":
+	case "r", "к":
 		if m.refresh == nil || m.refreshing {
 			return m, nil
 		}
@@ -380,7 +356,7 @@ func (m serversModel) View() string {
 		b.WriteString(dimStyle.Render("  Ничего не найдено") + "\n")
 	} else {
 		b.WriteString("  " + header(fmt.Sprintf("  %s %s %s %s",
-			pad("HOST", 28), pad("PROTOCOL", 9), pad("TRANSPORT", 9), "MARK")))
+			pad("NAME", 26), pad("PROTOCOL", 9), pad("TRANSPORT", 9), "HOST")))
 	}
 	for pos, idx := range vis {
 		e := m.entries[idx]
@@ -389,12 +365,13 @@ func (m serversModel) View() string {
 			cursor = cursorStyle.Render("▸ ")
 		}
 
+		name := flagSpace(orDash(mark(e)))
 		hostPort := fmt.Sprintf("%s:%d", e.Address, e.Port)
 		line := fmt.Sprintf("%s %s %s %s",
-			pad(truncate(hostPort, 28), 28),
+			pad(truncate(name, 26), 26),
 			pad(e.Protocol, 9),
 			pad(orDash(e.Network), 9),
-			truncate(orDash(mark(e)), 24))
+			truncate(hostPort, 28))
 		if pos == m.cursor {
 			line = selectedStyle.Render(line)
 		}
@@ -414,7 +391,9 @@ func (m serversModel) View() string {
 		} else if e.Validate() != nil {
 			line += "  " + warnStyle.Render("⚠ invalid")
 		}
-		b.WriteString("  " + cursor + line + "\n")
+		// Keep the row on one line even with a long name + latency tail (task #2):
+		// clip to the terminal width, less the 4-column left gutter.
+		b.WriteString("  " + cursor + clip(line, m.width-4) + "\n")
 	}
 
 	if m.benching {
@@ -430,7 +409,7 @@ func (m serversModel) View() string {
 		keys = "  ↑/↓ выбор · enter подключить · b пинг · r обновить · / фильтр · esc назад · q выход"
 	}
 	if m.filtering {
-		keys = "  фильтр: имя/хост · p:vless протокол · t:ws транспорт · enter применить · esc сбросить"
+		keys = "  фильтр: поиск по всем столбцам · enter применить · esc сбросить"
 	}
 	b.WriteString(legend(keys))
 	return b.String()
@@ -453,7 +432,7 @@ func orDash(s string) string {
 
 // mark is the server's name from the subscription. Xray-config subscriptions
 // carry no per-server name, so the parser falls back to the address — repeating
-// it in the MARK column would just duplicate HOST.
+// it in the NAME column would just duplicate HOST.
 func mark(e subscription.SubEntry) string {
 	if e.Remarks == e.Address {
 		return ""

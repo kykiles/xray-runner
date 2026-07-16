@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -23,6 +24,53 @@ var (
 	// screen (U-1).
 	legendStyle = lipgloss.NewStyle().Faint(true).MarginTop(1)
 )
+
+// InitStyles overrides the default palette from the environment so colors can be
+// tuned in .env without recompiling. It runs after config.Load has populated the
+// environment; env values are ANSI codes (0-255) or lipgloss color names.
+func InitStyles() {
+	titleStyle = titleStyle.Foreground(envColor("COLOR_TITLE", "6"))
+	cursorStyle = cursorStyle.Foreground(envColor("COLOR_CURSOR", "6"))
+	errStyle = errStyle.Foreground(envColor("COLOR_ERR", "1"))
+	okStyle = okStyle.Foreground(envColor("COLOR_OK", "2"))
+	warnStyle = warnStyle.Foreground(envColor("COLOR_WARN", "3"))
+	selectedStyle = selectedStyle.Foreground(envColor("COLOR_SELECTED", "6"))
+}
+
+func envColor(key, def string) lipgloss.Color {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return lipgloss.Color(v)
+	}
+	return lipgloss.Color(def)
+}
+
+// flagSpace normalizes the gap after a leading flag emoji to exactly one space,
+// so the two regional-indicator runes and the text that follows neither collide
+// nor drift apart in the table.
+func flagSpace(s string) string {
+	r := []rune(s)
+	if len(r) < 2 || !isRegional(r[0]) || !isRegional(r[1]) {
+		return s
+	}
+	rest := strings.TrimLeft(string(r[2:]), " ")
+	if rest == "" {
+		return string(r[:2])
+	}
+	return string(r[:2]) + " " + rest
+}
+
+func isRegional(r rune) bool { return r >= 0x1F1E6 && r <= 0x1F1FF }
+
+// clip shortens an already-styled line to w display columns, keeping table rows
+// from wrapping or running past the terminal edge. It uses lipgloss so embedded
+// ANSI color codes are measured and cut safely. w<=0 (size not yet known) leaves
+// the line untouched.
+func clip(s string, w int) string {
+	if w <= 0 {
+		return s
+	}
+	return lipgloss.NewStyle().MaxWidth(w).Render(s)
+}
 
 func legend(items string) string {
 	return legendStyle.Render(items)
