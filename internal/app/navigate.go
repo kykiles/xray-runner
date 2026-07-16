@@ -129,6 +129,20 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 		Delete: subscription.RemoveSubscription,
 		Reload: subscription.LoadSubscriptions,
 		Mask:   func(raw string) string { return maskURL(raw, a.cfg.MaskCreds) },
+		// Load fetches the chosen subscription's profiles from inside the
+		// subscription screen, so the shell does not flash during the network
+		// fetch (task #3). Results are stashed in a.nav for the next level.
+		Load: func(index int) error {
+			profiles, err := a.loadProfiles(a.nav.subs[index].URL)
+			if err != nil {
+				return err
+			}
+			a.nav.subIdx = index
+			a.nav.profiles = profiles
+			a.nav.profIdx = 0
+			a.nav.flat = subscription.AllSingle(profiles)
+			return nil
+		},
 	}
 
 	for {
@@ -138,7 +152,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 
 		switch a.nav.level {
 		case levelSubs:
-			subs, idx, action, err := tui.SelectSubscription(a.nav.subs, cb)
+			subs, _, action, err := tui.SelectSubscription(a.nav.subs, cb)
 			if err != nil {
 				return nil, fmt.Errorf("TUI: %w", err)
 			}
@@ -154,15 +168,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				}
 				continue
 			}
-			a.nav.subIdx = idx
-			profiles, err := a.loadProfiles(a.nav.subs[idx].URL)
-			if err != nil {
-				ui.Error(err.Error())
-				continue
-			}
-			a.nav.profiles = profiles
-			a.nav.profIdx = 0
-			a.nav.flat = subscription.AllSingle(profiles)
+			// SubsSelected: cb.Load already fetched the profiles into a.nav.
 			a.nav.level = levelProfiles
 
 		case levelProfiles:

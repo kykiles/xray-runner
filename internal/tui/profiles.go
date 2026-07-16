@@ -166,7 +166,7 @@ func (m profilesModel) waitBenchResult() tea.Cmd {
 
 func (m profilesModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("── Серверы") + "\n\n")
+	b.WriteString(titleStyle.Render("Серверы") + "\n\n")
 
 	b.WriteString("  " + header(fmt.Sprintf("  %s %s %s",
 		pad("NAME", 30), pad("SERVERS", 8), "BALANCER")))

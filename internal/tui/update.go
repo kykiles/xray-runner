@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -46,6 +47,7 @@ type updateModel struct {
 	xrayPath  string
 	dir       string
 	installed string // current core version number, e.g. "26.6.27" ("" if unknown)
+	geoDate   string // geoip.dat modification date, e.g. "2026-07-16" ("" if unknown)
 
 	stage    updateStage
 	kind     updateKind
@@ -56,16 +58,27 @@ type updateModel struct {
 	width    int
 }
 
-var updateMenu = []string{"Обновить ядро xray", "Обновить гео-базы", "Назад"}
+var updateMenu = []string{"Обновить ядро xray", "Обновить гео-базы"}
 
 // RunUpdate shows the update screen. xrayPath is the core binary; the geo
 // databases live next to it. installed is the currently-running core version
 // (empty if it could not be determined), shown so the user knows what they are
 // updating from.
 func RunUpdate(ctx context.Context, xrayPath, installed string) error {
-	m := updateModel{ctx: ctx, xrayPath: xrayPath, dir: filepath.Dir(xrayPath), installed: installed}
+	dir := filepath.Dir(xrayPath)
+	m := updateModel{ctx: ctx, xrayPath: xrayPath, dir: dir, installed: installed, geoDate: geoDate(dir)}
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
+}
+
+// geoDate is the modification date of geoip.dat next to the core — the closest
+// thing to a geo-database version we have. Empty when the file is missing.
+func geoDate(dir string) string {
+	fi, err := os.Stat(filepath.Join(dir, "geoip.dat"))
+	if err != nil {
+		return ""
+	}
+	return fi.ModTime().Format("2006-01-02")
 }
 
 func (m updateModel) Init() tea.Cmd { return nil }
@@ -183,8 +196,6 @@ func (m updateModel) keyMenu(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.stage = updWorking
 			m.status = "Получение свежих гео-баз…"
 			return m, m.fetchGeoRelease()
-		default:
-			return m, tea.Quit
 		}
 	}
 	return m, nil
@@ -275,12 +286,17 @@ func releaseNote(i, stableIdx int, r updater.Release) string {
 
 func (m updateModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("── Обновление") + "\n")
+	b.WriteString(titleStyle.Render("Обновление") + "\n")
 	cur := m.installed
 	if cur == "" {
 		cur = "неизвестно"
 	}
-	b.WriteString("  " + dimStyle.Render("Текущее ядро: ") + cur + "\n\n")
+	geo := m.geoDate
+	if geo == "" {
+		geo = "неизвестно"
+	}
+	b.WriteString("  " + dimStyle.Render("Текущее ядро: ") + cur + "\n")
+	b.WriteString("  " + dimStyle.Render("Гео-базы: ") + geo + "\n\n")
 
 	switch m.stage {
 	case updMenu:

@@ -128,7 +128,7 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m statusModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("── Подключено") + "\n\n")
+	b.WriteString(titleStyle.Render("Подключено") + "\n\n")
 
 	row := func(label, value string) {
 		b.WriteString("  " + dimStyle.Render(pad(label, 10)) + value + "\n")

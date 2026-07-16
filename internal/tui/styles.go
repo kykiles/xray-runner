@@ -72,8 +72,14 @@ func clip(s string, w int) string {
 	return lipgloss.NewStyle().MaxWidth(w).Render(s)
 }
 
+// legend renders the bottom key hints one command per line (vertical), splitting
+// the " · "-joined string it receives and re-indenting each entry.
 func legend(items string) string {
-	return legendStyle.Render(items)
+	parts := strings.Split(strings.TrimLeft(items, " "), " · ")
+	for i := range parts {
+		parts[i] = "  " + parts[i]
+	}
+	return legendStyle.Render(strings.Join(parts, "\n"))
 }
 
 // pad right-pads s to w display columns. Server names carry flag emoji, which

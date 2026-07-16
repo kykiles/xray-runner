@@ -25,6 +25,10 @@ type SubsCallbacks struct {
 	Delete func(index int) error                            // remove by index
 	Reload func() ([]subscription.NamedSubscription, error) // re-read the list
 	Mask   func(rawURL string) string                       // S-3 masking
+	// Load fetches the chosen subscription's servers and stashes them for the
+	// next screen. Running it here, still inside the alt-screen, keeps the shell
+	// from flashing between menus during the network fetch (task #3).
+	Load func(index int) error
 }
 
 type subsMode int
@@ -33,7 +37,11 @@ const (
 	subsList subsMode = iota
 	subsAdding
 	subsConfirmDelete
+	subsLoading
 )
+
+// loadedMsg carries the result of SubsCallbacks.Load back into the model.
+type loadedMsg struct{ err error }
 
 type subsModel struct {
 	subs   []subscription.NamedSubscription
@@ -76,6 +84,16 @@ func SelectSubscription(subs []subscription.NamedSubscription, cb SubsCallbacks)
 func (m subsModel) Init() tea.Cmd { return nil }
 
 func (m subsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if lm, ok := msg.(loadedMsg); ok {
+		if lm.err != nil {
+			m.mode = subsList
+			m.status = errStyle.Render(lm.err.Error())
+			return m, nil
+		}
+		m.action = SubsSelected
+		return m, tea.Quit
+	}
+
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
@@ -92,6 +110,9 @@ func (m subsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateAdding(key)
 	case subsConfirmDelete:
 		return m.updateConfirmDelete(key)
+	case subsLoading:
+		// Ignore input while the subscription is being fetched.
+		return m, nil
 	}
 	return m.updateList(key)
 }
@@ -115,9 +136,14 @@ func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.subs) == 0 {
 			return m, nil
 		}
-		m.action = SubsSelected
+		// Fetch the subscription here, in the loading state, so the alt-screen
+		// stays up and the shell does not flash before the next menu (task #3).
 		m.choice = m.cursor
-		return m, tea.Quit
+		m.mode = subsLoading
+		m.status = ""
+		idx := m.cursor
+		load := m.cb.Load
+		return m, func() tea.Msg { return loadedMsg{err: load(idx)} }
 	case "s", "ы":
 		m.reveal = !m.reveal
 	case "+", "a", "ф":
@@ -193,7 +219,7 @@ func (m subsModel) updateConfirmDelete(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m subsModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("── Мои подписки") + "\n\n")
+	b.WriteString(titleStyle.Render("Мои подписки") + "\n\n")
 
 	if m.mode == subsAdding {
 		b.WriteString("  Вставьте URL подписки (http/https) или ссылку на сервер\n")
@@ -216,15 +242,20 @@ func (m subsModel) View() string {
 			cursor = cursorStyle.Render("▸ ")
 			line = selectedStyle.Render(fmt.Sprintf("%-28s ", s.Name)) + dimStyle.Render(m.cb.Mask(s.URL))
 		}
-		// The revealed URL goes on its own line: unpadded and untruncated, so it
-		// stays a working link the terminal can open.
+		// The revealed URL replaces the masked preview in place — same row, running
+		// off to the right untruncated so it stays a working link — instead of
+		// dropping to a new line, which made the list jump vertically.
 		if m.reveal && i == m.cursor {
-			line = selectedStyle.Render(s.Name)
+			line = selectedStyle.Render(fmt.Sprintf("%-28s ", s.Name)) + urlStyle.Render(s.URL)
 			b.WriteString("  " + cursor + line + "\n")
-			b.WriteString("      " + urlStyle.Render(s.URL) + "\n")
 			continue
 		}
 		b.WriteString("  " + cursor + line + "\n")
+	}
+
+	if m.mode == subsLoading {
+		b.WriteString("\n  " + dimStyle.Render("⏳ Загрузка серверов…") + "\n")
+		return b.String()
 	}
 
 	if m.mode == subsConfirmDelete {

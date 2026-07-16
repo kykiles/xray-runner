@@ -341,9 +341,9 @@ func (m *serversModel) sortByLatency() {
 
 func (m serversModel) View() string {
 	var b strings.Builder
-	title := "── Серверы"
+	title := "Серверы"
 	if m.title != "" {
-		title = "── " + m.title + " · серверы"
+		title = m.title + " · серверы"
 	}
 	b.WriteString(titleStyle.Render(title) + "\n\n")
 
