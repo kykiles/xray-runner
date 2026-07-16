@@ -227,6 +227,9 @@ func parseURL(rawURL string) (SubEntry, error) {
 	case "vmess":
 		parseVMessURL(u, &e)
 
+	case "trojan":
+		parseTrojanURL(u, &e)
+
 	case "hysteria2", "hysteria", "hy2":
 		parseHysteria2URL(u, &e)
 		e.Protocol = "hysteria2"
@@ -263,6 +266,8 @@ func parseVlessURL(u *url.URL, e *SubEntry) {
 	e.ShortID = firstNonEmpty(q.Get("sid"), q.Get("shortId"), q.Get("shortID"), q.Get("short_id"))
 	e.ALPN = q.Get("alpn")
 	e.ServiceName = q.Get("serviceName")
+	e.SpiderX = q.Get("spx")
+	e.XHTTPMode = q.Get("mode")
 
 	if e.Network == "" {
 		e.Network = "tcp"
@@ -273,6 +278,37 @@ func parseVlessURL(u *url.URL, e *SubEntry) {
 		slog.Debug("REALITY URL has empty shortId (server may accept any)",
 			"address", e.Address)
 	}
+}
+
+// parseTrojanURL reads a trojan link: the password is the userinfo and transport
+// / TLS parameters ride in the query the same way as vless.
+func parseTrojanURL(u *url.URL, e *SubEntry) {
+	e.Password = u.User.Username()
+
+	host, portStr, err := net.SplitHostPort(u.Host)
+	if err == nil {
+		e.Address = host
+		if p, pErr := strconv.Atoi(portStr); pErr == nil {
+			e.Port = p
+		}
+	} else {
+		e.Address = u.Host
+	}
+
+	q := u.Query()
+	e.Network = firstNonEmpty(q.Get("type"), "tcp")
+	e.Security = firstNonEmpty(q.Get("security"), "tls")
+	e.Path = q.Get("path")
+	e.Host = q.Get("host")
+	e.SNI = q.Get("sni")
+	e.Fingerprint = q.Get("fp")
+	e.PublicKey = q.Get("pbk")
+	e.ShortID = firstNonEmpty(q.Get("sid"), q.Get("shortId"), q.Get("shortID"), q.Get("short_id"))
+	e.ALPN = q.Get("alpn")
+	e.ServiceName = q.Get("serviceName")
+	e.SpiderX = q.Get("spx")
+	e.XHTTPMode = q.Get("mode")
+	e.Remarks = decodeFragment(u)
 }
 
 func parseSSURL(u *url.URL, e *SubEntry) error {

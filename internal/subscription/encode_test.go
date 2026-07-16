@@ -95,7 +95,7 @@ func TestEncodeURL_Hysteria2RoundTrip(t *testing.T) {
 }
 
 func TestEncodeURL_Unsupported(t *testing.T) {
-	_, err := EncodeURL(&SubEntry{Protocol: "trojan"})
+	_, err := EncodeURL(&SubEntry{Protocol: "socks"})
 	if err == nil {
 		t.Fatal("expected error for unsupported protocol, got nil")
 	}

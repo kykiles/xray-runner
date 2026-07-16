@@ -76,6 +76,30 @@ func setTransportSettings(ss *StreamSettings, network string, q url.Values) {
 			grpc.Authority = auth
 		}
 		ss.GRPCSettings = grpc
+
+	case "xhttp", "splithttp":
+		ss.Network = "xhttp"
+		xhttp := &XHTTPSettings{}
+		if p := q.Get("path"); p != "" {
+			xhttp.Path = p
+		}
+		if h := q.Get("host"); h != "" {
+			xhttp.Host = h
+		}
+		if m := q.Get("mode"); m != "" {
+			xhttp.Mode = m
+		}
+		ss.XHTTPSettings = xhttp
+
+	case "httpupgrade":
+		hu := &HTTPUpgradeSettings{}
+		if p := q.Get("path"); p != "" {
+			hu.Path = p
+		}
+		if h := q.Get("host"); h != "" {
+			hu.Host = h
+		}
+		ss.HTTPUpgradeSettings = hu
 	}
 }
 
@@ -89,6 +113,7 @@ func setSecuritySettings(ss *StreamSettings, q url.Values) {
 			PublicKey:   q.Get("pbk"),
 			ShortID:     q.Get("sid"),
 			Fingerprint: q.Get("fp"),
+			SpiderX:     q.Get("spx"),
 		}
 	case "tls":
 		ss.Security = "tls"

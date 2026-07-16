@@ -48,6 +48,8 @@ func BuildOutboundJSON(entry *SubEntry) (json.RawMessage, error) {
 		return buildSS(entry)
 	case "hysteria2", "hysteria":
 		return buildHysteria2(entry)
+	case "trojan":
+		return buildTrojan(entry)
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", entry.Protocol)
 	}
@@ -86,6 +88,7 @@ func buildVLESS(e *SubEntry) (json.RawMessage, error) {
 	if e.ServiceName != "" {
 		q.Set("serviceName", e.ServiceName)
 	}
+	setTransportQuery(q, e)
 
 	u := &url.URL{
 		Scheme:   "vless",
@@ -97,6 +100,63 @@ func buildVLESS(e *SubEntry) (json.RawMessage, error) {
 	outbound, err := xraycfg.BuildVLESSOutbound(u)
 	if err != nil {
 		return nil, fmt.Errorf("build vless: %w", err)
+	}
+	return json.Marshal(outbound)
+}
+
+// setTransportQuery adds the reality/transport params that both vless and trojan
+// carry in their share links, so the xraycfg builders can read them back.
+func setTransportQuery(q url.Values, e *SubEntry) {
+	if e.SpiderX != "" {
+		q.Set("spx", e.SpiderX)
+	}
+	if e.XHTTPMode != "" {
+		q.Set("mode", e.XHTTPMode)
+	}
+}
+
+func buildTrojan(e *SubEntry) (json.RawMessage, error) {
+	q := url.Values{}
+	q.Set("type", orDefault(e.Network, "tcp"))
+	if e.Security != "" {
+		q.Set("security", e.Security)
+	}
+	if e.Path != "" {
+		q.Set("path", e.Path)
+	}
+	if e.Host != "" {
+		q.Set("host", e.Host)
+	}
+	if e.SNI != "" {
+		q.Set("sni", e.SNI)
+	}
+	if e.Fingerprint != "" {
+		q.Set("fp", e.Fingerprint)
+	}
+	if e.PublicKey != "" {
+		q.Set("pbk", e.PublicKey)
+	}
+	if e.ShortID != "" {
+		q.Set("sid", e.ShortID)
+	}
+	if e.ALPN != "" {
+		q.Set("alpn", e.ALPN)
+	}
+	if e.ServiceName != "" {
+		q.Set("serviceName", e.ServiceName)
+	}
+	setTransportQuery(q, e)
+
+	u := &url.URL{
+		Scheme:   "trojan",
+		Host:     net.JoinHostPort(e.Address, strconv.Itoa(e.Port)),
+		User:     url.User(e.Password),
+		RawQuery: q.Encode(),
+	}
+
+	outbound, err := xraycfg.BuildTrojanOutbound(u)
+	if err != nil {
+		return nil, fmt.Errorf("build trojan: %w", err)
 	}
 	return json.Marshal(outbound)
 }

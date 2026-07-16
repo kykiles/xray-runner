@@ -22,6 +22,8 @@ type SubEntry struct {
 	ShortID     string
 	ALPN        string
 	ServiceName string
+	SpiderX     string // reality spiderX (spx)
+	XHTTPMode   string // xhttp mode (stream-one, packet-up, ...)
 
 	// SS
 	Method   string

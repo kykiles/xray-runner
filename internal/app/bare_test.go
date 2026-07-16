@@ -12,6 +12,7 @@ func TestValidateSubscriptionInput_Accepts(t *testing.T) {
 		"vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@example.com:8080?type=ws#srv",
 		"ss://YWVzLTI1Ni1nY206c2VjcmV0@ss.example.com:8443#myserver",
 		"hysteria2://secret@hy.example.com:443#hy",
+		"trojan://pass@example.com:443?security=tls&sni=a.example.com#tr",
 	}
 	for _, s := range ok {
 		if err := validateSubscriptionInput(s); err != nil {
@@ -49,9 +50,8 @@ func TestValidateSubscriptionInput_Rejects(t *testing.T) {
 		// Port out of range.
 		{"ss://YWVzLTI1Ni1nY206c2VjcmV0@ss.example.com:99999", "ссылка неполная"},
 		// Unsupported protocol and plain junk.
-		{"trojan://pass@example.com:443", "vless/vmess/ss/hysteria2"},
-		{"ftp://example.com", "vless/vmess/ss/hysteria2"},
-		{"just some text", "vless/vmess/ss/hysteria2"},
+		{"ftp://example.com", "vless/vmess/ss/trojan/hysteria2"},
+		{"just some text", "vless/vmess/ss/trojan/hysteria2"},
 	}
 	for _, c := range bad {
 		err := validateSubscriptionInput(c.in)

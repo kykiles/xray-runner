@@ -128,6 +128,8 @@ type StreamSettings struct {
 	Security            string                      `json:"security,omitempty"`
 	WSSettings          *WSSettings                 `json:"wsSettings,omitempty"`
 	GRPCSettings        *GRPCSettings               `json:"grpcSettings,omitempty"`
+	XHTTPSettings       *XHTTPSettings              `json:"xhttpSettings,omitempty"`
+	HTTPUpgradeSettings *HTTPUpgradeSettings        `json:"httpupgradeSettings,omitempty"`
 	TLSSettings         *TLSSettings                `json:"tlsSettings,omitempty"`
 	Reality             *RealitySettings            `json:"realitySettings,omitempty"`
 	HysteriaSettings    *HysteriaTransportSettings  `json:"hysteriaSettings,omitempty"`
@@ -148,6 +150,19 @@ type GRPCSettings struct {
 	Authority   string `json:"authority,omitempty"`
 }
 
+// XHTTPSettings covers the fields a bare xhttp URL can carry. Panel configs with
+// richer settings (extra/xmux) go through the RAW path and never reach here.
+type XHTTPSettings struct {
+	Path string `json:"path,omitempty"`
+	Host string `json:"host,omitempty"`
+	Mode string `json:"mode,omitempty"`
+}
+
+type HTTPUpgradeSettings struct {
+	Path string `json:"path,omitempty"`
+	Host string `json:"host,omitempty"`
+}
+
 type TLSSettings struct {
 	ServerName    string   `json:"serverName,omitempty"`
 	Fingerprint   string   `json:"fingerprint,omitempty"`
@@ -160,6 +175,24 @@ type RealitySettings struct {
 	PublicKey   string `json:"publicKey,omitempty"`
 	ShortID     string `json:"shortId,omitempty"`
 	Fingerprint string `json:"fingerprint,omitempty"`
+	SpiderX     string `json:"spiderX,omitempty"`
+}
+
+type TrojanOutbound struct {
+	Tag      string          `json:"tag"`
+	Protocol string          `json:"protocol"`
+	Settings *TrojanSettings `json:"settings,omitempty"`
+	Stream   *StreamSettings `json:"streamSettings,omitempty"`
+}
+
+type TrojanSettings struct {
+	Servers []TrojanServer `json:"servers,omitempty"`
+}
+
+type TrojanServer struct {
+	Address  string `json:"address"`
+	Port     int    `json:"port"`
+	Password string `json:"password"`
 }
 
 type TUNSettings struct {

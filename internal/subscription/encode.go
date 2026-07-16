@@ -19,6 +19,8 @@ func EncodeURL(e *SubEntry) (string, error) {
 		return encodeSS(e), nil
 	case "vmess":
 		return encodeVMess(e)
+	case "trojan":
+		return encodeTrojan(e), nil
 	case "hysteria2", "hysteria":
 		return encodeHysteria2(e), nil
 	default:
@@ -39,10 +41,42 @@ func encodeVLESS(e *SubEntry) string {
 	setIf(q, "sid", e.ShortID)
 	setIf(q, "alpn", e.ALPN)
 	setIf(q, "serviceName", e.ServiceName)
+	encodeTransportQuery(q, e)
 
 	u := &url.URL{
 		Scheme:   "vless",
 		User:     url.User(e.UUID),
+		Host:     net.JoinHostPort(e.Address, strconv.Itoa(e.Port)),
+		RawQuery: q.Encode(),
+		Fragment: e.Remarks,
+	}
+	return u.String()
+}
+
+// encodeTransportQuery is the inverse of setTransportQuery: it re-emits the
+// reality/transport params so --dump-links round-trips them.
+func encodeTransportQuery(q url.Values, e *SubEntry) {
+	setIf(q, "spx", e.SpiderX)
+	setIf(q, "mode", e.XHTTPMode)
+}
+
+func encodeTrojan(e *SubEntry) string {
+	q := url.Values{}
+	q.Set("type", orDefault(e.Network, "tcp"))
+	setIf(q, "security", e.Security)
+	setIf(q, "path", e.Path)
+	setIf(q, "host", e.Host)
+	setIf(q, "sni", e.SNI)
+	setIf(q, "fp", e.Fingerprint)
+	setIf(q, "pbk", e.PublicKey)
+	setIf(q, "sid", e.ShortID)
+	setIf(q, "alpn", e.ALPN)
+	setIf(q, "serviceName", e.ServiceName)
+	encodeTransportQuery(q, e)
+
+	u := &url.URL{
+		Scheme:   "trojan",
+		User:     url.User(e.Password),
 		Host:     net.JoinHostPort(e.Address, strconv.Itoa(e.Port)),
 		RawQuery: q.Encode(),
 		Fragment: e.Remarks,

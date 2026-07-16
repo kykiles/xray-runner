@@ -26,6 +26,10 @@ func (e *SubEntry) Validate() error {
 		if e.Password == "" {
 			return fmt.Errorf("hysteria2 требует password")
 		}
+	case "trojan":
+		if e.Password == "" {
+			return fmt.Errorf("trojan требует password")
+		}
 	default:
 		return fmt.Errorf("неподдерживаемый протокол: %s", e.Protocol)
 	}

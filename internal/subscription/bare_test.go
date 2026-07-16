@@ -14,6 +14,7 @@ func TestIsBareLink(t *testing.T) {
 		"ss://YWVzLTI1Ni1nY206c2VjcmV0@ss.example.com:8443#myserver",
 		"hysteria2://pass@hy.example.com:443#hy",
 		"hy2://pass@hy.example.com:443#hy",
+		"trojan://pass@example.com:443?security=tls&sni=a.example.com#tr",
 		"vmess://" + vmessB64(t),
 	}
 	for _, s := range bare {
@@ -25,7 +26,6 @@ func TestIsBareLink(t *testing.T) {
 	notBare := []string{
 		"https://sub.example.com/token",
 		"http://sub.example.com/token",
-		"trojan://pass@example.com:443",
 		"example.com/sub",
 		"",
 	}
