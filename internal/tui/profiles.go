@@ -37,6 +37,7 @@ type profilesModel struct {
 	benchDone int
 	status    string
 	width     int // terminal width; 0 until the first WindowSizeMsg
+	height    int // terminal height; 0 until the first WindowSizeMsg
 	benchCh   chan subscription.BenchmarkResult
 }
 
@@ -66,6 +67,7 @@ func (m profilesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 		return m, nil
 	case benchResultMsg:
 		m.results[msg.Index] = subscription.BenchmarkResult(msg)
@@ -171,7 +173,30 @@ func (m profilesModel) View() string {
 	b.WriteString("  " + header(fmt.Sprintf("  %s %s %s",
 		pad("NAME", 30), pad("SERVERS", 8), "BALANCER")))
 
-	for i, p := range m.profiles {
+	keys := "  ↑/↓ выбор · enter запустить профиль · → раскрыть серверы · ←/esc назад · q выход"
+	if m.bench != nil {
+		keys = "  ↑/↓ выбор · enter запустить профиль · → раскрыть серверы · b пинг · ←/esc назад · q выход"
+	}
+
+	// Fit the row list into the terminal, reserving the fixed chrome (task #3):
+	// title(2) + header(1) + legend + two indicator lines, plus the status block.
+	budget := len(m.profiles)
+	if m.height > 0 {
+		reserved := 2 + 1 + legendHeight(keys) + 2
+		if m.benching || m.status != "" {
+			reserved += 2
+		}
+		if budget = m.height - reserved; budget < 1 {
+			budget = 1
+		}
+	}
+	start, end, above, below := window(len(m.profiles), m.cursor, budget)
+
+	if above > 0 {
+		b.WriteString(moreUp(above))
+	}
+	for i := start; i < end; i++ {
+		p := m.profiles[i]
 		cursor := "  "
 		if i == m.cursor {
 			cursor = cursorStyle.Render("▸ ")
@@ -200,6 +225,9 @@ func (m profilesModel) View() string {
 		}
 		b.WriteString("  " + cursor + clip(line, m.width-4) + "\n")
 	}
+	if below > 0 {
+		b.WriteString(moreDown(below))
+	}
 
 	if m.benching {
 		b.WriteString("\n  " + dimStyle.Render(fmt.Sprintf("⏳ Замер latency... %d/%d", m.benchDone, len(m.profiles))) + "\n")
@@ -207,10 +235,6 @@ func (m profilesModel) View() string {
 		b.WriteString("\n  " + m.status + "\n")
 	}
 
-	keys := "  ↑/↓ выбор · enter запустить профиль · → раскрыть серверы · esc назад · q выход"
-	if m.bench != nil {
-		keys = "  ↑/↓ выбор · enter запустить профиль · → раскрыть серверы · b пинг · esc назад · q выход"
-	}
 	b.WriteString(legend(keys))
 	return b.String()
 }

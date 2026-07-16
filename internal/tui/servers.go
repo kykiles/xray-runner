@@ -56,6 +56,7 @@ type serversModel struct {
 	refreshing bool
 	status     string
 	width      int // terminal width; 0 until the first WindowSizeMsg
+	height     int // terminal height; 0 until the first WindowSizeMsg
 
 	action ServerAction
 	choice int
@@ -146,6 +147,7 @@ func (m serversModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 		return m, nil
 	case benchResultMsg:
 		m.results[msg.Index] = subscription.BenchmarkResult(msg)
@@ -240,7 +242,8 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.refreshing = true
 		m.status = ""
 		return m, m.startRefresh()
-	case "enter":
+	case "enter", "right":
+		// → connects, mirroring "into/forward" used across the menus (task #1).
 		vis := m.visible()
 		if len(vis) == 0 {
 			return m, nil
@@ -351,14 +354,47 @@ func (m serversModel) View() string {
 		b.WriteString("  Фильтр: " + m.filter.View() + "\n\n")
 	}
 
+	keys := "  ↑/↓ выбор · enter/→ подключить · / фильтр · ←/esc назад · q выход"
+	if m.bench != nil {
+		keys = "  ↑/↓ выбор · enter/→ подключить · b пинг · r обновить · / фильтр · ←/esc назад · q выход"
+	}
+	if m.filtering {
+		keys = "  фильтр: поиск по всем столбцам · enter применить · esc сбросить"
+	}
+
 	vis := m.visible()
+	start, end := 0, len(vis)
+	var above, below int
 	if len(vis) == 0 {
 		b.WriteString(dimStyle.Render("  Ничего не найдено") + "\n")
 	} else {
 		b.WriteString("  " + header(fmt.Sprintf("  %s %s %s %s",
 			pad("NAME", 26), pad("PROTOCOL", 9), pad("TRANSPORT", 9), "HOST")))
+
+		// Fit the row list into the terminal, reserving the fixed chrome so the
+		// legend never gets pushed off the bottom (task #3): title(2) + header(1)
+		// + legend + two indicator lines, plus the filter/status blocks when shown.
+		budget := len(vis)
+		if m.height > 0 {
+			reserved := 2 + 1 + legendHeight(keys) + 2
+			if m.filtering || m.filter.Value() != "" {
+				reserved += 2
+			}
+			if m.benching || m.refreshing || m.status != "" {
+				reserved += 2
+			}
+			if budget = m.height - reserved; budget < 1 {
+				budget = 1
+			}
+		}
+		start, end, above, below = window(len(vis), m.cursor, budget)
 	}
-	for pos, idx := range vis {
+
+	if above > 0 {
+		b.WriteString(moreUp(above))
+	}
+	for pos := start; pos < end; pos++ {
+		idx := vis[pos]
 		e := m.entries[idx]
 		cursor := "  "
 		if pos == m.cursor {
@@ -395,6 +431,9 @@ func (m serversModel) View() string {
 		// clip to the terminal width, less the 4-column left gutter.
 		b.WriteString("  " + cursor + clip(line, m.width-4) + "\n")
 	}
+	if below > 0 {
+		b.WriteString(moreDown(below))
+	}
 
 	if m.benching {
 		b.WriteString("\n  " + dimStyle.Render(fmt.Sprintf("⏳ Замер latency... %d/%d", m.benchDone, len(m.entries))) + "\n")
@@ -404,13 +443,6 @@ func (m serversModel) View() string {
 		b.WriteString("\n  " + m.status + "\n")
 	}
 
-	keys := "  ↑/↓ выбор · enter подключить · / фильтр · esc назад · q выход"
-	if m.bench != nil {
-		keys = "  ↑/↓ выбор · enter подключить · b пинг · r обновить · / фильтр · esc назад · q выход"
-	}
-	if m.filtering {
-		keys = "  фильтр: поиск по всем столбцам · enter применить · esc сбросить"
-	}
 	b.WriteString(legend(keys))
 	return b.String()
 }

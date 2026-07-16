@@ -121,7 +121,8 @@ func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Cyrillic twins mirror the Russian layout (task #7): q→й, j→о, k→л, s→ы,
 	// a→ф, d→в, u→г.
 	switch key.String() {
-	case "q", "й":
+	case "q", "й", "left":
+		// Top level: ← exits like q, since there is nowhere further back (task #1).
 		m.action = SubsQuit
 		return m, tea.Quit
 	case "up", "k", "л":
@@ -132,7 +133,8 @@ func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < len(m.subs)-1 {
 			m.cursor++
 		}
-	case "enter":
+	case "enter", "right":
+		// → opens the subscription, mirroring "into/forward" across the menus.
 		if len(m.subs) == 0 {
 			return m, nil
 		}
@@ -264,9 +266,9 @@ func (m subsModel) View() string {
 		b.WriteString("\n  " + m.status + "\n")
 	}
 
-	keys := "  ↑/↓ выбор · enter открыть · s показать URL · + добавить · d удалить · u обновить · q выход"
+	keys := "  ↑/↓ выбор · enter/→ открыть · s показать URL · + добавить · d удалить · u обновить · q/← выход"
 	if m.reveal {
-		keys = "  ↑/↓ выбор · enter открыть · s скрыть URL · + добавить · d удалить · u обновить · q выход"
+		keys = "  ↑/↓ выбор · enter/→ открыть · s скрыть URL · + добавить · d удалить · u обновить · q/← выход"
 	}
 	b.WriteString(legend(keys))
 	return b.String()

@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -110,4 +111,39 @@ func truncate(s string, w int) string {
 // header renders a table header row for the list screens.
 func header(cols string) string {
 	return dimStyle.Render(cols) + "\n"
+}
+
+// window returns the [start,end) sub-range of a total-row list to render so that
+// cursor stays visible within height rows, plus how many rows fall above and
+// below the window (task #3). A non-positive height (size unknown) or a list
+// that already fits shows everything.
+func window(total, cursor, height int) (start, end, above, below int) {
+	if height <= 0 || total <= height {
+		return 0, total, 0, 0
+	}
+	start = cursor - height/2
+	if start < 0 {
+		start = 0
+	}
+	if start+height > total {
+		start = total - height
+	}
+	end = start + height
+	return start, end, start, total - end
+}
+
+// legendHeight is how many terminal lines legend(keys) occupies: one row per
+// " · "-separated hint plus the one-line top margin. List screens reserve it so
+// the row window never pushes the legend off the bottom.
+func legendHeight(keys string) int {
+	return len(strings.Split(strings.TrimLeft(keys, " "), " · ")) + 1
+}
+
+// moreUp/moreDown render the scroll indicators shown when a list is windowed.
+func moreUp(n int) string {
+	return "  " + dimStyle.Render(fmt.Sprintf("── ещё %d ↑ ──", n)) + "\n"
+}
+
+func moreDown(n int) string {
+	return "  " + dimStyle.Render(fmt.Sprintf("── ещё %d ↓ ──", n)) + "\n"
 }

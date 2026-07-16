@@ -150,7 +150,7 @@ func (m statusModel) View() string {
 		b.WriteString("\n  " + style.Render(m.note) + "\n")
 	}
 
-	keys := fmt.Sprintf("  esc назад к серверам · m режим %s · r перезапуск · q выход", m.info.NextMode)
+	keys := fmt.Sprintf("  ←/esc назад к серверам · m режим %s · r перезапуск · q выход", m.info.NextMode)
 	b.WriteString(legend(keys))
 	return b.String()
 }

@@ -48,24 +48,11 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	slog.Info("starting xray", "binary", a.binary, "mode", a.mode, "target", t.title())
 
 	a.runner = xray.New(a.binary, a.tmpFile)
-	// X-1: validate the config up front; a test failure is a deterministic
-	// error and must not be retried.
-	if err := a.runner.TestConfig(ctx); err != nil {
-		return tui.StatusQuit, fmt.Errorf("проверка конфигурации xray не прошла: %w", err)
-	}
 
 	sessCtx, sessCancel := context.WithCancel(ctx)
 	defer sessCancel()
 
 	var xrayDone sync.WaitGroup
-	xrayDone.Add(1)
-	go func() {
-		defer xrayDone.Done()
-		if err := a.runner.RunWithRetry(sessCtx, 5); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Error("xray runner failed", "error", err)
-			sessCancel()
-		}
-	}()
 
 	// teardown runs on every exit path, including a failed bring-up.
 	teardown := func() {
@@ -74,7 +61,27 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 		a.releaseSession()
 	}
 
-	if err := a.bringUp(sessCtx, t, ports); err != nil {
+	// connect validates the config, starts the core and brings up proxy/TUN. It
+	// runs behind the "Connecting…" screen so the shell never flashes between the
+	// server list and the status screen (task #2).
+	connect := func() error {
+		// X-1: validate the config up front; a test failure is a deterministic
+		// error and must not be retried.
+		if err := a.runner.TestConfig(sessCtx); err != nil {
+			return fmt.Errorf("проверка конфигурации xray не прошла: %w", err)
+		}
+		xrayDone.Add(1)
+		go func() {
+			defer xrayDone.Done()
+			if err := a.runner.RunWithRetry(sessCtx, 5); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Error("xray runner failed", "error", err)
+				sessCancel()
+			}
+		}()
+		return a.bringUp(sessCtx, t, ports)
+	}
+
+	if err := a.showConnecting(t, connect); err != nil {
 		teardown()
 		return tui.StatusQuit, err
 	}
@@ -187,6 +194,15 @@ func (a *App) reshowStatus(ctx context.Context, t *target, ports sessionPorts, r
 		}
 	}
 	return action, nil
+}
+
+// showConnecting runs the bring-up behind the alt-screen "Connecting…" spinner,
+// or straight through with no screen on a headless run (U-2/U-3).
+func (a *App) showConnecting(t *target, connect func() error) error {
+	if a.headless() {
+		return connect()
+	}
+	return tui.ShowConnecting(t.title(), connect)
 }
 
 // headless reports whether the session runs without an interactive screen:
