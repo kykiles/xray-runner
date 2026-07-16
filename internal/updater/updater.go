@@ -1,6 +1,7 @@
 // Package updater fetches xray-core releases from the official XTLS GitHub repo
-// and installs the core binary or the geo databases in place, keeping a .bak of
-// whatever it replaces so a bad download can be rolled back by hand.
+// and installs the core binary or the geo databases in place, replacing whatever
+// was there atomically. Rolling back the core is done by re-installing an older
+// version from the release list, so no .bak copies are left behind.
 package updater
 
 import (
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"time"
 )
 
@@ -50,7 +52,7 @@ func httpClient() *http.Client { return &http.Client{Timeout: 60 * time.Second} 
 // from the official xray-core repo.
 func FetchReleases(ctx context.Context, limit int) ([]Release, error) {
 	if limit <= 0 {
-		limit = 10
+		limit = 20
 	}
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=%d", CoreRepo, limit)
 	var releases []Release
@@ -58,6 +60,19 @@ func FetchReleases(ctx context.Context, limit int) ([]Release, error) {
 		return nil, err
 	}
 	return releases, nil
+}
+
+// TrimToLatestStable returns the prefix of rels running from the newest release
+// down to (and including) the first stable (non-prerelease) one, dropping any
+// older pre-release tail. If none of them is stable, rels is returned unchanged
+// so the user still has something to pick from.
+func TrimToLatestStable(rels []Release) []Release {
+	for i, r := range rels {
+		if !r.Prerelease {
+			return rels[:i+1]
+		}
+	}
+	return rels
 }
 
 // FetchLatestGeoRelease returns the newest release of the geo-data repo, which
@@ -176,7 +191,7 @@ func download(ctx context.Context, a Asset) (string, error) {
 }
 
 // InstallCore downloads the core zip, extracts the xray binary and swaps it in
-// atomically, backing the old binary up to xrayPath+".bak".
+// atomically, then fixes its mode/owner so it stays usable by the invoking user.
 func InstallCore(ctx context.Context, a Asset, xrayPath string) error {
 	zipPath, err := download(ctx, a)
 	if err != nil {
@@ -196,11 +211,13 @@ func InstallCore(ctx context.Context, a Asset, xrayPath string) error {
 		os.Remove(newPath)
 		return err
 	}
-	return swap(newPath, xrayPath)
+	if err := swap(newPath, xrayPath); err != nil {
+		return err
+	}
+	return finalizeFile(xrayPath, 0o755)
 }
 
-// InstallGeo downloads both databases into dir, replacing the existing files and
-// keeping .bak copies.
+// InstallGeo downloads both databases into dir, replacing the existing files.
 func InstallGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
 	for _, a := range []Asset{geoip, geosite} {
 		src, err := download(ctx, a)
@@ -220,21 +237,40 @@ func InstallGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
 		if err := swap(newPath, dst); err != nil {
 			return err
 		}
+		if err := finalizeFile(dst, 0o644); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// swap moves newPath onto dst, first renaming any existing dst to dst+".bak" so
-// the previous version can be restored by hand.
+// swap atomically replaces dst with newPath. On Linux os.Rename overwrites an
+// existing dst in place, so no backup is left behind.
 func swap(newPath, dst string) error {
-	if _, err := os.Stat(dst); err == nil {
-		if err := os.Rename(dst, dst+".bak"); err != nil {
-			os.Remove(newPath)
-			return fmt.Errorf("резервная копия %s: %w", filepath.Base(dst), err)
-		}
-	}
 	if err := os.Rename(newPath, dst); err != nil {
 		return fmt.Errorf("замена %s: %w", filepath.Base(dst), err)
+	}
+	return nil
+}
+
+// finalizeFile fixes the installed file so it is usable by the person who ran
+// the tool: it sets mode, and when running as root under sudo it hands ownership
+// back to the invoking user (SUDO_UID/SUDO_GID). Without this a download made
+// under sudo lands as root-owned 0600 — unreadable to the user afterwards.
+func finalizeFile(path string, mode os.FileMode) error {
+	if err := os.Chmod(path, mode); err != nil {
+		return fmt.Errorf("права %s: %w", filepath.Base(path), err)
+	}
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	uid, err1 := strconv.Atoi(os.Getenv("SUDO_UID"))
+	gid, err2 := strconv.Atoi(os.Getenv("SUDO_GID"))
+	if err1 != nil || err2 != nil {
+		return nil // not launched via sudo; leave ownership as is
+	}
+	if err := os.Chown(path, uid, gid); err != nil {
+		return fmt.Errorf("владелец %s: %w", filepath.Base(path), err)
 	}
 	return nil
 }

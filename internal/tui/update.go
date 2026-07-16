@@ -105,7 +105,7 @@ func (m updateModel) onReleases(msg releasesMsg) (tea.Model, tea.Cmd) {
 		m.err = fmt.Errorf("в последних релизах нет сборки ядра под вашу ОС/архитектуру")
 		return m, nil
 	}
-	m.releases = withCore
+	m.releases = updater.TrimToLatestStable(withCore)
 	m.cursor = 0
 	m.stage = updReleases
 	return m, nil
@@ -215,7 +215,7 @@ func (m updateModel) keyReleases(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m updateModel) fetchReleases() tea.Cmd {
 	ctx := m.ctx
 	return func() tea.Msg {
-		rels, err := updater.FetchReleases(ctx, 10)
+		rels, err := updater.FetchReleases(ctx, 20)
 		return releasesMsg{releases: rels, err: err}
 	}
 }
@@ -242,6 +242,34 @@ func (m updateModel) installGeo(geoip, geosite updater.Asset) tea.Cmd {
 	}
 }
 
+// releaseNote builds the styled "(последняя, стабильная)" style suffix shown next
+// to a version tag. stableIdx is the index of the newest stable release (-1 if
+// none). The suffix is empty when a release carries no note.
+func releaseNote(i, stableIdx int, r updater.Release) string {
+	var notes []string
+	if i == 0 {
+		notes = append(notes, "последняя")
+	}
+	if i == stableIdx {
+		notes = append(notes, "стабильная")
+	}
+	if r.Prerelease {
+		notes = append(notes, "pre-release")
+	}
+	if len(notes) == 0 {
+		return ""
+	}
+	text := "  (" + strings.Join(notes, ", ") + ")"
+	switch {
+	case r.Prerelease:
+		return warnStyle.Render(text)
+	case i == stableIdx:
+		return okStyle.Render(text)
+	default:
+		return dimStyle.Render(text)
+	}
+}
+
 func (m updateModel) View() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("── Обновление") + "\n\n")
@@ -261,20 +289,21 @@ func (m updateModel) View() string {
 
 	case updReleases:
 		b.WriteString(dimStyle.Render("  Выберите версию ядра:") + "\n\n")
+		stableIdx := -1
+		for i, r := range m.releases {
+			if !r.Prerelease {
+				stableIdx = i
+				break
+			}
+		}
 		for i, r := range m.releases {
 			cursor := "  "
-			label := r.Tag
-			if r.Prerelease {
-				label += "  " + warnStyle.Render("(pre-release)")
-			}
+			tag := r.Tag
 			if i == m.cursor {
 				cursor = cursorStyle.Render("▸ ")
-				label = selectedStyle.Render(r.Tag)
-				if r.Prerelease {
-					label += "  " + warnStyle.Render("(pre-release)")
-				}
+				tag = selectedStyle.Render(r.Tag)
 			}
-			b.WriteString("  " + cursor + clip(label, m.width-4) + "\n")
+			b.WriteString("  " + cursor + clip(tag+releaseNote(i, stableIdx, r), m.width-4) + "\n")
 		}
 		b.WriteString(legend("  ↑/↓ выбор · enter установить · esc назад"))
 
@@ -286,7 +315,7 @@ func (m updateModel) View() string {
 		if m.err != nil {
 			b.WriteString("  " + errStyle.Render("✖ "+m.err.Error()) + "\n")
 		} else {
-			b.WriteString("  " + okStyle.Render("✔ Готово. Прежние файлы сохранены как .bak") + "\n")
+			b.WriteString("  " + okStyle.Render("✔ Готово") + "\n")
 		}
 		b.WriteString(legend("  любая клавиша · назад в меню · esc выход"))
 	}

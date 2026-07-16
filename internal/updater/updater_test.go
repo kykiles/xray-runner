@@ -82,7 +82,7 @@ func TestExtractZipFile(t *testing.T) {
 	}
 }
 
-func TestSwapKeepsBackup(t *testing.T) {
+func TestSwapReplacesWithoutBackup(t *testing.T) {
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "xray")
 	if err := os.WriteFile(dst, []byte("OLD"), 0o755); err != nil {
@@ -99,9 +99,66 @@ func TestSwapKeepsBackup(t *testing.T) {
 	if got, _ := os.ReadFile(dst); string(got) != "NEW" {
 		t.Errorf("dst = %q, want NEW", got)
 	}
-	if got, _ := os.ReadFile(dst + ".bak"); string(got) != "OLD" {
-		t.Errorf("backup = %q, want OLD", got)
+	if _, err := os.Stat(dst + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("swap left a .bak behind: stat err = %v", err)
 	}
+	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
+		t.Errorf("swap left the .new source behind: stat err = %v", err)
+	}
+}
+
+func TestFinalizeFileSetsMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "geoip.dat")
+	if err := os.WriteFile(path, []byte("DB"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalizeFile(path, 0o644); err != nil {
+		t.Fatalf("finalizeFile: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Errorf("mode = %o, want 644", fi.Mode().Perm())
+	}
+}
+
+func TestTrimToLatestStable(t *testing.T) {
+	pre := func(tag string) Release { return Release{Tag: tag, Prerelease: true} }
+	rel := func(tag string) Release { return Release{Tag: tag} }
+
+	tests := []struct {
+		name string
+		in   []Release
+		want []string // expected tags
+	}{
+		{"stable first", []Release{rel("v1.9"), rel("v1.8"), pre("v1.7-pre")}, []string{"v1.9"}},
+		{"stable in middle", []Release{pre("v1.9-pre"), pre("v1.8-pre"), rel("v1.7"), pre("v1.6-pre")}, []string{"v1.9-pre", "v1.8-pre", "v1.7"}},
+		{"no stable", []Release{pre("v1.9-pre"), pre("v1.8-pre")}, []string{"v1.9-pre", "v1.8-pre"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := TrimToLatestStable(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("len = %d (%v), want %d (%v)", len(got), tags(got), len(tt.want), tt.want)
+			}
+			for i, r := range got {
+				if r.Tag != tt.want[i] {
+					t.Errorf("tag[%d] = %q, want %q", i, r.Tag, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func tags(rels []Release) []string {
+	out := make([]string, len(rels))
+	for i, r := range rels {
+		out[i] = r.Tag
+	}
+	return out
 }
 
 func writeZip(t *testing.T, path string, files map[string]string) {
