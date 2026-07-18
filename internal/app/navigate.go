@@ -132,12 +132,11 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 		// Load fetches the chosen subscription's profiles from inside the
 		// subscription screen, so the shell does not flash during the network
 		// fetch (task #3). Results are stashed in a.nav for the next level.
-		Load: func(index int) error {
-			profiles, err := a.loadProfiles(a.nav.subs[index].URL)
+		Load: func(rawURL string) error {
+			profiles, err := a.loadProfiles(rawURL)
 			if err != nil {
 				return err
 			}
-			a.nav.subIdx = index
 			a.nav.profiles = profiles
 			a.nav.profIdx = 0
 			a.nav.flat = subscription.AllSingle(profiles)
@@ -152,7 +151,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 
 		switch a.nav.level {
 		case levelSubs:
-			subs, _, action, err := tui.SelectSubscription(a.nav.subs, cb)
+			subs, choice, action, err := tui.SelectSubscription(a.nav.subs, cb)
 			if err != nil {
 				return nil, fmt.Errorf("TUI: %w", err)
 			}
@@ -169,6 +168,9 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				continue
 			}
 			// SubsSelected: cb.Load already fetched the profiles into a.nav.
+			// choice indexes the reloaded list we just stored, so subIdx stays
+			// valid even after an add/delete changed the list under us.
+			a.nav.subIdx = choice
 			a.nav.level = levelProfiles
 
 		case levelProfiles:

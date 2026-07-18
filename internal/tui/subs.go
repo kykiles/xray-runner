@@ -27,8 +27,10 @@ type SubsCallbacks struct {
 	Mask   func(rawURL string) string                       // S-3 masking
 	// Load fetches the chosen subscription's servers and stashes them for the
 	// next screen. Running it here, still inside the alt-screen, keeps the shell
-	// from flashing between menus during the network fetch (task #3).
-	Load func(index int) error
+	// from flashing between menus during the network fetch (task #3). It takes the
+	// URL rather than an index so it reads the model's live list, which may have
+	// grown or shrunk (add/delete) since the caller's copy was captured.
+	Load func(rawURL string) error
 }
 
 type subsMode int
@@ -143,9 +145,9 @@ func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.choice = m.cursor
 		m.mode = subsLoading
 		m.status = ""
-		idx := m.cursor
+		url := m.subs[m.cursor].URL
 		load := m.cb.Load
-		return m, func() tea.Msg { return loadedMsg{err: load(idx)} }
+		return m, func() tea.Msg { return loadedMsg{err: load(url)} }
 	case "s", "ы":
 		m.reveal = !m.reveal
 	case "+", "a", "ф":
