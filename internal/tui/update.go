@@ -50,10 +50,11 @@ type updateModel struct {
 	installed string // current core version number, e.g. "26.6.27" ("" if unknown)
 	geoDate   string // geoip.dat modification date, e.g. "2026-07-16" ("" if unknown)
 
-	stage    updateStage
-	kind     updateKind
-	cursor   int
-	releases []updater.Release // core releases carrying an asset for this platform
+	stage      updateStage
+	kind       updateKind
+	cursor     int
+	pendingTag string            // core release tag being installed, for the header refresh
+	releases   []updater.Release // core releases carrying an asset for this platform
 	status   string
 	err      error
 	width    int
@@ -102,6 +103,17 @@ func (m updateModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case installedMsg:
 		m.stage = updDone
 		m.err = msg.err
+		if msg.err == nil {
+			// Refresh the header so it reflects what we just installed instead of
+			// the values captured when the screen opened — otherwise the old core
+			// version / geo date lingers until the user leaves and re-enters.
+			switch m.kind {
+			case kindCore:
+				m.installed = strings.TrimPrefix(strings.ToLower(m.pendingTag), "v")
+			case kindGeo:
+				m.geoDate = geoDate(m.dir)
+			}
+		}
 		return m, nil
 	case tea.KeyMsg:
 		return m.updateKey(msg)
@@ -226,6 +238,7 @@ func (m updateModel) keyReleases(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		r := m.releases[m.cursor]
 		a, _ := updater.CoreAsset(r)
+		m.pendingTag = r.Tag
 		m.stage = updWorking
 		m.status = fmt.Sprintf("Скачивание и установка %s…", a.Name)
 		return m, m.installCore(a)
