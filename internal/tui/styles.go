@@ -139,11 +139,20 @@ func legendHeight(keys string) int {
 	return len(strings.Split(strings.TrimLeft(keys, " "), " · ")) + 1
 }
 
-// moreUp/moreDown render the scroll indicators shown when a list is windowed.
+// moreUp/moreDown render the scroll indicators for a windowed list. Both always
+// occupy a line — an empty one when nothing is hidden — so the rows below the
+// header keep their place instead of jumping by a line as the window scrolls
+// past either end of the list.
 func moreUp(n int) string {
+	if n <= 0 {
+		return "\n"
+	}
 	return "  " + dimStyle.Render(fmt.Sprintf("── ещё %d ↑ ──", n)) + "\n"
 }
 
 func moreDown(n int) string {
+	if n <= 0 {
+		return "\n"
+	}
 	return "  " + dimStyle.Render(fmt.Sprintf("── ещё %d ↓ ──", n)) + "\n"
 }

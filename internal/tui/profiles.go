@@ -192,9 +192,7 @@ func (m profilesModel) View() string {
 	}
 	start, end, above, below := window(len(m.profiles), m.cursor, budget)
 
-	if above > 0 {
-		b.WriteString(moreUp(above))
-	}
+	b.WriteString(moreUp(above))
 	for i := start; i < end; i++ {
 		p := m.profiles[i]
 		cursor := "  "
@@ -225,9 +223,7 @@ func (m profilesModel) View() string {
 		}
 		b.WriteString("  " + cursor + clip(line, m.width-4) + "\n")
 	}
-	if below > 0 {
-		b.WriteString(moreDown(below))
-	}
+	b.WriteString(moreDown(below))
 
 	if m.benching {
 		b.WriteString("\n  " + dimStyle.Render(fmt.Sprintf("⏳ Замер latency... %d/%d", m.benchDone, len(m.profiles))) + "\n")

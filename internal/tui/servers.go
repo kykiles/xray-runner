@@ -66,8 +66,10 @@ type serversModel struct {
 
 // SelectServer shows the server list and returns the chosen entry, or the
 // action that ended the screen (back/quit). title names the profile the servers
-// came from; it may be empty.
-func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc) (*subscription.SubEntry, ServerAction, error) {
+// came from; it may be empty. lastAddress/lastPort name the server connected to
+// last time, so returning to the list lands the cursor back on it; an empty
+// address or no match starts at the top.
+func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, lastAddress string, lastPort int, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc) (*subscription.SubEntry, ServerAction, error) {
 	fi := textinput.New()
 	fi.Placeholder = "поиск по всем столбцам"
 	fi.CharLimit = 64
@@ -81,6 +83,7 @@ func SelectServer(ctx context.Context, title string, entries []subscription.SubE
 		bench:   bench,
 		results: map[int]subscription.BenchmarkResult{},
 		order:   identityOrder(len(entries)),
+		cursor:  indexOfServer(entries, lastAddress, lastPort),
 		filter:  fi,
 		action:  ServerQuit,
 		choice:  -1,
@@ -95,6 +98,21 @@ func SelectServer(ctx context.Context, title string, entries []subscription.SubE
 		return &final.entries[final.choice], ServerSelected, nil
 	}
 	return nil, final.action, nil
+}
+
+// indexOfServer finds the entry matching address:port, or 0 when there is no
+// match — address:port identifies a server across a subscription refresh, where
+// names may change and positions shift.
+func indexOfServer(entries []subscription.SubEntry, address string, port int) int {
+	if address == "" {
+		return 0
+	}
+	for i, e := range entries {
+		if e.Address == address && e.Port == port {
+			return i
+		}
+	}
+	return 0
 }
 
 func identityOrder(n int) []int {
@@ -390,9 +408,7 @@ func (m serversModel) View() string {
 		start, end, above, below = window(len(vis), m.cursor, budget)
 	}
 
-	if above > 0 {
-		b.WriteString(moreUp(above))
-	}
+	b.WriteString(moreUp(above))
 	for pos := start; pos < end; pos++ {
 		idx := vis[pos]
 		e := m.entries[idx]
@@ -431,9 +447,7 @@ func (m serversModel) View() string {
 		// clip to the terminal width, less the 4-column left gutter.
 		b.WriteString("  " + cursor + clip(line, m.width-4) + "\n")
 	}
-	if below > 0 {
-		b.WriteString(moreDown(below))
-	}
+	b.WriteString(moreDown(below))
 
 	if m.benching {
 		b.WriteString("\n  " + dimStyle.Render(fmt.Sprintf("⏳ Замер latency... %d/%d", m.benchDone, len(m.entries))) + "\n")

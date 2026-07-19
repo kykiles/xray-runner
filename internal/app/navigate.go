@@ -236,8 +236,17 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 		return a.nav.entries(), nil
 	}
 
+	// Start the cursor on the server connected to last time, so returning to the
+	// list shows where the user left off. Only for the same subscription — the
+	// saved address means nothing in another one.
+	var lastAddress string
+	var lastPort int
+	if state, err := loadLastState(); err == nil && state != nil && state.SubscriptionURL == subURL {
+		lastAddress, lastPort = state.ServerAddress, state.ServerPort
+	}
+
 	pb := NewProxyBenchmarker(a.template, a.binary, 3, 8*time.Second, a.cfg.AllowInsecure)
-	selected, action, err := tui.SelectServer(ctx, a.nav.profileTitle(), a.nav.entries(), refresh, pb.Run)
+	selected, action, err := tui.SelectServer(ctx, a.nav.profileTitle(), a.nav.entries(), lastAddress, lastPort, refresh, pb.Run)
 	if err != nil {
 		return nil, fmt.Errorf("TUI: %w", err)
 	}

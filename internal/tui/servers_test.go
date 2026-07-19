@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textinput"
+
 	"xray-runner/internal/subscription"
 )
 
@@ -89,5 +91,77 @@ func TestFlagSpace(t *testing.T) {
 		if got := flagSpace(tt.in); got != tt.want {
 			t.Errorf("flagSpace(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+// The first row must stay on the same line while scrolling: at either end of
+// the list one scroll indicator has nothing to report, and dropping its line
+// used to pull the whole list up by one.
+func TestServersView_RowsDoNotShiftWhileScrolling(t *testing.T) {
+	entries := make([]subscription.SubEntry, 40)
+	for i := range entries {
+		entries[i] = subscription.SubEntry{
+			Remarks: "srv", Address: "host.example.com", Port: 443,
+			Protocol: "vless", Network: "tcp",
+		}
+	}
+
+	want := -1
+	for _, cursor := range []int{0, 1, 20, 38, 39} {
+		m := serversModel{
+			entries: entries,
+			order:   identityOrder(len(entries)),
+			cursor:  cursor,
+			filter:  textinput.New(),
+			results: map[int]subscription.BenchmarkResult{},
+			width:   120,
+			height:  24,
+		}
+		lines := strings.Split(m.View(), "\n")
+		got := -1
+		for i, l := range lines {
+			if strings.Contains(l, "host.example.com") {
+				got = i
+				break
+			}
+		}
+		if got < 0 {
+			t.Fatalf("cursor %d: no server row rendered", cursor)
+		}
+		if want < 0 {
+			want = got
+			continue
+		}
+		if got != want {
+			t.Errorf("cursor %d: first row on line %d, want %d", cursor, got, want)
+		}
+	}
+}
+
+// Returning to the list lands the cursor on the server connected to last time,
+// matched by address:port.
+func TestSelectServer_CursorOnLastConnected(t *testing.T) {
+	entries := []subscription.SubEntry{
+		{Address: "de1.example.ru", Port: 443},
+		{Address: "nl1.example.ru", Port: 443},
+		{Address: "nl1.example.ru", Port: 8443},
+	}
+	tests := []struct {
+		name    string
+		address string
+		port    int
+		want    int
+	}{
+		{"match", "nl1.example.ru", 443, 1},
+		{"port distinguishes", "nl1.example.ru", 8443, 2},
+		{"no saved server", "", 0, 0},
+		{"gone from subscription", "old.example.ru", 443, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := indexOfServer(entries, tt.address, tt.port); got != tt.want {
+				t.Errorf("indexOfServer(%q, %d) = %d, want %d", tt.address, tt.port, got, tt.want)
+			}
+		})
 	}
 }
