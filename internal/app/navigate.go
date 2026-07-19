@@ -30,15 +30,32 @@ type target struct {
 
 func (t target) isProfile() bool { return t.entry == nil }
 
+// attachProfile links a single server to the profile it came from, so the
+// session runs under the panel's routing and dns instead of template.json. Both
+// the menu and the scripted path go through here — a server whose subscription
+// has no profile structure (URL list, bare link) simply finds no owner and stays
+// on the template path.
+func (t *target) attachProfile(profiles []subscription.Profile) {
+	owner := subscription.ProfileFor(profiles, t.entry)
+	if owner == nil {
+		return
+	}
+	t.profileRaw = owner.Raw
+	t.profileSrvs = owner.Entries
+}
+
 // serverHosts lists every server the session may connect to. TUN routing must
 // keep all of them on the physical path: a balancer rotates across the whole
 // list, and a server left inside the tunnel deadlocks xray's own uplink.
 func (t target) serverHosts() []string {
-	if !t.isProfile() {
-		return []string{t.entry.Address}
-	}
-	hosts := make([]string, 0, len(t.profileSrvs))
+	hosts := make([]string, 0, len(t.profileSrvs)+1)
 	seen := map[string]bool{}
+	if !t.isProfile() {
+		// A single server still runs under the profile's routing, which may name
+		// any of its sibling outbounds — those must stay outside the tunnel too.
+		hosts = append(hosts, t.entry.Address)
+		seen[t.entry.Address] = true
+	}
 	for _, e := range t.profileSrvs {
 		if e.Address != "" && !seen[e.Address] {
 			seen[e.Address] = true
@@ -274,11 +291,13 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 	selected.AllowInsecure = a.cfg.AllowInsecure
 	a.rememberSelection(subURL, selected)
 
-	return &target{
+	t := &target{
 		subURL:      subURL,
 		profileName: a.nav.profileTitle(),
 		entry:       selected,
-	}, nil
+	}
+	t.attachProfile(a.nav.profiles)
+	return t, nil
 }
 
 // loadProfiles fetches between two full-screen menus, so it prints nothing: the

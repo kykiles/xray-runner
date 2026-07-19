@@ -45,10 +45,14 @@ func (a *App) resolveScriptedTarget() (*target, error) {
 	}
 
 	hwid := config.GetOrCreateHWID(a.cfg.HWID)
-	entries, err := subscription.FetchWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
+	// Fetched profile-aware so the chosen server can run under its profile's
+	// routing, exactly like the menu does. FlattenUnique reproduces the flat list
+	// the scripted path has always indexed, so --server N keeps its meaning.
+	profiles, err := subscription.FetchProfilesWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
 	if err != nil {
 		return nil, fmt.Errorf("загрузка подписки: %w", err)
 	}
+	entries := subscription.FlattenUnique(profiles)
 	slog.Info("subscription loaded", "servers", len(entries))
 
 	selected, err := pickEntry(entries, a.opts.Server, state, a.opts.UseLast)
@@ -62,7 +66,10 @@ func (a *App) resolveScriptedTarget() (*target, error) {
 	selected.AllowInsecure = a.cfg.AllowInsecure
 	a.printSubEntryDetails(selected)
 	a.rememberSelection(subURL, selected)
-	return &target{subURL: subURL, entry: selected}, nil
+
+	t := &target{subURL: subURL, entry: selected}
+	t.attachProfile(profiles)
+	return t, nil
 }
 
 // migrateLegacyURL seeds an empty list from .env: SUBSCRIPTION_URL as a

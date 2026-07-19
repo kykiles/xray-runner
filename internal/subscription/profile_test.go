@@ -1,6 +1,9 @@
 package subscription
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 // A balancer profile groups several proxy outbounds under one balancerTag; a
 // plain profile carries a single proxy outbound and no balancers.
@@ -173,6 +176,74 @@ func TestAllSingle(t *testing.T) {
 	}
 	if AllSingle(mixed) {
 		t.Error("a balancer profile must keep the subscription out of the flat path")
+	}
+}
+
+// The scripted path indexes servers with --server N, so switching it to the
+// profile-aware fetch must produce byte-for-byte the list it produced before.
+func TestFlattenUnique_MatchesTheFlatParser(t *testing.T) {
+	for name, fixture := range map[string]string{"profiles": profileFixture, "singles": singlesFixture} {
+		var arr []json.RawMessage
+		if err := json.Unmarshal([]byte(fixture), &arr); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		want, err := parseXrayConfigArray(arr)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		profiles, err := parseXrayConfigProfiles(arr)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		got := FlattenUnique(profiles)
+		if len(got) != len(want) {
+			t.Fatalf("%s: %d entries, want %d", name, len(got), len(want))
+		}
+		for i := range got {
+			if entryKey(got[i]) != entryKey(want[i]) || got[i].Remarks != want[i].Remarks {
+				t.Errorf("%s: entry %d = %+v, want %+v", name, i, got[i], want[i])
+			}
+		}
+	}
+}
+
+// A URL list has no profile structure, and its duplicates are the user's own.
+// Deduplicating them would shift every --server index below the duplicate.
+func TestFlattenUnique_KeepsURLListAsIs(t *testing.T) {
+	dup := SubEntry{Protocol: "vless", Address: "a.invalid", Port: 443, UUID: "u"}
+	profiles := []Profile{{Entries: []SubEntry{dup, dup}}}
+	if got := FlattenUnique(profiles); len(got) != 2 {
+		t.Errorf("entries = %d, want the URL list untouched (2)", len(got))
+	}
+}
+
+// A server chosen from a flat list must lead back to the profile it came from:
+// that profile carries the routing the session has to run under.
+func TestProfileFor(t *testing.T) {
+	profiles, err := parseProfiles([]byte(singlesFixture))
+	if err != nil {
+		t.Fatalf("parseProfiles: %v", err)
+	}
+	entries := FlattenNamed(profiles)
+
+	owner := ProfileFor(profiles, &entries[1])
+	if owner == nil {
+		t.Fatal("ProfileFor returned nil for a server that came from the list")
+	}
+	if owner.Name != "🇺🇸 США" {
+		t.Errorf("owner = %q, want the second profile", owner.Name)
+	}
+
+	// Flattening renames a lone server, so matching must ignore Remarks.
+	renamed := entries[0]
+	renamed.Remarks = "whatever the UI shows"
+	if got := ProfileFor(profiles, &renamed); got == nil || got.Name != "🇩🇪 Германия 1" {
+		t.Errorf("ProfileFor ignored the renamed entry: %v", got)
+	}
+
+	stranger := SubEntry{Protocol: "vless", Address: "nowhere.invalid", Port: 443}
+	if got := ProfileFor(profiles, &stranger); got != nil {
+		t.Errorf("ProfileFor = %v for an entry from no profile, want nil", got.Name)
 	}
 }
 

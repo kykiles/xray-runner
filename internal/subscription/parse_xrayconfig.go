@@ -107,17 +107,7 @@ func parseXrayConfigArray(arr []json.RawMessage) ([]SubEntry, error) {
 		return nil, err
 	}
 
-	var entries []SubEntry
-	seen := map[string]bool{}
-	for _, p := range Flatten(profiles) {
-		key := entryKey(p)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		entries = append(entries, p)
-	}
-	return entries, nil
+	return FlattenUnique(profiles), nil
 }
 
 // parseXrayConfigProfiles maps every config in the array to one profile, keeping

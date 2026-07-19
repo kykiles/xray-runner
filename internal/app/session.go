@@ -261,6 +261,14 @@ func (a *App) buildSessionConfig(t *target) (json.RawMessage, sessionPorts, erro
 		return raw, ports, err
 	}
 
+	// A single server picked out of a panel profile still runs under the panel's
+	// routing and dns: those rules (direct .ru, blocked hosts) are the point of
+	// the subscription, and rebuilding from template.json would drop them.
+	if raw, ok := a.singleServerFromProfile(t, inbounds); ok {
+		ports, err := portsFromInbounds(inbounds, a.mode)
+		return raw, ports, err
+	}
+
 	outbound, err := subscription.ProxyOutboundJSON(t.entry)
 	if err != nil {
 		return nil, sessionPorts{}, err
@@ -276,6 +284,31 @@ func (a *App) buildSessionConfig(t *target) (json.RawMessage, sessionPorts, erro
 	}
 	ports, err := portsFromInbounds(inbounds, a.mode)
 	return raw, ports, err
+}
+
+// singleServerFromProfile builds the session from the profile the chosen server
+// came from, pinned to that one server. It reports false when there is nothing
+// to preserve — a URL-list subscription or a bare link — leaving the caller on
+// the template.json path.
+func (a *App) singleServerFromProfile(t *target, inbounds []xraycfg.Inbound) (json.RawMessage, bool) {
+	if len(t.profileRaw) == 0 || len(t.entry.RawOutbound) == 0 {
+		return nil, false
+	}
+	tag := xraycfg.OutboundTag(t.entry.RawOutbound)
+	if tag == "" {
+		return nil, false
+	}
+
+	raw, err := xraycfg.MergeProfileSingle(t.profileRaw, tag, inbounds, a.cfg.XrayLogLvl)
+	if err != nil {
+		// Degrade to template.json rather than refuse to connect: the session
+		// still works, just without the panel's rules.
+		if !errors.Is(err, xraycfg.ErrNoPanelRouting) {
+			slog.Warn("panel routing not applied, falling back to template", "error", err)
+		}
+		return nil, false
+	}
+	return raw, true
 }
 
 // portsFromInbounds finds the SOCKS/HTTP ports by protocol/tag rather than by

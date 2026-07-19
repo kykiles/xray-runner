@@ -92,6 +92,51 @@ func AllSingle(profiles []Profile) bool {
 	return true
 }
 
+// FlattenUnique builds the flat server list the scripted path indexes with
+// --server N. Panel configs repeat the same server across profiles on purpose,
+// so those are deduplicated; a URL list is left exactly as written, since its
+// repeats are the user's own and dropping one would shift every index below it.
+func FlattenUnique(profiles []Profile) []SubEntry {
+	fromPanel := false
+	for _, p := range profiles {
+		if len(p.Raw) > 0 {
+			fromPanel = true
+			break
+		}
+	}
+	if !fromPanel {
+		return Flatten(profiles)
+	}
+
+	var entries []SubEntry
+	seen := map[string]bool{}
+	for _, e := range Flatten(profiles) {
+		key := entryKey(e)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		entries = append(entries, e)
+	}
+	return entries
+}
+
+// ProfileFor finds the profile a server came from. The flat server screen mixes
+// servers from every profile, and the session needs the owner to run under its
+// routing. Matching is by endpoint and credentials: flattening rewrites Remarks.
+// nil when the entry belongs to no profile.
+func ProfileFor(profiles []Profile, e *SubEntry) *Profile {
+	key := entryKey(*e)
+	for i := range profiles {
+		for _, p := range profiles[i].Entries {
+			if entryKey(p) == key {
+				return &profiles[i]
+			}
+		}
+	}
+	return nil
+}
+
 // FlattenNamed merges profiles into a server list, naming a lone server after
 // its profile. The Xray-config parser seeds Remarks with the address, so the
 // location name the panel put in "remarks" would otherwise be lost — unlike
