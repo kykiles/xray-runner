@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,5 +86,24 @@ func TestUpdateView_MarksInstalledRelease(t *testing.T) {
 	}
 	if strings.Contains(v30, "(установлено)") {
 		t.Errorf("a non-matching release must not be marked, got: %q", v30)
+	}
+}
+
+// L-3: the release list rendered every entry regardless of terminal height, so
+// on a short terminal the legend was pushed off the bottom. servers.go and
+// profiles.go already window their lists; this screen must too.
+func TestUpdateView_ReleaseListFitsTerminal(t *testing.T) {
+	rels := make([]updater.Release, 20)
+	for i := range rels {
+		rels[i] = updater.Release{Tag: fmt.Sprintf("v26.6.%d", i)}
+	}
+	m := updateModel{stage: updReleases, releases: rels, width: 120, height: 14}
+
+	out := m.View()
+	if n := strings.Count(out, "\n"); n > 14 {
+		t.Errorf("view is %d lines on a 14-line terminal:\n%s", n, out)
+	}
+	if !strings.Contains(out, "enter установить") {
+		t.Errorf("legend pushed off the screen:\n%s", out)
 	}
 }

@@ -254,7 +254,10 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.status = ""
 		return m, m.startBenchmark()
 	case "r", "к":
-		if m.refresh == nil || m.refreshing {
+		// H-1: refreshing mid-benchmark swaps the entry list out from under the
+		// running measurement, and results streaming in with the old indices then
+		// land on whatever server now sits at that position.
+		if m.refresh == nil || m.refreshing || m.benching {
 			return m, nil
 		}
 		m.refreshing = true
@@ -459,13 +462,6 @@ func (m serversModel) View() string {
 
 	b.WriteString(legend(keys))
 	return b.String()
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // orDash keeps empty table cells visible as a placeholder instead of a hole.

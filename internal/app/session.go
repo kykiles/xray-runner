@@ -86,8 +86,14 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 		return a.bringUp(sessCtx, t, ports)
 	}
 
-	if err := a.showConnecting(t, connect); err != nil {
+	if err := a.showConnecting(t, connect, sessCancel); err != nil {
 		teardown()
+		// M-2: an interrupted bring-up is a deliberate exit, not a failure — the
+		// teardown above already undid the half-built session, and Ctrl+C means
+		// "quit the app" on every other screen.
+		if errors.Is(err, tui.ErrConnectCanceled) {
+			return tui.StatusQuit, ErrUserQuit
+		}
 		return tui.StatusQuit, err
 	}
 
@@ -214,11 +220,13 @@ func (a *App) clearStatusCh(ch chan tui.StatusUpdate) {
 
 // showConnecting runs the bring-up behind the alt-screen "Connecting…" spinner,
 // or straight through with no screen on a headless run (U-2/U-3).
-func (a *App) showConnecting(t *target, connect func() error) error {
+// cancel aborts the bring-up when the user interrupts it; a headless run has no
+// screen to interrupt from, so it just runs connect through.
+func (a *App) showConnecting(t *target, connect func() error, cancel func()) error {
 	if a.headless() {
 		return connect()
 	}
-	return tui.ShowConnecting(t.title(), connect)
+	return a.connectScreen(t.title(), connect, cancel)
 }
 
 // headless reports whether the session runs without an interactive screen:

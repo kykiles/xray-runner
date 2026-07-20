@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 
 	"xray-runner/internal/subscription"
 )
@@ -163,5 +164,31 @@ func TestSelectServer_CursorOnLastConnected(t *testing.T) {
 				t.Errorf("indexOfServer(%q, %d) = %d, want %d", tt.address, tt.port, got, tt.want)
 			}
 		})
+	}
+}
+
+// H-1: refreshing mid-benchmark used to swap the entry list out from under the
+// running measurement, so results streaming in with the old indices landed on
+// whatever server now sat at that position.
+func TestServers_RefreshBlockedWhileBenching(t *testing.T) {
+	m := serversModel{
+		entries:  filterFixture,
+		order:    identityOrder(len(filterFixture)),
+		results:  map[int]subscription.BenchmarkResult{},
+		filter:   textinput.New(),
+		benching: true,
+		refresh: func() ([]subscription.SubEntry, error) {
+			t.Fatal("refresh must not start while a benchmark is running")
+			return nil, nil
+		},
+	}
+
+	got, cmd := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd != nil {
+		// Run it so a wrongly-issued refresh trips the t.Fatal above.
+		cmd()
+	}
+	if got.(serversModel).refreshing {
+		t.Error("refresh started while benching")
 	}
 }

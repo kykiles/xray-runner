@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -61,4 +63,44 @@ func typeURL(s string) []tea.Msg {
 		msgs = append(msgs, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 	return msgs
+}
+
+// M-1: a failed Reload used to be swallowed, leaving the list stale — a deleted
+// subscription stayed on screen and could still be opened, while the status
+// line cheerfully reported success.
+func TestSubs_ReloadFailureIsReported(t *testing.T) {
+	stored := []subscription.NamedSubscription{
+		{Name: "one", URL: "https://one.example/sub"},
+		{Name: "two", URL: "https://two.example/sub"},
+	}
+	cb := SubsCallbacks{
+		Add:    func(string) error { return nil },
+		Delete: func(int) error { return nil },
+		Reload: func() ([]subscription.NamedSubscription, error) {
+			return nil, errors.New("подписки не читаются")
+		},
+		Mask: func(s string) string { return s },
+	}
+
+	t.Run("after_delete", func(t *testing.T) {
+		m := subsModel{subs: stored, cb: cb, choice: -1, input: textinput.New()}
+		got, _ := m.updateConfirmDelete(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+		final := got.(subsModel)
+		if !strings.Contains(final.status, "подписки не читаются") {
+			t.Errorf("status = %q, want the reload error", final.status)
+		}
+		if strings.Contains(final.status, "удалена") {
+			t.Errorf("status claims success despite a stale list: %q", final.status)
+		}
+	})
+
+	t.Run("after_add", func(t *testing.T) {
+		m := subsModel{subs: stored, cb: cb, choice: -1, mode: subsAdding, input: textinput.New()}
+		m.input.SetValue("https://three.example/sub")
+		got, _ := m.updateAdding(tea.KeyMsg{Type: tea.KeyEnter})
+		final := got.(subsModel)
+		if !strings.Contains(final.status, "подписки не читаются") {
+			t.Errorf("status = %q, want the reload error", final.status)
+		}
+	})
 }

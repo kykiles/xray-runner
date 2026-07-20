@@ -107,17 +107,18 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.action = StatusQuit
 			return m, tea.Quit
 		}
+		// Cyrillic twins mirror the Russian layout (task #7): q→й, m→ь, r→к.
 		switch msg.String() {
-		case "q":
+		case "q", "й":
 			m.action = StatusQuit
 			return m, tea.Quit
 		case "esc", "left":
 			m.action = StatusBack
 			return m, tea.Quit
-		case "m":
+		case "m", "ь":
 			m.action = StatusSwitchMode
 			return m, tea.Quit
-		case "r":
+		case "r", "к":
 			m.action = StatusRestart
 			return m, tea.Quit
 		}

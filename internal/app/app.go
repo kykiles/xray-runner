@@ -83,6 +83,9 @@ type App struct {
 	// showStatus draws the status screen; a field so tests can drive the session
 	// loop without a terminal.
 	showStatus func(tui.StatusInfo, <-chan tui.StatusUpdate) (tui.StatusAction, error)
+	// connectScreen draws the bring-up screen; a field so tests can drive the
+	// cancellation path without a terminal.
+	connectScreen func(title string, connect func() error, cancel func()) error
 
 	// U-5: status data, written by health loops, read by the status screen.
 	statusMu    sync.Mutex
@@ -107,6 +110,7 @@ func New(cfg *config.Config, opts Options) *App {
 		disableKillSwitch: system.DisableKillSwitch,
 		restoreProxy:      proxy.Restore,
 		showStatus:        tui.ShowStatus,
+		connectScreen:     tui.ShowConnecting,
 	}
 }
 

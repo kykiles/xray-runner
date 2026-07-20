@@ -58,6 +58,7 @@ type updateModel struct {
 	status     string
 	err        error
 	width      int
+	height     int
 	spinner    spinner.Model
 }
 
@@ -90,7 +91,7 @@ func (m updateModel) Init() tea.Cmd { return m.spinner.Tick }
 func (m updateModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
+		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -340,7 +341,22 @@ func (m updateModel) View() string {
 				break
 			}
 		}
-		for i, r := range m.releases {
+
+		keys := "  ↑/↓ выбор · enter установить · esc назад"
+		// L-3: fit the list into the terminal like the other list screens do,
+		// reserving the fixed chrome: title(1) + header(2) + prompt(2) + legend +
+		// the two scroll indicator lines.
+		budget := len(m.releases)
+		if m.height > 0 {
+			if budget = m.height - (1 + 2 + 2 + legendHeight(keys) + 2); budget < 1 {
+				budget = 1
+			}
+		}
+		start, end, above, below := window(len(m.releases), m.cursor, budget)
+
+		b.WriteString(moreUp(above))
+		for i := start; i < end; i++ {
+			r := m.releases[i]
 			cursor := "  "
 			tag := r.Tag
 			if i == m.cursor {
@@ -353,7 +369,8 @@ func (m updateModel) View() string {
 			}
 			b.WriteString("  " + cursor + clip(tag+note, m.width-4) + "\n")
 		}
-		b.WriteString(legend("  ↑/↓ выбор · enter установить · esc назад"))
+		b.WriteString(moreDown(below))
+		b.WriteString(legend(keys))
 
 	case updWorking:
 		b.WriteString("  " + m.spinner.View() + " " + dimStyle.Render(m.status) + "\n")

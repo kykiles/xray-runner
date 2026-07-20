@@ -195,10 +195,15 @@ func (m subsModel) updateAdding(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = errStyle.Render(err.Error())
 			return m, nil
 		}
-		if subs, err := m.cb.Reload(); err == nil {
-			m.subs = subs
-		}
 		m.mode = subsList
+		// M-1: a stale list is worse than a visible error — the new subscription
+		// would be missing while the status claimed it was added.
+		subs, err := m.cb.Reload()
+		if err != nil {
+			m.status = errStyle.Render(fmt.Sprintf("Список подписок не перечитан: %v", err))
+			return m, nil
+		}
+		m.subs = subs
 		m.cursor = len(m.subs) - 1
 		m.status = okStyle.Render("Подписка добавлена")
 		return m, nil
@@ -212,12 +217,19 @@ func (m subsModel) updateConfirmDelete(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "y", "Y", "н", "Н", "enter":
 		name := m.subs[m.cursor].Name
-		if err := m.cb.Delete(m.cursor); err != nil {
+		switch err := m.cb.Delete(m.cursor); {
+		case err != nil:
 			m.status = errStyle.Render(fmt.Sprintf("Ошибка удаления: %v", err))
-		} else {
-			if subs, err := m.cb.Reload(); err == nil {
-				m.subs = subs
+		default:
+			// M-1: without the reloaded list the deleted subscription stays on
+			// screen and can still be opened, so report the failure instead of
+			// claiming success.
+			subs, rerr := m.cb.Reload()
+			if rerr != nil {
+				m.status = errStyle.Render(fmt.Sprintf("Список подписок не перечитан: %v", rerr))
+				break
 			}
+			m.subs = subs
 			if m.cursor >= len(m.subs) && m.cursor > 0 {
 				m.cursor--
 			}
