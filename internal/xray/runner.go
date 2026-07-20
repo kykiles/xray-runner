@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +21,10 @@ type Runner struct {
 	mu      sync.Mutex
 	cmd     *exec.Cmd
 	restart bool // set by RequestRestart, consumed by RunWithRetry
+	// pipes tracks the stdout/stderr drain goroutines of the current process.
+	// os/exec closes the pipes inside Wait, so Wait must not run until the
+	// goroutines have finished reading (M-3).
+	pipes sync.WaitGroup
 }
 
 var osExecutable = os.Executable
@@ -54,9 +57,13 @@ func FindBinary() (string, error) {
 }
 
 // Version returns the first line of `xray version`. Failure is non-fatal; the
-// caller only logs it (X-4).
+// caller only logs it (X-4). The timeout is internal so the signature stays put:
+// this runs on the startup path, and a wedged binary would otherwise hang the
+// app before it ever draws a screen.
 func Version(binary string) (string, error) {
-	out, err := exec.Command(binary, "version").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, binary, "version").Output()
 	if err != nil {
 		return "", fmt.Errorf("xray version: %w", err)
 	}
@@ -85,8 +92,9 @@ func (r *Runner) Start(ctx context.Context) error {
 
 	// xray prints its fatal "Failed to start" on stdout, so DEBUG would hide the
 	// one line that explains why a session never came up.
-	go logPipe(stdout, slog.LevelInfo)
-	go logPipe(stderr, slog.LevelWarn)
+	r.pipes.Add(2)
+	go func() { defer r.pipes.Done(); logPipe(stdout, slog.LevelInfo) }()
+	go func() { defer r.pipes.Done(); logPipe(stderr, slog.LevelWarn) }()
 	return nil
 }
 
@@ -156,6 +164,10 @@ func (r *Runner) Wait() error {
 	if cmd == nil {
 		return fmt.Errorf("Wait called before Start")
 	}
+	// M-3: cmd.Wait closes the pipes, so the drain goroutines have to be done
+	// first — otherwise xray's last output, including the line explaining why it
+	// failed to start, is dropped mid-read.
+	r.pipes.Wait()
 	return cmd.Wait()
 }
 
@@ -210,7 +222,7 @@ func (r *Runner) RunWithRetry(ctx context.Context, maxRetries int) error {
 			attempt = 0
 		}
 
-		delay := time.Duration(math.Pow(2, float64(attempt))) * time.Second
+		delay := time.Duration(1<<attempt) * time.Second
 		attempt++
 		slog.Warn("xray crashed", "attempt", attempt, "max_retries", maxRetries, "error", err, "retry_in", delay)
 

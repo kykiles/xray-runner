@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const hwidFile = "hwid.txt"
@@ -17,13 +18,16 @@ func GetOrCreateHWID(override string) string {
 
 	// Backward compatibility: an existing ./hwid.txt from older versions wins,
 	// so a device keeps its identity and the panel doesn't see it as new.
-	if data, err := os.ReadFile(hwidFile); err == nil && len(data) > 0 {
-		return string(data)
+	// Trimmed because the HWID goes into the x-hwid request header, and a stray
+	// newline makes net/http reject the whole request — every subscription then
+	// fails with an error naming neither this file nor the newline.
+	if hwid := readHWID(hwidFile); hwid != "" {
+		return hwid
 	}
 
 	path := hwidPath()
-	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-		return string(data)
+	if hwid := readHWID(path); hwid != "" {
+		return hwid
 	}
 
 	hwid := generateHWID()
@@ -33,6 +37,15 @@ func GetOrCreateHWID(override string) string {
 		slog.Warn("failed to persist HWID, a new one will be generated next launch", "path", path, "error", err)
 	}
 	return hwid
+}
+
+// readHWID returns the trimmed HWID stored at path, empty when there is none.
+func readHWID(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // hwidPath returns the preferred HWID location under the user config dir,

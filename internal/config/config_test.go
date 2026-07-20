@@ -2,6 +2,9 @@ package config
 
 import (
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -88,21 +91,25 @@ func TestLoadCustomValues(t *testing.T) {
 	}
 }
 
-func TestLoadBadBoolFallback(t *testing.T) {
+// Replaces TestLoadBadBoolFallback, which pinned the opposite contract: an
+// unreadable value used to fall back to the default silently. That is wrong for
+// KILL_SWITCH above all — the user reads "on" and gets "off" — so a bad value is
+// now a startup error, exactly as MODE has always been. Every bad value is
+// reported at once rather than one per run.
+func TestLoadBadBoolIsFatal(t *testing.T) {
 	os.Clearenv()
 	_ = os.Setenv("VLESS_URL", "vless://u@h:1")
 	_ = os.Setenv("LOG_ENABLED", "notabool")
 	_ = os.Setenv("KILL_SWITCH", "notabool")
 
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := Load()
+	if err == nil {
+		t.Fatal("bad bool values accepted silently, want an error")
 	}
-	if !cfg.LogEnabled {
-		t.Errorf("LogEnabled = false, want true (fallback)")
-	}
-	if cfg.KillSwitch {
-		t.Errorf("KillSwitch = true, want false (fallback)")
+	for _, key := range []string{"LOG_ENABLED", "KILL_SWITCH"} {
+		if !strings.Contains(err.Error(), key) {
+			t.Errorf("error does not name %s: %v", key, err)
+		}
 	}
 }
 
@@ -192,5 +199,70 @@ func TestLoadLogLevelToLower(t *testing.T) {
 	}
 	if cfg.LogLevel != "warn" {
 		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "warn")
+	}
+}
+
+// M-1: strconv.ParseBool rejects "yes"/"on", and the silent fallback to the
+// default turned KILL_SWITCH=yes into a disabled kill switch — the user believes
+// it is on and has no way to find out otherwise.
+func TestLoad_RejectsMalformedBool(t *testing.T) {
+	for _, v := range []string{"yes", "on", "да", "1.0"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("KILL_SWITCH", v)
+			if _, err := Load(); err == nil {
+				t.Fatalf("KILL_SWITCH=%q accepted silently, want an error", v)
+			}
+		})
+	}
+}
+
+// The values ParseBool does understand keep working.
+func TestLoad_AcceptsValidBool(t *testing.T) {
+	for v, want := range map[string]bool{"true": true, "1": true, "false": false, "0": false, "TRUE": true} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("KILL_SWITCH", v)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("KILL_SWITCH=%q: %v", v, err)
+			}
+			if cfg.KillSwitch != want {
+				t.Errorf("KILL_SWITCH=%q → %v, want %v", v, cfg.KillSwitch, want)
+			}
+		})
+	}
+}
+
+// M-2: the HWID goes straight into an x-hwid request header, where a stray
+// newline makes net/http reject the whole request ("invalid header field value")
+// — every subscription stops loading with an error that names neither hwid.txt
+// nor the newline. The legacy ./hwid.txt path is where such a newline shows up.
+func TestGetOrCreateHWID_TrimsWhitespace(t *testing.T) {
+	for _, stored := range []string{"abc123def456\n", "  abc123def456  ", "abc123def456\r\n"} {
+		t.Run(strconv.Quote(stored), func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			if err := os.WriteFile("hwid.txt", []byte(stored), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if got := GetOrCreateHWID(""); got != "abc123def456" {
+				t.Errorf("HWID = %q, want %q", got, "abc123def456")
+			}
+		})
+	}
+}
+
+// The same trimming applies to the config-dir copy, not just the legacy file.
+func TestGetOrCreateHWID_TrimsConfigDirCopy(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	path := hwidPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("deadbeef01\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := GetOrCreateHWID(""); got != "deadbeef01" {
+		t.Errorf("HWID = %q, want it trimmed", got)
 	}
 }

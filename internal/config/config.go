@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -29,23 +30,37 @@ func Load(filenames ...string) (*Config, error) {
 		return nil, fmt.Errorf("load .env: %w", err)
 	}
 
+	// Bad values are collected rather than returned one at a time, so a broken
+	// .env reports every mistake in one go instead of one per run.
+	var errs []error
+	boolOr := func(key string, def bool) bool {
+		b, err := parseBool(key, def)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		return b
+	}
+
 	cfg := &Config{
 		VlessURL:        os.Getenv("VLESS_URL"),
 		SubscriptionURL: os.Getenv("SUBSCRIPTION_URL"),
 		Mode:            strings.ToLower(envOr("MODE", "proxy")),
-		LogEnabled:      parseBool("LOG_ENABLED", true),
+		LogEnabled:      boolOr("LOG_ENABLED", true),
 		LogFile:         envOr("LOG_FILE", "xray-runner.log"),
 		LogLevel:        strings.ToLower(envOr("LOG_LEVEL", "info")),
-		MaskCreds:       parseBool("MASK_CREDENTIALS", true),
+		MaskCreds:       boolOr("MASK_CREDENTIALS", true),
 		XrayLogLvl:      envOr("XRAY_LOG_LEVEL", "warning"),
-		KillSwitch:      parseBool("KILL_SWITCH", false),
+		KillSwitch:      boolOr("KILL_SWITCH", false),
 		HWID:            os.Getenv("HWID"),
 		HWIDDeviceModel: envOr("HWID_DEVICE_MODEL", "xray-runner"),
-		AllowInsecure:   parseBool("ALLOW_INSECURE", false),
+		AllowInsecure:   boolOr("ALLOW_INSECURE", false),
 	}
 
 	if cfg.Mode != "proxy" && cfg.Mode != "tun" {
 		return nil, fmt.Errorf("MODE must be 'proxy' or 'tun', got %q", cfg.Mode)
+	}
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
 	}
 
 	return cfg, nil
@@ -58,14 +73,17 @@ func envOr(key, def string) string {
 	return def
 }
 
-func parseBool(key string, def bool) bool {
+// parseBool refuses a value it cannot read instead of quietly falling back to
+// the default: KILL_SWITCH=yes used to leave the kill switch off while the user
+// believed it was on, with nothing anywhere to say otherwise.
+func parseBool(key string, def bool) (bool, error) {
 	v := os.Getenv(key)
 	if v == "" {
-		return def
+		return def, nil
 	}
 	b, err := strconv.ParseBool(v)
 	if err != nil {
-		return def
+		return def, fmt.Errorf("%s: ожидается true или false, получено %q", key, v)
 	}
-	return b
+	return b, nil
 }

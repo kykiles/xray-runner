@@ -3,10 +3,13 @@ package xray
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
@@ -252,5 +255,93 @@ func TestFindBinaryNotFound(t *testing.T) {
 
 	if _, err := FindBinary(); err == nil {
 		t.Fatal("expected error when xray is not found, got nil")
+	}
+}
+
+// buildChattyXray builds a mock that floods stdout and stderr, then exits.
+func buildChattyXray(t *testing.T, lines int) string {
+	t.Helper()
+	dir := t.TempDir()
+
+	src := fmt.Sprintf(`package main
+import (
+	"fmt"
+	"os"
+)
+func main() {
+	for i := 0; i < %d; i++ {
+		fmt.Fprintf(os.Stdout, "stdout line %%d\n", i)
+		fmt.Fprintf(os.Stderr, "stderr line %%d\n", i)
+	}
+}`, lines)
+
+	mainPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(mainPath, []byte(src), 0644); err != nil {
+		t.Fatalf("write mock source: %v", err)
+	}
+	binaryName := "xray"
+	if runtime.GOOS == "windows" {
+		binaryName = "xray.exe"
+	}
+	outPath := filepath.Join(dir, binaryName)
+	if out, err := exec.Command("go", "build", "-o", outPath, mainPath).CombinedOutput(); err != nil {
+		t.Fatalf("build mock xray: %v\n%s", err, out)
+	}
+	return outPath
+}
+
+type countingHandler struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (h *countingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *countingHandler) Handle(_ context.Context, _ slog.Record) error {
+	// Real logging writes to a file through slog's formatter, which is far
+	// slower than draining a pipe. Without that lag the reader always finishes
+	// first and the bug hides.
+	time.Sleep(50 * time.Microsecond)
+	h.mu.Lock()
+	h.n++
+	h.mu.Unlock()
+	return nil
+}
+func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *countingHandler) WithGroup(string) slog.Handler      { return h }
+func (h *countingHandler) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.n
+}
+
+// M-3: os/exec documents that calling Wait before all reads from StdoutPipe have
+// finished is incorrect — Wait closes the pipes underneath the logging
+// goroutines. The lost tail is exactly xray's "Failed to start" output, the one
+// thing that explains a session that never came up.
+func TestRunnerDrainsOutputBeforeWaitReturns(t *testing.T) {
+	const lines = 4000
+	binary := buildChattyXray(t, lines)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := &countingHandler{}
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil))) })
+
+	r := New(binary, configPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := r.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	if got := h.count(); got != lines*2 {
+		t.Errorf("logged %d of %d lines by the time Wait returned; the rest was lost when Wait closed the pipes", got, lines*2)
 	}
 }
