@@ -45,7 +45,10 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	}
 
 	a.setEndpoint(t)
-	slog.Info("starting xray", "binary", a.binary, "mode", a.mode, "target", t.title())
+	// Bracketed so the boundary between two servers is findable by eye: one run
+	// of the tool logs every reconnect into the same file, and xray's own output
+	// in between looks the same for either server.
+	slog.Info("──── connecting: "+t.title()+" ────", "binary", a.binary, "mode", a.mode)
 
 	a.runner = xray.New(a.binary, a.tmpFile)
 

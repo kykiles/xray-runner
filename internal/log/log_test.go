@@ -37,6 +37,47 @@ func TestInit_KeepsOnlyTheCurrentRun(t *testing.T) {
 	}
 }
 
+// A session that hits a routing loop writes megabytes without ever restarting
+// the tool, so the per-run truncation alone cannot bound the file.
+func TestCappedWriter_StaysUnderLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "capped.log")
+	f, err := os.OpenFile(path, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+
+	w := &cappedWriter{f: f, limit: 1024}
+	line := strings.Repeat("x", 100) + "\n"
+	for range 200 { // 20 KB through a 1 KB cap
+		if _, err := w.Write([]byte(line)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	if _, err := w.Write([]byte("last line\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Size() > 1024 {
+		t.Errorf("log grew past the cap: %d bytes", info.Size())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	// Truncation must drop the old bytes, not the ones being written now.
+	if !strings.Contains(string(data), "last line") {
+		t.Errorf("log lost the newest line: %s", data)
+	}
+	if !strings.Contains(string(data), truncationNotice) {
+		t.Errorf("log does not say it was truncated: %s", data)
+	}
+}
+
 func TestParseLogLevel(t *testing.T) {
 	cases := []struct {
 		in   string

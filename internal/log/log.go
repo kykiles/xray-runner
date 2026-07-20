@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 
 	"xray-runner/internal/config"
 	"xray-runner/internal/system"
@@ -41,12 +42,57 @@ func Init(cfg *config.Config) func() {
 	// not cost us the logging itself.
 	_ = system.RestoreSudoOwner(logFile)
 
-	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}))
+	w := &cappedWriter{f: f, limit: maxLogBytes}
+	logger := slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}))
 	slog.SetDefault(logger)
 
 	return func() {
 		_ = f.Close()
 	}
+}
+
+// maxLogBytes bounds a single run. Truncating at startup is not enough on its
+// own: a TUN session left up for days, or one stuck in a routing loop, never
+// restarts the tool and would grow the file without limit.
+const maxLogBytes = 50 << 20 // 50 MiB
+
+const truncationNotice = "log truncated: hit the size cap, older lines dropped"
+
+// cappedWriter writes to the log file and starts over from byte 0 once the cap
+// is reached, so what survives is the most recent output — the part that
+// explains whatever is happening now. xray's stdout and stderr are drained by
+// separate goroutines, hence the mutex.
+type cappedWriter struct {
+	mu    sync.Mutex
+	f     *os.File
+	n     int64
+	limit int64
+}
+
+func (w *cappedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.n+int64(len(p)) > w.limit {
+		if err := w.f.Truncate(0); err != nil {
+			return 0, err
+		}
+		if _, err := w.f.Seek(0, io.SeekStart); err != nil {
+			return 0, err
+		}
+		w.n = 0
+		// Written straight to the file rather than through slog: this call is
+		// already inside a slog handler and holds the lock.
+		notice, err := w.f.Write([]byte(truncationNotice + "\n"))
+		if err != nil {
+			return 0, err
+		}
+		w.n += int64(notice)
+	}
+
+	n, err := w.f.Write(p)
+	w.n += int64(n)
+	return n, err
 }
 
 func parseLogLevel(s string) slog.Level {
