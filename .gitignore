@@ -4,7 +4,9 @@
 
 # Generated runtime files
 xray_config.json
+xray_config.json.lock
 xray-runner.log
+last_server.json
 error.txt
 
 # Build output
@@ -26,6 +28,8 @@ wintun.dll
 # Distribution bundles
 xray_linux/
 xray_windows/
+linux_deploy/
+windows_deploy/
 *.zip
 
 # Go build cache

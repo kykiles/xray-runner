@@ -55,10 +55,10 @@ type updateModel struct {
 	cursor     int
 	pendingTag string            // core release tag being installed, for the header refresh
 	releases   []updater.Release // core releases carrying an asset for this platform
-	status   string
-	err      error
-	width    int
-	spinner  spinner.Model
+	status     string
+	err        error
+	width      int
+	spinner    spinner.Model
 }
 
 var updateMenu = []string{"Обновить ядро xray", "Обновить гео-базы"}
