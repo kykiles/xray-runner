@@ -423,10 +423,8 @@ func (a *App) bringUpTun(ctx context.Context, t *target) error {
 		})
 	} else if a.cfg.KillSwitch {
 		ksCfg := system.KillSwitchConfig{
-			ServerIP:   resolveFirstIP(a.serverHost),
-			ServerPort: a.serverPort,
-			UDP:        a.serverUDP,
-			XrayPath:   a.binary,
+			Endpoints: a.killSwitchEndpoints(t),
+			XrayPath:  a.binary,
 		}
 		if err := system.EnableKillSwitch(ksCfg); err != nil {
 			slog.Warn("kill switch failed", "error", err)
@@ -438,6 +436,31 @@ func (a *App) bringUpTun(ctx context.Context, t *target) error {
 
 	go testConnectivity(ctx)
 	return nil
+}
+
+// killSwitchEndpoints lists every server the session's uplink may dial. The
+// chosen server comes first, then the profile's siblings: a panel rule can send
+// some domains through any outbound of the profile the session runs under, and
+// a sibling missing from the whitelist is dropped with no diagnostic (M-1).
+func (a *App) killSwitchEndpoints(t *target) []system.Endpoint {
+	var out []system.Endpoint
+	seen := map[system.Endpoint]bool{}
+	add := func(host string, port int, udp bool) {
+		for _, ip := range resolveAllIPs([]string{host}) {
+			e := system.Endpoint{IP: ip, Port: port, UDP: udp}
+			if seen[e] {
+				continue
+			}
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+
+	add(a.serverHost, a.serverPort, a.serverUDP)
+	for _, e := range t.profileSrvs {
+		add(e.Address, e.Port, e.Protocol == "hysteria2")
+	}
+	return out
 }
 
 // releaseSession undoes everything bringUp did, leaving the OS clean for the

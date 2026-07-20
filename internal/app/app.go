@@ -324,28 +324,12 @@ func parseCoreVersion(line string) string {
 	return ""
 }
 
-// resolveFirstIP resolves host to a single IP for the kill-switch server rule.
-// It runs before the kill switch is active, so DNS still works.
-func resolveFirstIP(host string) string {
-	if host == "" {
-		return ""
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return host
-	}
-	addrs, err := net.LookupHost(host)
-	if err != nil || len(addrs) == 0 {
-		slog.Warn("kill switch: could not resolve server, no server exception added", "host", host, "error", err)
-		return ""
-	}
-	return addrs[0]
-}
-
 // resolveAllIPs resolves every host to every one of its addresses, for the TUN
-// route exceptions. Unlike the kill switch, one address is not enough: xray may
-// dial any record the name resolves to, and a missed one would route the
-// tunnel's own uplink back into the tunnel. It must run before the routes are
-// installed, while DNS still takes the physical path.
+// route exceptions and the kill-switch server rules. One address per host is
+// not enough: xray may dial any record the name resolves to, and a missed one
+// would route the tunnel's own uplink back into the tunnel — or, for the kill
+// switch, see it dropped. It must run before the routes are installed, while
+// DNS still takes the physical path.
 func resolveAllIPs(hosts []string) []string {
 	var ips []string
 	seen := map[string]bool{}

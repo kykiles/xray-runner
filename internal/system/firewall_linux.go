@@ -22,7 +22,7 @@ var firewallBins = []string{"iptables", "ip6tables"}
 var fwCmd commander = execCommander{}
 
 func EnableKillSwitch(cfg KillSwitchConfig) error {
-	slog.Info("enabling kill switch via iptables/ip6tables", "server_ip", cfg.ServerIP, "server_port", cfg.ServerPort)
+	slog.Info("enabling kill switch via iptables/ip6tables", "endpoints", len(cfg.Endpoints))
 
 	// Start from a clean slate so repeated runs don't accumulate duplicate
 	// rules or OUTPUT jumps.
@@ -60,12 +60,14 @@ func applyKillSwitch(bin string, cfg KillSwitchConfig) error {
 		{"-A", killSwitchChain, "-m", "mark", "--mark", strconv.Itoa(xraycfg.DirectFwMark), "-j", "ACCEPT"},
 	}
 
-	// Allow xray's own NEW connections to the VPN server, otherwise every
+	// Allow xray's own NEW connections to the VPN servers, otherwise every
 	// reconnect (and hysteria2 UDP flows after conntrack timeout) is dropped
 	// and the tunnel can never recover. Only add the rule to the matching IP
 	// stack: an IPv4 -d on ip6tables would fail.
-	if serverRule := serverAcceptRule(bin, cfg); serverRule != nil {
-		rules = append(rules, serverRule)
+	for _, e := range cfg.Endpoints {
+		if rule := serverAcceptRule(bin, e); rule != nil {
+			rules = append(rules, rule)
+		}
 	}
 
 	// Allow DNS so name resolution keeps working while the switch is active
@@ -87,13 +89,13 @@ func applyKillSwitch(bin string, cfg KillSwitchConfig) error {
 	return nil
 }
 
-// serverAcceptRule builds the ACCEPT rule for the VPN server endpoint, or nil
+// serverAcceptRule builds the ACCEPT rule for one VPN server endpoint, or nil
 // if there's no server address or its IP family doesn't match this binary.
-func serverAcceptRule(bin string, cfg KillSwitchConfig) []string {
-	if cfg.ServerIP == "" {
+func serverAcceptRule(bin string, e Endpoint) []string {
+	if e.IP == "" {
 		return nil
 	}
-	ip := net.ParseIP(cfg.ServerIP)
+	ip := net.ParseIP(e.IP)
 	if ip == nil {
 		return nil
 	}
@@ -105,10 +107,10 @@ func serverAcceptRule(bin string, cfg KillSwitchConfig) []string {
 		return nil
 	}
 	proto := "tcp"
-	if cfg.UDP {
+	if e.UDP {
 		proto = "udp"
 	}
-	return []string{"-A", killSwitchChain, "-d", cfg.ServerIP, "-p", proto, "--dport", strconv.Itoa(cfg.ServerPort), "-j", "ACCEPT"}
+	return []string{"-A", killSwitchChain, "-d", e.IP, "-p", proto, "--dport", strconv.Itoa(e.Port), "-j", "ACCEPT"}
 }
 
 func DisableKillSwitch() error {

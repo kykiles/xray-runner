@@ -69,10 +69,10 @@ func TestEnableTunRouting_SendsDefaultTrafficIntoTun(t *testing.T) {
 		t.Fatalf("EnableTunRouting: %v", err)
 	}
 
-	if !f.has("route add 0.0.0.0/1 dev xray-tun") {
+	if !f.has("route replace 0.0.0.0/1 dev xray-tun") {
 		t.Errorf("missing lower split-default route, got: %v", f.cmds)
 	}
-	if !f.has("route add 128.0.0.0/1 dev xray-tun") {
+	if !f.has("route replace 128.0.0.0/1 dev xray-tun") {
 		t.Errorf("missing upper split-default route, got: %v", f.cmds)
 	}
 }
@@ -87,7 +87,7 @@ func TestEnableTunRouting_ExcludesServerViaPhysicalGateway(t *testing.T) {
 		t.Fatalf("EnableTunRouting: %v", err)
 	}
 
-	if !f.has("route add 45.150.32.235/32 via 192.168.31.1 dev wlp3s0") {
+	if !f.has("route replace 45.150.32.235/32 via 192.168.31.1 dev wlp3s0") {
 		t.Errorf("missing server exclusion route, got: %v", f.cmds)
 	}
 }
@@ -103,7 +103,7 @@ func TestEnableTunRouting_LiftsMarkedTrafficOutOfTheTunnel(t *testing.T) {
 		t.Fatalf("EnableTunRouting: %v", err)
 	}
 
-	if !f.has("route add default via 192.168.31.1 dev wlp3s0 table "+directTable) ||
+	if !f.has("route replace default via 192.168.31.1 dev wlp3s0 table "+directTable) ||
 		!f.has("rule add fwmark 255 lookup "+directTable) {
 		t.Errorf("marked traffic has no physical path, got: %v", f.cmds)
 	}
@@ -124,7 +124,7 @@ func TestEnableTunRouting_InstallsMarkRuleBeforeSplitDefault(t *testing.T) {
 		if strings.Contains(c, "rule add fwmark") {
 			rule = i
 		}
-		if strings.Contains(c, "route add 0.0.0.0/1") {
+		if strings.Contains(c, "route replace 0.0.0.0/1") {
 			split = i
 		}
 	}
@@ -172,8 +172,8 @@ func TestEnableTunRouting_ExcludesEveryServerOfBalancerProfile(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"route add 45.150.32.235/32 via 192.168.31.1 dev wlp3s0",
-		"route add 203.0.113.7/32 via 192.168.31.1 dev wlp3s0",
+		"route replace 45.150.32.235/32 via 192.168.31.1 dev wlp3s0",
+		"route replace 203.0.113.7/32 via 192.168.31.1 dev wlp3s0",
 	} {
 		if !f.has(want) {
 			t.Errorf("missing %q, got: %v", want, f.cmds)
@@ -199,7 +199,7 @@ func TestEnableTunRouting_ExcludesServerOnLocalLink(t *testing.T) {
 		t.Fatalf("EnableTunRouting: %v", err)
 	}
 
-	if !f.has("route add 192.168.31.5/32 dev wlp3s0") {
+	if !f.has("route replace 192.168.31.5/32 dev wlp3s0") {
 		t.Errorf("missing on-link server exclusion, got: %v", f.cmds)
 	}
 	if f.has("via") {
@@ -285,5 +285,48 @@ func TestParseRouteGet(t *testing.T) {
 				t.Errorf("got via=%q dev=%q, want via=%q dev=%q", via, dev, tt.via, tt.dev)
 			}
 		})
+	}
+}
+
+// A crash leaves the routes behind: nothing runs the teardown. The next start
+// must be able to take them over, so every install is idempotent — `route add`
+// would fail with "File exists" and strand the user until they flush the table
+// by hand, and `rule add` would silently stack a second identical rule that the
+// teardown then leaves behind.
+func TestEnableTunRouting_SurvivesLeftoversFromACrashedRun(t *testing.T) {
+	f := &fakeIP{routeGetOut: wanRouteGet}
+	withFakeIP(t, f)
+
+	if err := EnableTunRouting(tunCfg); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+
+	for _, add := range []string{"route add default", "route add 45.150.32.235/32"} {
+		if f.has("ip " + add) {
+			t.Errorf("non-idempotent %q: leftovers from a crash make it fail", add)
+		}
+	}
+	if !f.has("ip route replace default") {
+		t.Errorf("direct default route is not installed idempotently: %v", f.cmds)
+	}
+
+	ruleDel := -1
+	ruleAdd := -1
+	for i, c := range f.cmds {
+		if strings.Contains(c, "rule del fwmark") {
+			ruleDel = i
+		}
+		if strings.Contains(c, "rule add fwmark") {
+			ruleAdd = i
+		}
+	}
+	if ruleDel < 0 {
+		t.Errorf("mark rule is added without clearing a stale copy first: %v", f.cmds)
+	}
+	if ruleAdd < 0 {
+		t.Fatalf("mark rule is never added: %v", f.cmds)
+	}
+	if ruleDel > ruleAdd {
+		t.Errorf("stale mark rule is cleared after the new one is added (%d > %d)", ruleDel, ruleAdd)
 	}
 }

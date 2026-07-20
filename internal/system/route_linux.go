@@ -106,8 +106,12 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 	saved := cfg
 	installed = &saved
 
+	// Every install below is idempotent: a crash never runs the teardown, so the
+	// next start finds its own routes still in place. `route add` would fail
+	// there with "File exists" and leave the user stranded until they flush the
+	// table by hand (L-1).
 	for _, e := range exceptions {
-		args := []string{"route", "add", e.ip + "/32"}
+		args := []string{"route", "replace", e.ip + "/32"}
 		if e.via != "" {
 			args = append(args, "via", e.via)
 		}
@@ -121,7 +125,7 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 
 	// Marked traffic gets its escape hatch before the split default exists,
 	// otherwise direct connections loop during the gap between the two.
-	directRoute := []string{"route", "add", "default"}
+	directRoute := []string{"route", "replace", "default"}
 	if directVia != "" {
 		directRoute = append(directRoute, "via", directVia)
 	}
@@ -130,13 +134,18 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 		_ = DisableTunRouting()
 		return fmt.Errorf("проложить прямой маршрут мимо туннеля: %w\n%s", err, out)
 	}
-	if out, err := ipCmd.run("ip", "rule", "add", "fwmark", strconv.Itoa(xraycfg.DirectFwMark), "lookup", directTable); err != nil {
+	// ip rule has no `replace`, and `add` stacks duplicates the teardown only
+	// removes one of — so clear a stale copy first. The del is best-effort:
+	// on a clean start there is nothing to remove.
+	markRule := []string{"rule", "fwmark", strconv.Itoa(xraycfg.DirectFwMark), "lookup", directTable}
+	_, _ = ipCmd.run("ip", append([]string{"rule", "del"}, markRule[1:]...)...)
+	if out, err := ipCmd.run("ip", append([]string{"rule", "add"}, markRule[1:]...)...); err != nil {
 		_ = DisableTunRouting()
 		return fmt.Errorf("вывести прямой трафик из туннеля: %w\n%s", err, out)
 	}
 
 	for _, half := range splitDefault {
-		if out, err := ipCmd.run("ip", "route", "add", half, "dev", cfg.Iface); err != nil {
+		if out, err := ipCmd.run("ip", "route", "replace", half, "dev", cfg.Iface); err != nil {
 			_ = DisableTunRouting()
 			return fmt.Errorf("направить трафик в %s: %w\n%s", cfg.Iface, err, out)
 		}

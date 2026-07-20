@@ -82,7 +82,7 @@ func withFakeFirewall(t *testing.T, f *fakeIPTables) {
 }
 
 // ipv4Cfg is a representative kill-switch config with an IPv4 server endpoint.
-var ipv4Cfg = KillSwitchConfig{ServerIP: "203.0.113.5", ServerPort: 443}
+var ipv4Cfg = KillSwitchConfig{Endpoints: []Endpoint{{IP: "203.0.113.5", Port: 443}}}
 
 // chainHasServerAccept reports whether the chain contains an ACCEPT rule for
 // the given server IP.
@@ -116,10 +116,10 @@ func TestEnableKillSwitchAppliesBothStacks(t *testing.T) {
 	if got := len(f.chains["ip6tables"].rules); got != 7 {
 		t.Errorf("ip6tables: chain rules = %d, want 7", got)
 	}
-	if !chainHasServerAccept(f.chains["iptables"].rules, ipv4Cfg.ServerIP) {
-		t.Errorf("iptables: missing ACCEPT rule for server %s", ipv4Cfg.ServerIP)
+	if !chainHasServerAccept(f.chains["iptables"].rules, ipv4Cfg.Endpoints[0].IP) {
+		t.Errorf("iptables: missing ACCEPT rule for server %s", ipv4Cfg.Endpoints[0].IP)
 	}
-	if chainHasServerAccept(f.chains["ip6tables"].rules, ipv4Cfg.ServerIP) {
+	if chainHasServerAccept(f.chains["ip6tables"].rules, ipv4Cfg.Endpoints[0].IP) {
 		t.Errorf("ip6tables: unexpected IPv4 server ACCEPT rule")
 	}
 }
@@ -231,5 +231,41 @@ func TestDisableKillSwitchRemovesAllJumps(t *testing.T) {
 		if f.chains[bin].exists {
 			t.Errorf("%s: chain should be removed", bin)
 		}
+	}
+}
+
+// A server picked out of a multi-server profile still runs under that profile's
+// routing, and a panel rule may send some domains through a sibling outbound.
+// Whitelisting only the chosen endpoint sends xray's uplink to the siblings
+// straight into the DROP — a partial blackhole with no diagnostic.
+func TestEnableKillSwitchAcceptsEveryEndpointBeforeDropping(t *testing.T) {
+	f := newFakeIPTables("iptables", "ip6tables")
+	withFakeFirewall(t, f)
+
+	cfg := KillSwitchConfig{Endpoints: []Endpoint{
+		{IP: "203.0.113.5", Port: 443},
+		{IP: "203.0.113.6", Port: 8443, UDP: true},
+	}}
+	if err := EnableKillSwitch(cfg); err != nil {
+		t.Fatalf("EnableKillSwitch: %v", err)
+	}
+
+	rules := f.chains["iptables"].rules
+	drop := ruleIndex(rules, "-j DROP")
+	if drop < 0 {
+		t.Fatalf("no DROP rule: %v", rules)
+	}
+	for _, e := range cfg.Endpoints {
+		idx := ruleIndex(rules, "-d "+e.IP, "ACCEPT")
+		if idx < 0 {
+			t.Errorf("missing ACCEPT for endpoint %s: %v", e.IP, rules)
+			continue
+		}
+		if idx > drop {
+			t.Errorf("ACCEPT for %s comes after DROP (%d > %d)", e.IP, idx, drop)
+		}
+	}
+	if idx := ruleIndex(rules, "-d 203.0.113.6", "-p udp", "--dport 8443"); idx < 0 {
+		t.Errorf("hysteria2 sibling did not get a udp rule: %v", rules)
 	}
 }
