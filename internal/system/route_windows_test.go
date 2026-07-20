@@ -17,6 +17,7 @@ type fakeIP struct {
 	tunIndexErr error
 	bindAlias   string
 	bindErr     error
+	findScript  string
 	cmds        []string
 }
 
@@ -29,6 +30,7 @@ func (f *fakeIP) run(bin string, args ...string) ([]byte, error) {
 		return []byte(f.bindAlias), f.bindErr
 	}
 	if strings.Contains(joined, "Find-NetRoute") {
+		f.findScript = joined
 		return []byte(f.findRoute), f.findErr
 	}
 	if strings.Contains(joined, "Get-NetAdapter") {
@@ -105,6 +107,21 @@ func TestEnableTunRouting_FailsWithoutTouchingRoutesWhenServerPathUnknown(t *tes
 	}
 	if len(f.cmds) != 0 {
 		t.Errorf("no routes may be installed on failure, got: %v", f.cmds)
+	}
+}
+
+// Find-NetRoute also returns the source MSFT_NetIPAddress, which has an
+// InterfaceIndex but no NextHop. Picking it yields a route command with an
+// empty gateway, so the pipeline must keep only the route object.
+func TestEnableTunRouting_IgnoresAddressObjectFromFindNetRoute(t *testing.T) {
+	f := newFakeIP()
+	withFakeIP(t, f)
+
+	if err := EnableTunRouting(tunCfg); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	if !strings.Contains(f.findScript, "Where-Object NextHop") {
+		t.Errorf("Find-NetRoute output must be filtered to route objects, got: %q", f.findScript)
 	}
 }
 

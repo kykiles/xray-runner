@@ -80,8 +80,10 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 	type exception struct{ ip, nextHop, ifIndex string }
 	exceptions := make([]exception, 0, len(cfg.ServerIPs))
 	for _, ip := range cfg.ServerIPs {
+		// Find-NetRoute emits both the route and the source IP address object,
+		// in no guaranteed order; only the former carries NextHop.
 		out, err := powershell(fmt.Sprintf(
-			`$r = Find-NetRoute -RemoteIPAddress '%s' -ErrorAction Stop | Select-Object -First 1; "$($r.NextHop) $($r.InterfaceIndex)"`,
+			`$r = Find-NetRoute -RemoteIPAddress '%s' -ErrorAction Stop | Where-Object NextHop | Select-Object -First 1; "$($r.NextHop) $($r.InterfaceIndex)"`,
 			ip))
 		if err != nil {
 			return fmt.Errorf("определить маршрут до сервера %s: %w\n%s", ip, err, out)
