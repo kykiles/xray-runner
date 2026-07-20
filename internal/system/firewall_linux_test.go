@@ -4,8 +4,11 @@ package system
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
+
+	"xray-runner/internal/xraycfg"
 )
 
 // fakeIPTables is a minimal stateful model of iptables/ip6tables, enough to
@@ -107,17 +110,64 @@ func TestEnableKillSwitchAppliesBothStacks(t *testing.T) {
 	}
 	// iptables (IPv4 stack) gets the server ACCEPT rule; ip6tables doesn't
 	// (IPv4 -d would be invalid there), so it has one rule fewer.
-	if got := len(f.chains["iptables"].rules); got != 7 {
-		t.Errorf("iptables: chain rules = %d, want 7", got)
+	if got := len(f.chains["iptables"].rules); got != 8 {
+		t.Errorf("iptables: chain rules = %d, want 8", got)
 	}
-	if got := len(f.chains["ip6tables"].rules); got != 6 {
-		t.Errorf("ip6tables: chain rules = %d, want 6", got)
+	if got := len(f.chains["ip6tables"].rules); got != 7 {
+		t.Errorf("ip6tables: chain rules = %d, want 7", got)
 	}
 	if !chainHasServerAccept(f.chains["iptables"].rules, ipv4Cfg.ServerIP) {
 		t.Errorf("iptables: missing ACCEPT rule for server %s", ipv4Cfg.ServerIP)
 	}
 	if chainHasServerAccept(f.chains["ip6tables"].rules, ipv4Cfg.ServerIP) {
 		t.Errorf("ip6tables: unexpected IPv4 server ACCEPT rule")
+	}
+}
+
+// ruleIndex finds the position of the first rule containing every fragment,
+// or -1. Order matters in iptables, so the tests below assert on indices.
+func ruleIndex(rules []string, fragments ...string) int {
+	for i, r := range rules {
+		found := true
+		for _, f := range fragments {
+			if !strings.Contains(r, f) {
+				found = false
+				break
+			}
+		}
+		if found {
+			return i
+		}
+	}
+	return -1
+}
+
+// Traffic the panel routes `direct` leaves through the physical interface
+// carrying xraycfg.DirectFwMark, so without an explicit ACCEPT it reaches the
+// chain's final DROP: not a leak, but every direct destination goes dark while
+// the kill switch is on.
+func TestEnableKillSwitchAcceptsMarkedDirectTraffic(t *testing.T) {
+	f := newFakeIPTables("iptables", "ip6tables")
+	withFakeFirewall(t, f)
+
+	if err := EnableKillSwitch(ipv4Cfg); err != nil {
+		t.Fatalf("EnableKillSwitch: %v", err)
+	}
+
+	mark := strconv.Itoa(xraycfg.DirectFwMark)
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		rules := f.chains[bin].rules
+		accept := ruleIndex(rules, "--mark "+mark, "ACCEPT")
+		if accept < 0 {
+			t.Fatalf("%s: no ACCEPT rule for fwmark %s in %v", bin, mark, rules)
+		}
+		drop := ruleIndex(rules, "-j DROP")
+		if drop < 0 {
+			t.Fatalf("%s: no DROP rule in %v", bin, rules)
+		}
+		if accept > drop {
+			t.Errorf("%s: fwmark ACCEPT at %d comes after DROP at %d", bin, accept, drop)
+		}
 	}
 }
 
@@ -138,11 +188,11 @@ func TestEnableKillSwitchIsIdempotent(t *testing.T) {
 			t.Errorf("%s: OUTPUT jumps after 3 enables = %d, want 1", bin, got)
 		}
 	}
-	if got := len(f.chains["iptables"].rules); got != 7 {
-		t.Errorf("iptables: chain rules after 3 enables = %d, want 7", got)
+	if got := len(f.chains["iptables"].rules); got != 8 {
+		t.Errorf("iptables: chain rules after 3 enables = %d, want 8", got)
 	}
-	if got := len(f.chains["ip6tables"].rules); got != 6 {
-		t.Errorf("ip6tables: chain rules after 3 enables = %d, want 6", got)
+	if got := len(f.chains["ip6tables"].rules); got != 7 {
+		t.Errorf("ip6tables: chain rules after 3 enables = %d, want 7", got)
 	}
 }
 

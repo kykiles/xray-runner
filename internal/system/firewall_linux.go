@@ -8,6 +8,8 @@ import (
 	"net"
 	"strconv"
 	"strings"
+
+	"xray-runner/internal/xraycfg"
 )
 
 const killSwitchChain = "XRAY_KILL"
@@ -50,6 +52,12 @@ func applyKillSwitch(bin string, cfg KillSwitchConfig) error {
 		{"-A", killSwitchChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
 		{"-A", killSwitchChain, "-o", "lo", "-j", "ACCEPT"},
 		{"-A", killSwitchChain, "-o", "xray-tun", "-j", "ACCEPT"},
+		// Traffic the panel routes `direct` carries this mark and leaves through
+		// the physical interface, so the -o xray-tun rule above never covers it.
+		// Without an explicit ACCEPT every direct destination hits the final DROP
+		// and goes dark. This opens nothing when xray is down: the mark exists
+		// only on sockets xray's freedom outbounds create.
+		{"-A", killSwitchChain, "-m", "mark", "--mark", strconv.Itoa(xraycfg.DirectFwMark), "-j", "ACCEPT"},
 	}
 
 	// Allow xray's own NEW connections to the VPN server, otherwise every
