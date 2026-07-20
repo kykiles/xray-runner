@@ -75,10 +75,12 @@ func testConnectivity(ctx context.Context) {
 	slog.Error("connectivity check failed after 3 attempts")
 }
 
-// portInUse reports whether something is already listening on the local port,
-// which before xray starts means another process (likely a second instance).
-func portInUse(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 300*time.Millisecond)
+// dialPort reports whether something is listening on the local port right now.
+// Every port probe in the package — "is it taken", "is it up yet", "is it still
+// alive" — is this one dial with a different timeout.
+func dialPort(ctx context.Context, port int, timeout time.Duration) bool {
+	dialer := net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return false
 	}
@@ -86,24 +88,37 @@ func portInUse(port int) bool {
 	return true
 }
 
+// portInUse reports whether something is already listening on the local port,
+// which before xray starts means another process (likely a second instance).
+func portInUse(port int) bool {
+	return dialPort(context.Background(), port, 300*time.Millisecond)
+}
+
+// awaitPort polls until the port accepts connections or the timeout runs out.
+// An empty label keeps the wait silent (the benchmark measures dozens of ports
+// and has its own reporting).
 func awaitPort(ctx context.Context, port int, label string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			slog.Info("port available", "label", label, "port", port)
+		if dialPort(ctx, port, 500*time.Millisecond) {
+			if label != "" {
+				slog.Info("port available", "label", label, "port", port)
+			}
 			return true
 		}
 		// P-1: abort promptly on Ctrl+C instead of sleeping out the poll interval.
 		select {
 		case <-ctx.Done():
-			slog.Warn("port wait cancelled", "label", label, "port", port)
+			if label != "" {
+				slog.Warn("port wait cancelled", "label", label, "port", port)
+			}
 			return false
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	slog.Error("port timeout", "label", label, "port", port, "timeout", timeout)
+	if label != "" {
+		slog.Error("port timeout", "label", label, "port", port, "timeout", timeout)
+	}
 	return false
 }
 
@@ -173,8 +188,8 @@ func (a *App) healthCheckLoopPorts(ctx context.Context, socksPort, httpPort int)
 		}
 		first = false
 
-		socksOK := checkPort(ctx, socksPort)
-		httpOK := checkPort(ctx, httpPort)
+		socksOK := dialPort(ctx, socksPort, 2*time.Second)
+		httpOK := dialPort(ctx, httpPort, 2*time.Second)
 		// No latency: this probe dials our own local ports, so its timing says
 		// nothing about the VPN and would read as a fake "0 ms" to the server.
 		a.recordHealth(socksOK && httpOK, 0)
@@ -320,16 +335,6 @@ func (a *App) publishStatus(u tui.StatusUpdate) {
 func (a *App) announceRestart() {
 	slog.Warn("3 consecutive health check failures, requesting xray restart")
 	a.publishStatus(tui.StatusUpdate{Note: "🔁 Health-check не прошёл 3 раза подряд — перезапускаю xray…"})
-}
-
-func checkPort(ctx context.Context, port int) bool {
-	dialer := net.Dialer{Timeout: 2 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }
 
 // verifySystemProxy reports whether the OS actually took the proxy setting; a

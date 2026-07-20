@@ -9,13 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/term"
 
 	"xray-runner/internal/subscription"
 	"xray-runner/internal/system"
@@ -57,10 +54,15 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 
 	var xrayDone sync.WaitGroup
 
+	// Set once the health loops are up; teardown must wait for them before
+	// releaseSession touches a.runner underneath them.
+	stopHealth := func() {}
+
 	// teardown runs on every exit path, including a failed bring-up.
 	teardown := func() {
 		sessCancel()
 		xrayDone.Wait()
+		stopHealth()
 		a.releaseSession()
 	}
 
@@ -89,7 +91,8 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 		return tui.StatusQuit, err
 	}
 
-	action, err := a.watchSession(sessCtx, t, ports)
+	stopHealth = a.startHealth(sessCtx, ports)
+	action, err := a.watchSession(sessCtx, t, ports, stopHealth)
 	teardown()
 	if ctx.Err() != nil {
 		return tui.StatusQuit, ctx.Err()
@@ -97,106 +100,116 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	return action, err
 }
 
-// watchSession starts the health loops and shows the status screen. The update
-// channel is closed only after every publisher has stopped, so no health loop
-// can send on a closed channel.
-func (a *App) watchSession(ctx context.Context, t *target, ports sessionPorts) (tui.StatusAction, error) {
-	ch := make(chan tui.StatusUpdate, 8)
-	a.statusMu.Lock()
-	a.statusCh = ch
-	a.statusMu.Unlock()
-
-	var health sync.WaitGroup
-	health.Add(1)
+// startHealth runs the mode's health loop and returns a function that stops it
+// and waits for it to finish. The waiting is the point: the loop reads a.runner
+// while teardown nils it, and a loop outliving its session can ask the *next*
+// session's core to restart. Calling the returned function more than once is
+// safe — both the teardown and the screen-closer do.
+func (a *App) startHealth(ctx context.Context, ports sessionPorts) func() {
+	hctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
-		defer health.Done()
-		if a.mode == "tun" {
-			a.healthCheckLoopConnectivity(ctx)
-		} else {
-			a.healthCheckLoopPorts(ctx, ports.socks, ports.http)
+		defer wg.Done()
+		switch {
+		case a.healthLoop != nil:
+			a.healthLoop(hctx, ports)
+		case a.mode == "tun":
+			a.healthCheckLoopConnectivity(hctx)
+		default:
+			a.healthCheckLoopPorts(hctx, ports.socks, ports.http)
 		}
 	}()
+	return func() {
+		cancel()
+		wg.Wait()
+	}
+}
 
+// watchSession shows the status screen. The update channel is closed only after
+// every publisher has stopped, so no health loop can send on a closed channel.
+func (a *App) watchSession(ctx context.Context, t *target, ports sessionPorts, stopHealth func()) (tui.StatusAction, error) {
 	// U-2/U-3: a scripted or systemd run has no screen to draw on — keep the
 	// session up until the context ends, with progress going to the log.
 	if a.headless() {
 		slog.Info("connected", "target", t.title(), "mode", a.mode)
 		<-ctx.Done()
-		health.Wait()
+		stopHealth()
 		return tui.StatusQuit, nil
 	}
 
 	// A note left by bring-up (e.g. the tun→proxy fallback) has had no screen to
-	// appear on until now. The channel is buffered, so this cannot block.
-	if a.pendingNote != "" {
-		ch <- tui.StatusUpdate{Note: a.pendingNote, Err: true}
-		a.pendingNote = ""
+	// appear on until now.
+	note := tui.StatusUpdate{Note: a.pendingNote, Err: true}
+	a.pendingNote = ""
+
+	// A refused mode switch (TUN without root) must not end the session: the
+	// screen comes back with the refusal on it, which is why this is a loop.
+	for {
+		action, err := a.showStatusScreen(ctx, t, ports, stopHealth, note)
+		if err != nil {
+			return tui.StatusQuit, err
+		}
+		if ctx.Err() != nil {
+			return tui.StatusQuit, nil
+		}
+		if action != tui.StatusSwitchMode {
+			return action, nil
+		}
+		switchErr := a.switchMode()
+		if switchErr == nil {
+			return action, nil
+		}
+		slog.Warn("mode switch refused", "error", switchErr)
+		note = tui.StatusUpdate{Note: "⚠ " + switchErr.Error(), Err: true}
+	}
+}
+
+// showStatusScreen draws one status screen with its own update channel. The
+// channel is closed when the session context ends — a dead core takes the screen
+// down with it instead of leaving the user staring at a dead session — and only
+// after every publisher has stopped, so no health loop can send on a closed
+// channel.
+func (a *App) showStatusScreen(ctx context.Context, t *target, ports sessionPorts, stopHealth func(), note tui.StatusUpdate) (tui.StatusAction, error) {
+	ch := make(chan tui.StatusUpdate, 8)
+	a.setStatusCh(ch)
+
+	if note.Note != "" {
+		ch <- note // buffered, so this cannot block
 	}
 
-	// If the core dies (or Ctrl+C arrives), close the screen instead of leaving
-	// the user staring at a dead session. The channel is closed only after every
-	// publisher has stopped, so no health loop can send on a closed channel.
 	go func() {
 		<-ctx.Done()
-		health.Wait()
-		a.statusMu.Lock()
-		a.statusCh = nil
-		a.statusMu.Unlock()
+		stopHealth()
+		a.clearStatusCh(ch)
 		close(ch)
 	}()
 
-	action, err := tui.ShowStatus(a.statusInfo(t, ports), ch)
+	action, err := a.showStatus(a.statusInfo(t, ports), ch)
 
-	// The screen is gone; stop the publishers and wait for the closer.
-	a.statusMu.Lock()
-	a.statusCh = nil
-	a.statusMu.Unlock()
+	// The screen is gone; publishers must stop aiming at its channel.
+	a.clearStatusCh(ch)
 
 	if err != nil {
 		return tui.StatusQuit, fmt.Errorf("TUI: %w", err)
-	}
-
-	if action == tui.StatusSwitchMode {
-		if err := a.switchMode(); err != nil {
-			// Keep the session alive and tell the user why nothing changed.
-			slog.Warn("mode switch refused", "error", err)
-			return a.reshowStatus(ctx, t, ports, err)
-		}
 	}
 	return action, nil
 }
 
-// reshowStatus re-enters the status screen after a refused mode switch, so the
-// running session survives the failed attempt (Гард: TUN needs root).
-func (a *App) reshowStatus(ctx context.Context, t *target, ports sessionPorts, refusal error) (tui.StatusAction, error) {
-	select {
-	case <-ctx.Done():
-		return tui.StatusQuit, nil
-	default:
-	}
-
-	ch := make(chan tui.StatusUpdate, 8)
+func (a *App) setStatusCh(ch chan tui.StatusUpdate) {
 	a.statusMu.Lock()
 	a.statusCh = ch
 	a.statusMu.Unlock()
+}
 
-	go func() {
-		ch <- tui.StatusUpdate{Note: "⚠ " + refusal.Error(), Err: true}
-	}()
-
-	action, err := tui.ShowStatus(a.statusInfo(t, ports), ch)
+// clearStatusCh detaches the given channel only if it is still the live one: a
+// closer goroutine from a previous screen must not silence the current one.
+func (a *App) clearStatusCh(ch chan tui.StatusUpdate) {
 	a.statusMu.Lock()
-	a.statusCh = nil
+	if a.statusCh == ch {
+		a.statusCh = nil
+	}
 	a.statusMu.Unlock()
-	if err != nil {
-		return tui.StatusQuit, fmt.Errorf("TUI: %w", err)
-	}
-	if action == tui.StatusSwitchMode {
-		if err := a.switchMode(); err != nil {
-			return a.reshowStatus(ctx, t, ports, err)
-		}
-	}
-	return action, nil
 }
 
 // showConnecting runs the bring-up behind the alt-screen "Connecting…" spinner,
@@ -211,10 +224,7 @@ func (a *App) showConnecting(t *target, connect func() error) error {
 // headless reports whether the session runs without an interactive screen:
 // scripted selection (U-2) or no terminal at all (U-3, e.g. systemd).
 func (a *App) headless() bool {
-	if a.opts.Server != "" || a.opts.UseLast || a.opts.NonInteractive {
-		return true
-	}
-	return !term.IsTerminal(int(os.Stdin.Fd()))
+	return a.opts.Server != "" || a.opts.UseLast || a.opts.NonInteractive || a.noTTY
 }
 
 // switchMode flips proxy⇄tun for the next session. TUN needs privileges, so the
@@ -412,25 +422,26 @@ func (a *App) bringUpTun(ctx context.Context, t *target) error {
 	}
 	a.tunRouted = true
 
-	if a.cfg.KillSwitch && t.isProfile() {
-		// The kill switch whitelists exactly one server endpoint; a balancer
-		// profile rotates across many, so enabling it here would blackhole the
-		// VPN's own traffic and leave the machine with no network at all.
-		slog.Warn("kill switch skipped: balancer profile has no single server endpoint")
-		a.publishStatus(tui.StatusUpdate{
-			Note: "⚠ Kill switch выключен: профиль с балансировщиком использует несколько серверов. Выберите конкретный сервер, чтобы включить его.",
-			Err:  true,
-		})
-	} else if a.cfg.KillSwitch {
-		ksCfg := system.KillSwitchConfig{
-			Endpoints: a.killSwitchEndpoints(t),
+	if a.cfg.KillSwitch {
+		// A balancer profile rotates across many servers, and the whitelist holds
+		// all of them — a single-endpoint whitelist used to make this case unsafe,
+		// which is why it was skipped before.
+		endpoints := a.killSwitchEndpoints(t)
+		if len(endpoints) == 0 {
+			slog.Warn("kill switch skipped: no server endpoint resolved")
+			a.publishStatus(tui.StatusUpdate{
+				Note: "⚠ Kill switch выключен: не удалось определить IP серверов.",
+				Err:  true,
+			})
+		} else if err := system.EnableKillSwitch(system.KillSwitchConfig{
+			Endpoints: endpoints,
 			XrayPath:  a.binary,
-		}
-		if err := system.EnableKillSwitch(ksCfg); err != nil {
+		}); err != nil {
 			slog.Warn("kill switch failed", "error", err)
 			a.publishStatus(tui.StatusUpdate{Note: "⚠ Kill switch не включился: " + err.Error(), Err: true})
 		} else {
-			slog.Info("kill switch enabled")
+			a.killSwitchOn = true
+			slog.Info("kill switch enabled", "endpoints", len(endpoints))
 		}
 	}
 
@@ -474,10 +485,17 @@ func (a *App) releaseSession() {
 		}
 		a.tunRouted = false
 	}
-	if a.mode == "tun" {
-		_ = system.DisableKillSwitch()
-	} else if a.proxyTouched {
-		if err := a.proxy.Restore(a.originalProxy); err != nil {
+	// Undo by what was actually enabled, never by a.mode: the m key switches the
+	// mode while the session is still up, so by the time teardown runs a.mode
+	// already names the *next* session's mode.
+	if a.killSwitchOn {
+		if err := a.disableKillSwitch(); err != nil {
+			slog.Warn("failed to disable kill switch", "error", err)
+		}
+		a.killSwitchOn = false
+	}
+	if a.proxyTouched {
+		if err := a.restoreProxy(a.originalProxy); err != nil {
 			slog.Warn("failed to restore proxy", "error", err)
 		}
 		a.proxyTouched = false

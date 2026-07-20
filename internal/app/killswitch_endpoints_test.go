@@ -39,6 +39,35 @@ func TestKillSwitchEndpoints_CoversProfileSiblings(t *testing.T) {
 	}
 }
 
+// A balancer profile has no single chosen server, so every endpoint comes from
+// the profile itself. The whitelist covers all of them, which is what lets the
+// kill switch run for a profile at all.
+func TestKillSwitchEndpoints_BalancerProfile(t *testing.T) {
+	a := &App{} // setEndpoint clears serverHost for a profile target
+	tgt := &target{
+		profileName: "autoselect",
+		profileSrvs: []subscription.SubEntry{
+			{Protocol: "vless", Address: "203.0.113.6", Port: 8443},
+			{Protocol: "hysteria2", Address: "203.0.113.7", Port: 9443},
+		},
+	}
+
+	got := a.killSwitchEndpoints(tgt)
+
+	want := []system.Endpoint{
+		{IP: "203.0.113.6", Port: 8443},
+		{IP: "203.0.113.7", Port: 9443, UDP: true},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d endpoints, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("endpoint %d = %+v, want %+v", i, got[i], w)
+		}
+	}
+}
+
 // A server that appears both as the chosen one and inside the profile must not
 // produce two identical rules.
 func TestKillSwitchEndpoints_Deduplicates(t *testing.T) {

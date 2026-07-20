@@ -19,31 +19,29 @@ import (
 
 type portPair struct{ socks, http int }
 
-// freePort asks the OS for an unused TCP port on loopback by binding :0 and
-// reading back the assigned port, then releasing it. This is racy (TOCTOU: the
-// port can be taken between close and xray's bind), but far more reliable than
-// handing out incrementing numbers that may already be in use (P-2).
-func freePort() (int, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = ln.Close() }()
-	return ln.Addr().(*net.TCPAddr).Port, nil
-}
-
-// freePortPair returns two distinct free loopback ports for the socks/http
-// inbounds of a benchmark instance.
+// freePortPair asks the OS for two unused TCP ports on loopback by binding :0
+// twice and reading back the assigned ports. Both listeners stay open until the
+// pair is complete, otherwise the second bind may be handed the port the first
+// one just released and the instance would try to listen twice on it. This is
+// still racy (TOCTOU: a port can be taken between close and xray's bind), but
+// far more reliable than handing out incrementing numbers (P-2).
 func freePortPair() (portPair, error) {
-	socks, err := freePort()
+	socks, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return portPair{}, err
 	}
-	http, err := freePort()
+	defer func() { _ = socks.Close() }()
+
+	http, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return portPair{}, err
 	}
-	return portPair{socks: socks, http: http}, nil
+	defer func() { _ = http.Close() }()
+
+	return portPair{
+		socks: socks.Addr().(*net.TCPAddr).Port,
+		http:  http.Addr().(*net.TCPAddr).Port,
+	}, nil
 }
 
 type ProxyBenchmarker struct {
@@ -52,7 +50,6 @@ type ProxyBenchmarker struct {
 	concurrency   int
 	timeout       time.Duration
 	allowInsecure bool
-	tmpDir        string
 }
 
 func NewProxyBenchmarker(template *xraycfg.XrayConfig, binary string, concurrency int, timeout time.Duration, allowInsecure bool) *ProxyBenchmarker {
@@ -63,25 +60,6 @@ func NewProxyBenchmarker(template *xraycfg.XrayConfig, binary string, concurrenc
 		timeout:       timeout,
 		allowInsecure: allowInsecure,
 	}
-}
-
-func waitPort(ctx context.Context, port int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return true
-		}
-		// P-1: abort the wait promptly when the benchmark is cancelled instead
-		// of sleeping out the whole timeout.
-		select {
-		case <-ctx.Done():
-			return false
-		case <-time.After(200 * time.Millisecond):
-		}
-	}
-	return false
 }
 
 // benchInbounds are the loopback inbounds a measured instance listens on. They
@@ -117,7 +95,7 @@ func buildProfileBenchConfig(p subscription.Profile, ports portPair, logLevel st
 	return xraycfg.MergeProfile(p.Raw, benchInbounds(ports), logLevel)
 }
 
-func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.SubEntry, ports portPair) subscription.BenchmarkResult {
+func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.SubEntry, ports portPair, dir string) subscription.BenchmarkResult {
 	if err := entry.Validate(); err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
@@ -146,31 +124,31 @@ func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.S
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
-	return pb.runAndMeasure(ctx, data, ports)
+	return pb.runAndMeasure(ctx, data, ports, dir)
 }
 
 // measureProfile times the profile as a whole, through its own balancer.
-func (pb *ProxyBenchmarker) measureProfile(ctx context.Context, p subscription.Profile, ports portPair) subscription.BenchmarkResult {
+func (pb *ProxyBenchmarker) measureProfile(ctx context.Context, p subscription.Profile, ports portPair, dir string) subscription.BenchmarkResult {
 	// A bare link carries no panel config: it is a single server wearing a
 	// profile's clothes, so measure it as one.
 	if len(p.Raw) == 0 {
 		if len(p.Entries) == 0 {
 			return subscription.BenchmarkResult{Error: fmt.Errorf("профиль без серверов")}
 		}
-		return pb.measureOne(ctx, p.Entries[0], ports)
+		return pb.measureOne(ctx, p.Entries[0], ports, dir)
 	}
 
 	data, err := buildProfileBenchConfig(p, ports, "error")
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
-	return pb.runAndMeasure(ctx, data, ports)
+	return pb.runAndMeasure(ctx, data, ports, dir)
 }
 
 // runAndMeasure starts xray on the given config and times a single request
 // through its http inbound.
-func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, ports portPair) subscription.BenchmarkResult {
-	tmpFile := filepath.Join(pb.tmpDir, fmt.Sprintf("xray-bench-%d-%d.json", ports.socks, ports.http))
+func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, ports portPair, dir string) subscription.BenchmarkResult {
+	tmpFile := filepath.Join(dir, fmt.Sprintf("xray-bench-%d-%d.json", ports.socks, ports.http))
 	// H-2: bench configs carry the same secrets as the main config; keep them
 	// 0600 inside a private 0700 dir instead of world-readable /tmp.
 	if err := os.WriteFile(tmpFile, cfgJSON, 0600); err != nil {
@@ -185,7 +163,7 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 	}
 	defer func() { _ = runner.Stop() }()
 
-	if !waitPort(ctx, ports.http, pb.timeout) {
+	if !awaitPort(ctx, ports.http, "", pb.timeout) {
 		return subscription.BenchmarkResult{Error: fmt.Errorf("port %d not ready within timeout", ports.http)}
 	}
 
@@ -234,7 +212,7 @@ func runBatch[T any](
 	ctx context.Context,
 	pb *ProxyBenchmarker,
 	items []T,
-	measure func(context.Context, T, portPair) subscription.BenchmarkResult,
+	measure func(context.Context, T, portPair, string) subscription.BenchmarkResult,
 	onResult func(subscription.BenchmarkResult),
 ) []subscription.BenchmarkResult {
 	dir, err := os.MkdirTemp("", "xray-bench-*")
@@ -245,7 +223,6 @@ func runBatch[T any](
 		}
 		return results
 	}
-	pb.tmpDir = dir
 	defer func() { _ = os.RemoveAll(dir) }()
 
 	results := make([]subscription.BenchmarkResult, len(items))
@@ -271,7 +248,7 @@ func runBatch[T any](
 				if err != nil {
 					result = subscription.BenchmarkResult{Error: err}
 				} else {
-					result = measure(ctx, items[idx], ports)
+					result = measure(ctx, items[idx], ports, dir)
 				}
 			}
 			result.Index = idx

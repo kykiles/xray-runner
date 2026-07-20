@@ -56,6 +56,7 @@ type App struct {
 	mode          string // active mode; starts at cfg.Mode or the saved mode, toggled by the m key
 	modeFromState bool   // mode came from the saved state, not from cfg.Mode
 	pendingNote   string // shown on the next status screen (e.g. a mode fallback)
+	noTTY         bool   // stdin is not a terminal (systemd, pipe): no screen to draw on
 	nav           nav    // menu position, kept across sessions
 	serverHost    string
 	serverPort    int
@@ -63,13 +64,25 @@ type App struct {
 	originalProxy system.ProxyState
 	proxyTouched  bool
 	tunRouted     bool // tun routes installed; teardown must remove them
+	killSwitchOn  bool // kill switch enabled; teardown must take it down
 	interfaces    func() ([]net.Interface, error)
+	// disableKillSwitch / restoreProxy are the teardown side of the two system
+	// changes a session makes; fields so tests can observe them without touching
+	// the machine's firewall or proxy settings.
+	disableKillSwitch func() error
+	restoreProxy      func(system.ProxyState) error
 	// checkPrivileges reports whether tun mode may be used; a field so tests can
 	// exercise both outcomes without being root.
 	checkPrivileges func() error
 	// pidAlive reports whether the process that owns an existing lock file is
 	// still running; a field so tests can stub liveness deterministically.
 	pidAlive func(pid int) bool
+	// healthLoop overrides the mode's health loop; a field so tests can observe
+	// the loop's lifetime without a network or a running core.
+	healthLoop func(context.Context, sessionPorts)
+	// showStatus draws the status screen; a field so tests can drive the session
+	// loop without a terminal.
+	showStatus func(tui.StatusInfo, <-chan tui.StatusUpdate) (tui.StatusAction, error)
 
 	// U-5: status data, written by health loops, read by the status screen.
 	statusMu    sync.Mutex
@@ -79,16 +92,21 @@ type App struct {
 }
 
 func New(cfg *config.Config, opts Options) *App {
+	proxy := system.New()
 	return &App{
-		cfg:             cfg,
-		opts:            opts,
-		mode:            cfg.Mode,
-		proxy:           system.New(),
-		tmpFile:         filepath.Join(".", "xray_config.json"),
-		lockFile:        filepath.Join(".", "xray_config.json.lock"),
-		interfaces:      net.Interfaces,
-		checkPrivileges: checkTunPrivileges,
-		pidAlive:        processAlive,
+		cfg:               cfg,
+		opts:              opts,
+		mode:              cfg.Mode,
+		proxy:             proxy,
+		tmpFile:           filepath.Join(".", "xray_config.json"),
+		lockFile:          filepath.Join(".", "xray_config.json.lock"),
+		interfaces:        net.Interfaces,
+		checkPrivileges:   checkTunPrivileges,
+		pidAlive:          processAlive,
+		noTTY:             !term.IsTerminal(int(os.Stdin.Fd())),
+		disableKillSwitch: system.DisableKillSwitch,
+		restoreProxy:      proxy.Restore,
+		showStatus:        tui.ShowStatus,
 	}
 }
 
@@ -136,7 +154,7 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	// U-3: the TUI needs a terminal; without one, only scripted selection works.
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if a.noTTY {
 		return fmt.Errorf("%w: нет терминала для интерактивного выбора — используйте --server, --last или --non-interactive", ErrSelection)
 	}
 

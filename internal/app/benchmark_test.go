@@ -55,13 +55,13 @@ func TestWaitPortReachable(t *testing.T) {
 	}()
 
 	port := ln.Addr().(*net.TCPAddr).Port
-	if !waitPort(context.Background(), port, 500*time.Millisecond) {
+	if !awaitPort(context.Background(), port, "", 500*time.Millisecond) {
 		t.Error("expected true for open port")
 	}
 }
 
 func TestWaitPortUnreachable(t *testing.T) {
-	if waitPort(context.Background(), 19999, 100*time.Millisecond) {
+	if awaitPort(context.Background(), 19999, "", 100*time.Millisecond) {
 		t.Error("expected false for closed port")
 	}
 }
@@ -69,7 +69,7 @@ func TestWaitPortUnreachable(t *testing.T) {
 func TestWaitPortContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if waitPort(ctx, 19999, 5*time.Second) {
+	if awaitPort(ctx, 19999, "", 5*time.Second) {
 		t.Error("expected false when context is already canceled")
 	}
 }
@@ -114,8 +114,7 @@ func TestProxyBenchmarkerMeasureOne(t *testing.T) {
 	}
 
 	pb := NewProxyBenchmarker(tc, xrayBin, 1, 8*time.Second, false)
-	pb.tmpDir = t.TempDir()
-	result := pb.measureOne(context.Background(), entry, portPair{socks: 10850, http: 10860})
+	result := pb.measureOne(context.Background(), entry, portPair{socks: 10850, http: 10860}, t.TempDir())
 
 	if result.Error != nil {
 		t.Fatalf("unexpected error: %v", result.Error)
