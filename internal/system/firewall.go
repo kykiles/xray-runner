@@ -17,6 +17,12 @@ type Endpoint struct {
 // panel's routing: a rule may send some domains through a sibling outbound of
 // the same profile, and a sibling left out of the whitelist is a silent partial
 // blackhole. Empty → no server exception at all.
+//
+// The two fields are read on different platforms, and neither is optional for
+// the platform that uses it: Linux whitelists Endpoints per address and ignores
+// XrayPath, while Windows allows the xray binary as a whole (program= covers
+// every server it dials, so per-endpoint rules would add nothing) and ignores
+// Endpoints.
 type KillSwitchConfig struct {
 	Endpoints []Endpoint
 	XrayPath  string // path to the xray binary (Windows allow-rule)

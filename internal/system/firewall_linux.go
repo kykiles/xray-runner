@@ -73,11 +73,17 @@ func applyKillSwitch(bin string, cfg KillSwitchConfig) error {
 	// Allow DNS so name resolution keeps working while the switch is active
 	// (e.g. resolving the server on reconnect). In TUN mode DNS normally goes
 	// through the tunnel; this is a safety net for the physical path.
+	// The jump goes in at the front, not appended: ufw and friends install their
+	// own OUTPUT jumps, and an ACCEPT inside one of them ends traversal of
+	// OUTPUT before a jump sitting further down is ever reached — the kill
+	// switch would report success and block nothing. It is added last, once the
+	// chain above is fully populated, so OUTPUT never points at a half-built
+	// chain.
 	rules = append(rules,
 		[]string{"-A", killSwitchChain, "-p", "udp", "--dport", "53", "-j", "ACCEPT"},
 		[]string{"-A", killSwitchChain, "-p", "tcp", "--dport", "53", "-j", "ACCEPT"},
 		[]string{"-A", killSwitchChain, "-j", "DROP"},
-		[]string{"-A", "OUTPUT", "-j", killSwitchChain},
+		[]string{"-I", "OUTPUT", "1", "-j", killSwitchChain},
 	)
 
 	for _, rule := range rules {

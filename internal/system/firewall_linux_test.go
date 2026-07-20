@@ -23,6 +23,10 @@ type fakeIPTables struct {
 	available map[string]bool
 	chains    map[string]*fakeChain // key: bin
 	jumps     map[string]int        // key: bin -> OUTPUT jump count
+	// output is the OUTPUT chain in order. Position decides whether the kill
+	// switch is reached at all, so a plain count can't model it: an ACCEPT in
+	// an earlier rule ends traversal before ours runs.
+	output map[string][]string
 }
 
 func newFakeIPTables(bins ...string) *fakeIPTables {
@@ -30,6 +34,7 @@ func newFakeIPTables(bins ...string) *fakeIPTables {
 		available: map[string]bool{},
 		chains:    map[string]*fakeChain{},
 		jumps:     map[string]int{},
+		output:    map[string][]string{},
 	}
 	for _, b := range bins {
 		f.available[b] = true
@@ -59,6 +64,25 @@ func (f *fakeIPTables) run(bin string, args ...string) ([]byte, error) {
 		c.exists = true
 	case args[0] == "-A" && args[1] == "OUTPUT":
 		f.jumps[bin]++
+		f.output[bin] = append(f.output[bin], strings.Join(args, " "))
+	case args[0] == "-I" && args[1] == "OUTPUT":
+		// -I OUTPUT [pos] -j CHAIN; iptables defaults to position 1.
+		pos := 1
+		if len(args) > 2 {
+			if n, err := strconv.Atoi(args[2]); err == nil {
+				pos = n
+			}
+		}
+		if pos < 1 {
+			pos = 1
+		}
+		if pos > len(f.output[bin])+1 {
+			pos = len(f.output[bin]) + 1
+		}
+		rule := strings.Join(args, " ")
+		f.output[bin] = append(f.output[bin][:pos-1],
+			append([]string{rule}, f.output[bin][pos-1:]...)...)
+		f.jumps[bin]++
 	case args[0] == "-A" && args[1] == killSwitchChain:
 		c.rules = append(c.rules, fmt.Sprintf("%v", args))
 	case args[0] == "-D" && args[1] == "OUTPUT":
@@ -66,6 +90,9 @@ func (f *fakeIPTables) run(bin string, args ...string) ([]byte, error) {
 			return nil, fmt.Errorf("exit status 1") // nothing to delete
 		}
 		f.jumps[bin]--
+		if i := ruleIndex(f.output[bin], killSwitchChain); i >= 0 {
+			f.output[bin] = append(f.output[bin][:i], f.output[bin][i+1:]...)
+		}
 	case args[0] == "-F":
 		c.rules = nil
 	case args[0] == "-X":
@@ -167,6 +194,33 @@ func TestEnableKillSwitchAcceptsMarkedDirectTraffic(t *testing.T) {
 		}
 		if accept > drop {
 			t.Errorf("%s: fwmark ACCEPT at %d comes after DROP at %d", bin, accept, drop)
+		}
+	}
+}
+
+// ufw (active on plenty of desktops) installs its own OUTPUT jumps, and an
+// ACCEPT inside one of them ends traversal of OUTPUT. A kill switch appended
+// after them is never reached, so it must go in at the front instead.
+func TestEnableKillSwitchJumpsBeforeExistingOutputRules(t *testing.T) {
+	f := newFakeIPTables("iptables", "ip6tables")
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		f.output[bin] = []string{
+			"-A OUTPUT -j ufw-before-logging-output",
+			"-A OUTPUT -j ufw-user-output",
+		}
+		f.jumps[bin] = 2
+	}
+	withFakeFirewall(t, f)
+
+	if err := EnableKillSwitch(ipv4Cfg); err != nil {
+		t.Fatalf("EnableKillSwitch: %v", err)
+	}
+
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		at := ruleIndex(f.output[bin], killSwitchChain)
+		if at != 0 {
+			t.Errorf("%s: kill switch jump at position %d, want 0 (OUTPUT: %v)",
+				bin, at, f.output[bin])
 		}
 	}
 }
