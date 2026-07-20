@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"xray-runner/internal/config"
+	"xray-runner/internal/system"
 )
 
 // Init routes slog to the log file only: the TUI owns the terminal, so nothing
@@ -34,6 +35,11 @@ func Init(cfg *config.Config) func() {
 		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 		return func() {}
 	}
+
+	// TUN mode needs root, so the log would otherwise stay root-owned 0600 and
+	// unreadable to the user who ran the tool. Best-effort: a failed chown must
+	// not cost us the logging itself.
+	_ = system.RestoreSudoOwner(logFile)
 
 	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}))
 	slog.SetDefault(logger)

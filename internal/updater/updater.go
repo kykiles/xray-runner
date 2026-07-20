@@ -17,9 +17,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
+
+	"xray-runner/internal/system"
 )
 
 // maxUncompressedSize caps a single zip entry during extraction so a crafted
@@ -370,15 +371,7 @@ func finalizeFile(path string, mode os.FileMode) error {
 	if err := os.Chmod(path, mode); err != nil {
 		return fmt.Errorf("права %s: %w", filepath.Base(path), err)
 	}
-	if os.Geteuid() != 0 {
-		return nil
-	}
-	uid, err1 := strconv.Atoi(os.Getenv("SUDO_UID"))
-	gid, err2 := strconv.Atoi(os.Getenv("SUDO_GID"))
-	if err1 != nil || err2 != nil {
-		return nil // not launched via sudo; leave ownership as is
-	}
-	if err := os.Chown(path, uid, gid); err != nil {
+	if err := system.RestoreSudoOwner(path); err != nil {
 		return fmt.Errorf("владелец %s: %w", filepath.Base(path), err)
 	}
 	return nil
