@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 func tryParseJSON(raw []byte) ([]SubEntry, error) {
@@ -398,9 +399,25 @@ func decodeFragment(u *url.URL) string {
 		return ""
 	}
 	if decoded, err := url.QueryUnescape(u.Fragment); err == nil {
-		return decoded
+		return sanitize(decoded)
 	}
-	return u.Fragment
+	return sanitize(u.Fragment)
+}
+
+// sanitize drops control runes from a string that came off a subscription.
+// Names and remarks are rendered to the terminal and written to the log, where
+// an escape sequence would let the panel repaint the screen or forge log lines;
+// lipgloss counts those sequences as zero-width, so truncation is no defence.
+func sanitize(s string) string {
+	if strings.IndexFunc(s, unicode.IsControl) < 0 {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // b64DecodeAnyPadding decodes base64 in either the standard or URL-safe
@@ -417,7 +434,7 @@ func b64DecodeAnyPadding(s string) ([]byte, error) {
 func getString(obj map[string]interface{}, key string) string {
 	if v, ok := obj[key]; ok {
 		if s, ok := v.(string); ok {
-			return s
+			return sanitize(s)
 		}
 	}
 	return ""

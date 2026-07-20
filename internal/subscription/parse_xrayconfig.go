@@ -149,7 +149,7 @@ func parseXrayConfigProfiles(arr []json.RawMessage) ([]Profile, error) {
 		}
 
 		p := Profile{
-			Name:    cfg.Remarks,
+			Name:    sanitize(cfg.Remarks),
 			Entries: entries,
 			Raw:     item,
 		}
@@ -180,6 +180,7 @@ func outboundToEntry(o *xrayOutbound) (SubEntry, bool) {
 			return SubEntry{}, false
 		}
 		vn := o.Settings.Vnext[0]
+		vn.Address = sanitize(vn.Address)
 		e := SubEntry{
 			Protocol: o.Protocol,
 			Address:  vn.Address,
@@ -202,6 +203,7 @@ func outboundToEntry(o *xrayOutbound) (SubEntry, bool) {
 			return SubEntry{}, false
 		}
 		s := o.Settings.Servers[0]
+		s.Address = sanitize(s.Address)
 		if s.Address == "" {
 			return SubEntry{}, false
 		}

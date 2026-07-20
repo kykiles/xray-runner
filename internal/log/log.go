@@ -28,7 +28,7 @@ func Init(cfg *config.Config) func() {
 	// Truncated, not appended: xray's own output lands here, and a TUN session
 	// that hits a routing loop writes tens of megabytes in minutes. Keeping only
 	// the current run makes the file readable and bounds it by one run.
-	f, err := os.OpenFile(logFile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(logFile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY|openNoFollow, 0600)
 	if err != nil {
 		// The only stderr write we allow: without it a broken log path would be
 		// invisible, since there is no console logging to fall back on.
@@ -38,9 +38,13 @@ func Init(cfg *config.Config) func() {
 	}
 
 	// TUN mode needs root, so the log would otherwise stay root-owned 0600 and
-	// unreadable to the user who ran the tool. Best-effort: a failed chown must
-	// not cost us the logging itself.
-	_ = system.RestoreSudoOwner(logFile)
+	// unreadable to the user who ran the tool. By descriptor, so the handback
+	// cannot be redirected at another file. Best-effort: a failed chown must not
+	// cost us the logging itself, but it is worth a word — silently keeping the
+	// log root-only is the bug this is here to prevent (L-8).
+	if err := system.RestoreSudoOwnerFile(f); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ не удалось вернуть владельца лог-файла %s: %v\n", logFile, err)
+	}
 
 	w := &cappedWriter{f: f, limit: maxLogBytes}
 	logger := slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}))
