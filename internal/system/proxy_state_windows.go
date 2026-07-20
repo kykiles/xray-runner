@@ -64,7 +64,7 @@ func queryRegString(name string) string {
 
 func execReg(args ...string) error {
 	if out, err := exec.Command("reg", args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("reg %s: %s", strings.Join(args, " "), strings.TrimSpace(string(out)))
+		return fmt.Errorf("reg %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

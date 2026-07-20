@@ -19,6 +19,10 @@ type fakeIP struct {
 	bindErr     error
 	findScript  string
 	cmds        []string
+	// existing models the routing table. route.exe refuses to add a
+	// destination that is already there, which is what a crashed session
+	// leaves behind.
+	existing map[string]bool
 }
 
 func (f *fakeIP) lookPath(bin string) error { return nil }
@@ -37,6 +41,24 @@ func (f *fakeIP) run(bin string, args ...string) ([]byte, error) {
 		return []byte(f.tunIndex), f.tunIndexErr
 	}
 	f.cmds = append(f.cmds, bin+" "+joined)
+
+	// `route add DEST mask MASK ...` / `route delete DEST mask MASK`
+	if bin == "route" && len(args) >= 4 {
+		key := args[1] + " " + args[3]
+		switch args[0] {
+		case "add":
+			if f.existing[key] {
+				return []byte("The route addition failed: The object already exists."),
+					errors.New("exit status 1")
+			}
+			if f.existing == nil {
+				f.existing = map[string]bool{}
+			}
+			f.existing[key] = true
+		case "delete":
+			delete(f.existing, key)
+		}
+	}
 	return nil, nil
 }
 
@@ -122,6 +144,33 @@ func TestEnableTunRouting_IgnoresAddressObjectFromFindNetRoute(t *testing.T) {
 	}
 	if !strings.Contains(f.findScript, "Where-Object NextHop") {
 		t.Errorf("Find-NetRoute output must be filtered to route objects, got: %q", f.findScript)
+	}
+}
+
+// A crash never runs the teardown, so the next start meets its own leftovers.
+// `route add` rejects them with "The object already exists", which used to
+// strand the user with no network until they cleared the table by hand.
+func TestEnableTunRouting_SucceedsWhenPreviousRoutesRemain(t *testing.T) {
+	f := newFakeIP()
+	f.existing = map[string]bool{
+		"0.0.0.0 128.0.0.0":             true,
+		"128.0.0.0 128.0.0.0":           true,
+		"45.150.32.235 255.255.255.255": true,
+	}
+	withFakeIP(t, f)
+
+	if err := EnableTunRouting(tunCfg); err != nil {
+		t.Fatalf("EnableTunRouting over leftover routes: %v", err)
+	}
+
+	for _, want := range []string{
+		"route add 0.0.0.0 mask 128.0.0.0 10.0.0.1 if 27",
+		"route add 128.0.0.0 mask 128.0.0.0 10.0.0.1 if 27",
+		"route add 45.150.32.235 mask 255.255.255.255 192.168.31.1 if 12",
+	} {
+		if !f.has(want) {
+			t.Errorf("missing %q, got: %v", want, f.cmds)
+		}
 	}
 }
 

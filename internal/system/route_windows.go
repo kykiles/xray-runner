@@ -22,8 +22,10 @@ var splitDefault = []struct{ dest, mask string }{
 // ipCmd is overridable in tests.
 var ipCmd commander = execCommander{}
 
-// installed remembers what EnableTunRouting added so teardown removes exactly
-// that — and nothing that belongs to another VPN client on the host.
+// installed remembers what EnableTunRouting added so teardown touches only
+// those destinations, leaving the rest of the host's table alone. The one gap:
+// routeReplace clears a server /32 that some other client already owned, and
+// the teardown deletes the destination outright instead of restoring it.
 var installed *TunRouteConfig
 
 // bindProbe is the destination used to learn which adapter carries the host's
@@ -67,6 +69,16 @@ func powershell(script string) ([]byte, error) {
 	return ipCmd.run("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
 }
 
+// routeReplace installs a route the way `ip route replace` does on Linux.
+// route.exe has no replace verb and rejects a destination already present with
+// "The object already exists" — and a crash never runs the teardown, so the
+// next start meets its own leftovers. The delete is best-effort: on a clean
+// start there is nothing to remove.
+func routeReplace(dest, mask, gateway, ifIndex string) ([]byte, error) {
+	_, _ = ipCmd.run("route", "delete", dest, "mask", mask)
+	return ipCmd.run("route", "add", dest, "mask", mask, gateway, "if", ifIndex)
+}
+
 // EnableTunRouting points the system's default traffic at the TUN adapter and
 // pins the VPN server to the physical adapter.
 func EnableTunRouting(cfg TunRouteConfig) error {
@@ -108,17 +120,15 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 	installed = &saved
 
 	for _, e := range exceptions {
-		if out, err := ipCmd.run("route", "add", e.ip, "mask", "255.255.255.255",
-			e.nextHop, "if", e.ifIndex); err != nil {
-			DisableTunRouting()
+		if out, err := routeReplace(e.ip, "255.255.255.255", e.nextHop, e.ifIndex); err != nil {
+			_ = DisableTunRouting()
 			return fmt.Errorf("исключить сервер %s из туннеля: %w\n%s", e.ip, err, out)
 		}
 	}
 
 	for _, half := range splitDefault {
-		if out, err := ipCmd.run("route", "add", half.dest, "mask", half.mask,
-			cfg.Addr, "if", tunIndex); err != nil {
-			DisableTunRouting()
+		if out, err := routeReplace(half.dest, half.mask, cfg.Addr, tunIndex); err != nil {
+			_ = DisableTunRouting()
 			return fmt.Errorf("направить трафик в %s: %w\n%s", cfg.Iface, err, out)
 		}
 	}
@@ -134,11 +144,13 @@ func DisableTunRouting() error {
 		return nil
 	}
 
+	// Best-effort: teardown also runs after a partial install, where some of
+	// these routes were never added.
 	for _, half := range splitDefault {
-		ipCmd.run("route", "delete", half.dest, "mask", half.mask)
+		_, _ = ipCmd.run("route", "delete", half.dest, "mask", half.mask)
 	}
 	for _, ip := range installed.ServerIPs {
-		ipCmd.run("route", "delete", ip, "mask", "255.255.255.255")
+		_, _ = ipCmd.run("route", "delete", ip, "mask", "255.255.255.255")
 	}
 	installed = nil
 

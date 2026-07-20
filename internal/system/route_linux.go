@@ -31,8 +31,11 @@ const markProbe = "1.1.1.1"
 // ipCmd is overridable in tests.
 var ipCmd commander = execCommander{}
 
-// installed remembers what EnableTunRouting added so teardown removes exactly
-// that — and nothing that belongs to another VPN client on the host.
+// installed remembers what EnableTunRouting added so teardown touches only
+// those destinations, leaving the rest of the host's table alone. The one gap:
+// `route replace` on a server /32 that some other client already owned drops
+// its entry, and the teardown deletes the destination outright instead of
+// restoring it.
 var installed *TunRouteConfig
 
 // DirectBind reports how freedom outbounds leave the tunnel on this platform.
