@@ -171,3 +171,21 @@ func vmessB64(t *testing.T) string {
 	}
 	return base64.StdEncoding.EncodeToString(raw)
 }
+
+// A truncated or mistyped vmess link must fail at parse time. Silently
+// accepting it makes IsBareLink disagree with ParseBareLink and defers the
+// failure to Validate, long after the link was saved.
+func TestParseBareLink_RejectsBrokenVMess(t *testing.T) {
+	for _, raw := range []string{
+		"vmess://not-base64!!!", // not base64 at all
+		"vmess://bm90LWpzb24",   // decodes to "not-json"
+		"vmess://e30",           // decodes to "{}" — no address
+	} {
+		if IsBareLink(raw) {
+			t.Errorf("IsBareLink(%q) = true, want false", raw)
+		}
+		if _, err := ParseBareLink(raw); err == nil {
+			t.Errorf("ParseBareLink(%q) = nil error, want error", raw)
+		}
+	}
+}

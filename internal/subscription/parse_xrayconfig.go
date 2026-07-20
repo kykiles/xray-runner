@@ -227,21 +227,21 @@ func applyStream(e *SubEntry, s *xrayStream) {
 
 	switch {
 	case s.Reality != nil:
-		e.SNI = s.Reality.ServerName
-		e.PublicKey = s.Reality.PublicKey
-		e.ShortID = s.Reality.ShortID
-		e.Fingerprint = s.Reality.Fingerprint
+		e.SNI = sanitize(s.Reality.ServerName)
+		e.PublicKey = sanitize(s.Reality.PublicKey)
+		e.ShortID = sanitize(s.Reality.ShortID)
+		e.Fingerprint = sanitize(s.Reality.Fingerprint)
 	case s.TLS != nil:
-		e.SNI = s.TLS.ServerName
-		e.Fingerprint = s.TLS.Fingerprint
-		e.ALPN = strings.Join(s.TLS.ALPN, ",")
+		e.SNI = sanitize(s.TLS.ServerName)
+		e.Fingerprint = sanitize(s.TLS.Fingerprint)
+		e.ALPN = sanitize(strings.Join(s.TLS.ALPN, ","))
 	}
 
 	if s.WS != nil {
-		e.Path = s.WS.Path
-		e.Host = s.WS.Headers.Host
+		e.Path = sanitize(s.WS.Path)
+		e.Host = sanitize(s.WS.Headers.Host)
 	}
 	if s.GRPC != nil {
-		e.ServiceName = s.GRPC.ServiceName
+		e.ServiceName = sanitize(s.GRPC.ServiceName)
 	}
 }

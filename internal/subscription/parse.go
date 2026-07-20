@@ -36,17 +36,31 @@ func tryParseJSON(raw []byte) ([]SubEntry, error) {
 
 func parseJSONArray(arr []json.RawMessage) ([]SubEntry, error) {
 	var entries []SubEntry
-	for _, item := range arr {
+	skipped := 0
+	for i, item := range arr {
 		e, err := parseJSONEntry(item)
 		if err != nil {
+			// The entry itself is not logged: it carries the UUID or password.
+			slog.Debug("subscription entry skipped", "index", i, "error", err)
+			skipped++
 			continue
 		}
 		entries = append(entries, e)
 	}
+	logSkipped(skipped, len(entries))
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("no valid entries found in JSON")
 	}
 	return entries, nil
+}
+
+// logSkipped reports servers that failed to parse. Without it a subscription
+// that half-parses looks identical to a short one, and the user has no way to
+// tell that seven of their ten servers were dropped.
+func logSkipped(skipped, kept int) {
+	if skipped > 0 {
+		slog.Warn("часть серверов подписки не разобрана", "пропущено", skipped, "загружено", kept)
+	}
 }
 
 func parseJSONEntry(raw json.RawMessage) (SubEntry, error) {
@@ -121,10 +135,12 @@ func parseXrayJSON(obj map[string]interface{}) SubEntry {
 	if e.Protocol == "" {
 		e.Protocol = "vless"
 	}
-	if e.Protocol == "hy2" {
+	// Normalize every spelling to hysteria2 so the rest of the package sees one
+	// form — RunBenchmark keys the UDP-only skip off it.
+	if e.Protocol == "hy2" || e.Protocol == "hysteria" {
 		e.Protocol = "hysteria2"
 	}
-	if e.Network == "" && e.Protocol != "hysteria2" && e.Protocol != "hysteria" {
+	if e.Network == "" && e.Protocol != "hysteria2" {
 		e.Network = "tcp"
 	}
 
@@ -158,9 +174,14 @@ func parseVMessJSON(obj map[string]interface{}) SubEntry {
 		e.Security = tls
 	}
 
-	if enc := getString(obj, "type"); enc != "" {
-		e.Encryption = enc
-	}
+	// A CDN link points "add" at an IP and carries the real hostname in "sni";
+	// without it the handshake would use the address and fail.
+	e.SNI = getString(obj, "sni")
+	e.Fingerprint = getString(obj, "fp")
+
+	// "scy" is the encryption; "type" is the header obfuscation (none/http/...)
+	// and must not be mistaken for it — xray rejects security:"http".
+	e.Encryption = firstNonEmpty(getString(obj, "scy"), getString(obj, "security"))
 
 	if e.Network == "" {
 		e.Network = "tcp"
@@ -187,18 +208,23 @@ func parseSSJSON(obj map[string]interface{}) SubEntry {
 func parseURLList(data string) ([]SubEntry, error) {
 	lines := strings.Split(data, "\n")
 	var entries []SubEntry
+	skipped := 0
 
-	for _, line := range lines {
+	for lineNo, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		e, err := parseURL(line)
 		if err != nil {
+			// The line itself is not logged: it carries the UUID or password.
+			slog.Debug("subscription line skipped", "line", lineNo, "error", err)
+			skipped++
 			continue
 		}
 		entries = append(entries, e)
 	}
+	logSkipped(skipped, len(entries))
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("no valid URLs found")
 	}
@@ -226,7 +252,9 @@ func parseURL(rawURL string) (SubEntry, error) {
 		}
 
 	case "vmess":
-		parseVMessURL(u, &e)
+		if err := parseVMessURL(u, &e); err != nil {
+			return SubEntry{}, fmt.Errorf("parse vmess url: %w", err)
+		}
 
 	case "trojan":
 		parseTrojanURL(u, &e)
@@ -256,19 +284,19 @@ func parseVlessURL(u *url.URL, e *SubEntry) {
 	}
 
 	q := u.Query()
-	e.Flow = q.Get("flow")
-	e.Network = q.Get("type")
-	e.Security = q.Get("security")
-	e.Path = q.Get("path")
-	e.Host = q.Get("host")
-	e.SNI = q.Get("sni")
-	e.Fingerprint = q.Get("fp")
-	e.PublicKey = q.Get("pbk")
-	e.ShortID = firstNonEmpty(q.Get("sid"), q.Get("shortId"), q.Get("shortID"), q.Get("short_id"))
-	e.ALPN = q.Get("alpn")
-	e.ServiceName = q.Get("serviceName")
-	e.SpiderX = q.Get("spx")
-	e.XHTTPMode = q.Get("mode")
+	e.Flow = qget(q, "flow")
+	e.Network = qget(q, "type")
+	e.Security = qget(q, "security")
+	e.Path = qget(q, "path")
+	e.Host = qget(q, "host")
+	e.SNI = qget(q, "sni")
+	e.Fingerprint = qget(q, "fp")
+	e.PublicKey = qget(q, "pbk")
+	e.ShortID = firstNonEmpty(qget(q, "sid"), qget(q, "shortId"), qget(q, "shortID"), qget(q, "short_id"))
+	e.ALPN = qget(q, "alpn")
+	e.ServiceName = qget(q, "serviceName")
+	e.SpiderX = qget(q, "spx")
+	e.XHTTPMode = qget(q, "mode")
 
 	if e.Network == "" {
 		e.Network = "tcp"
@@ -297,18 +325,18 @@ func parseTrojanURL(u *url.URL, e *SubEntry) {
 	}
 
 	q := u.Query()
-	e.Network = firstNonEmpty(q.Get("type"), "tcp")
-	e.Security = firstNonEmpty(q.Get("security"), "tls")
-	e.Path = q.Get("path")
-	e.Host = q.Get("host")
-	e.SNI = q.Get("sni")
-	e.Fingerprint = q.Get("fp")
-	e.PublicKey = q.Get("pbk")
-	e.ShortID = firstNonEmpty(q.Get("sid"), q.Get("shortId"), q.Get("shortID"), q.Get("short_id"))
-	e.ALPN = q.Get("alpn")
-	e.ServiceName = q.Get("serviceName")
-	e.SpiderX = q.Get("spx")
-	e.XHTTPMode = q.Get("mode")
+	e.Network = firstNonEmpty(qget(q, "type"), "tcp")
+	e.Security = firstNonEmpty(qget(q, "security"), "tls")
+	e.Path = qget(q, "path")
+	e.Host = qget(q, "host")
+	e.SNI = qget(q, "sni")
+	e.Fingerprint = qget(q, "fp")
+	e.PublicKey = qget(q, "pbk")
+	e.ShortID = firstNonEmpty(qget(q, "sid"), qget(q, "shortId"), qget(q, "shortID"), qget(q, "short_id"))
+	e.ALPN = qget(q, "alpn")
+	e.ServiceName = qget(q, "serviceName")
+	e.SpiderX = qget(q, "spx")
+	e.XHTTPMode = qget(q, "mode")
 	e.Remarks = decodeFragment(u)
 }
 
@@ -321,6 +349,16 @@ func parseSSURL(u *url.URL, e *SubEntry) error {
 		}
 	} else {
 		e.Address = u.Host
+	}
+
+	// SIP002 allows either "method:password" in the clear or the same pair
+	// base64-encoded in the username. url.Parse splits the plain form for us, so
+	// a present password means we are looking at it.
+	if pass, ok := u.User.Password(); ok {
+		e.Method = u.User.Username()
+		e.Password = pass
+		e.Remarks = decodeFragment(u)
+		return nil
 	}
 
 	decoded, err := b64DecodeAnyPadding(u.User.Username())
@@ -337,7 +375,7 @@ func parseSSURL(u *url.URL, e *SubEntry) error {
 	return nil
 }
 
-func parseVMessURL(u *url.URL, e *SubEntry) {
+func parseVMessURL(u *url.URL, e *SubEntry) error {
 	// vmess://base64_encoded_json
 	var b64 string
 	if u.Opaque != "" {
@@ -351,12 +389,18 @@ func parseVMessURL(u *url.URL, e *SubEntry) {
 	}
 
 	decoded, err := b64DecodeAnyPadding(b64)
-	if err == nil {
-		var vmessObj map[string]interface{}
-		if err := json.Unmarshal(decoded, &vmessObj); err == nil {
-			*e = parseVMessJSON(vmessObj)
-		}
+	if err != nil {
+		return fmt.Errorf("decode vmess base64: %w", err)
 	}
+	var vmessObj map[string]interface{}
+	if err := json.Unmarshal(decoded, &vmessObj); err != nil {
+		return fmt.Errorf("decode vmess json: %w", err)
+	}
+	*e = parseVMessJSON(vmessObj)
+	if e.Address == "" {
+		return fmt.Errorf("vmess link has no address")
+	}
+	return nil
 }
 
 func parseHysteria2URL(u *url.URL, e *SubEntry) {
@@ -373,14 +417,14 @@ func parseHysteria2URL(u *url.URL, e *SubEntry) {
 	}
 
 	q := u.Query()
-	e.Insecure = q.Get("insecure") == "1" || q.Get("insecure") == "true"
-	e.Up = q.Get("up")
-	e.Down = q.Get("down")
-	e.SNI = q.Get("sni")
-	e.ALPN = q.Get("alpn")
-	e.Obfs = q.Get("obfs")
-	e.ObfsPassword = q.Get("obfs-password")
-	e.Congestion = q.Get("congestion")
+	e.Insecure = qget(q, "insecure") == "1" || qget(q, "insecure") == "true"
+	e.Up = qget(q, "up")
+	e.Down = qget(q, "down")
+	e.SNI = qget(q, "sni")
+	e.ALPN = qget(q, "alpn")
+	e.Obfs = qget(q, "obfs")
+	e.ObfsPassword = qget(q, "obfs-password")
+	e.Congestion = qget(q, "congestion")
 
 	if e.Up != "" && !strings.Contains(strings.ToLower(e.Up), "bps") {
 		e.Up = e.Up + " mbps"
@@ -418,6 +462,12 @@ func sanitize(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// qget reads a query parameter that came off a subscription. url.Values already
+// percent-decoded it, so this is the boundary where control runes must go.
+func qget(q url.Values, key string) string {
+	return sanitize(q.Get(key))
 }
 
 // b64DecodeAnyPadding decodes base64 in either the standard or URL-safe

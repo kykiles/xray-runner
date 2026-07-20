@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/url"
 	"strings"
@@ -144,5 +145,87 @@ func TestFirstNonEmpty(t *testing.T) {
 	}
 	if got := firstNonEmpty("", "", ""); got != "" {
 		t.Errorf("firstNonEmpty = %q, want empty", got)
+	}
+}
+
+// vmessLink builds a vmess:// share link from the standard field map.
+func vmessLink(t *testing.T, fields map[string]interface{}) string {
+	t.Helper()
+	b, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal vmess fields: %v", err)
+	}
+	return "vmess://" + base64.StdEncoding.EncodeToString(b)
+}
+
+// In a vmess share link "scy" carries the encryption and "type" carries the
+// header obfuscation. Reading "type" as the encryption produces an outbound
+// xray rejects outright (security:"http").
+func TestParseURL_VMessEncryptionComesFromScy(t *testing.T) {
+	link := vmessLink(t, map[string]interface{}{
+		"v": "2", "ps": "node", "add": "1.2.3.4", "port": "443",
+		"id":  "b831381d-6324-4d53-ad4f-8cda48b30811",
+		"aid": "0", "scy": "aes-128-gcm", "net": "tcp", "type": "http",
+	})
+
+	e, err := parseURL(link)
+	if err != nil {
+		t.Fatalf("parseURL: %v", err)
+	}
+	if e.Encryption != "aes-128-gcm" {
+		t.Errorf("Encryption = %q, want aes-128-gcm", e.Encryption)
+	}
+}
+
+// Panels that omit "scy" but write "security" should still be honored.
+func TestParseURL_VMessEncryptionFallsBackToSecurity(t *testing.T) {
+	link := vmessLink(t, map[string]interface{}{
+		"add": "1.2.3.4", "port": "443",
+		"id":  "b831381d-6324-4d53-ad4f-8cda48b30811",
+		"net": "tcp", "security": "chacha20-poly1305",
+	})
+
+	e, err := parseURL(link)
+	if err != nil {
+		t.Fatalf("parseURL: %v", err)
+	}
+	if e.Encryption != "chacha20-poly1305" {
+		t.Errorf("Encryption = %q, want chacha20-poly1305", e.Encryption)
+	}
+}
+
+// A CDN vmess link points "add" at an IP and carries the real hostname in
+// "sni"; losing it makes the TLS handshake use the address and fail.
+func TestParseURL_VMessKeepsSNIAndFingerprint(t *testing.T) {
+	link := vmessLink(t, map[string]interface{}{
+		"add": "1.2.3.4", "port": "443",
+		"id":  "b831381d-6324-4d53-ad4f-8cda48b30811",
+		"net": "ws", "tls": "tls", "sni": "cdn.example.com", "fp": "chrome",
+	})
+
+	e, err := parseURL(link)
+	if err != nil {
+		t.Fatalf("parseURL: %v", err)
+	}
+	if e.SNI != "cdn.example.com" {
+		t.Errorf("SNI = %q, want cdn.example.com", e.SNI)
+	}
+	if e.Fingerprint != "chrome" {
+		t.Errorf("Fingerprint = %q, want chrome", e.Fingerprint)
+	}
+}
+
+// SIP002 allows the userinfo to be plain "method:password" as well as base64.
+// Rejecting the plain form drops the server from the list entirely.
+func TestParseURL_SSPlainUserinfo(t *testing.T) {
+	e, err := parseURL("ss://aes-256-gcm:secret@ss.example.com:8443#plain")
+	if err != nil {
+		t.Fatalf("parseURL: %v", err)
+	}
+	if e.Method != "aes-256-gcm" {
+		t.Errorf("Method = %q, want aes-256-gcm", e.Method)
+	}
+	if e.Password != "secret" {
+		t.Errorf("Password = %q, want secret", e.Password)
 	}
 }

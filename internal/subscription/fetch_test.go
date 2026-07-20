@@ -3,6 +3,7 @@ package subscription
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -103,5 +104,79 @@ func TestFetch_RejectsOversizedBody(t *testing.T) {
 
 	if _, err := Fetch(server.URL); err == nil {
 		t.Fatal("expected error for a body over the size cap")
+	}
+}
+
+// A subscription served over https must not be followed into plain http: the
+// token in the URL and the device headers would go out in the clear, and the
+// plaintext warning only ever looked at the original URL. The policy is tested
+// directly — driving it through a real TLS server would need the client to
+// trust a test certificate.
+func TestCheckRedirect_RefusesHTTPSDowngrade(t *testing.T) {
+	from, _ := http.NewRequest("GET", "https://panel.example.com/sub", nil)
+	to, _ := http.NewRequest("GET", "http://panel.example.com/sub", nil)
+
+	err := checkRedirect(to, []*http.Request{from})
+	if err == nil {
+		t.Fatal("expected https->http redirect to be refused, got nil")
+	}
+	if !strings.Contains(err.Error(), "https") {
+		t.Errorf("error %q does not mention the downgrade", err)
+	}
+}
+
+// An https->https redirect is ordinary and must be allowed.
+func TestCheckRedirect_AllowsSameSchemeRedirect(t *testing.T) {
+	from, _ := http.NewRequest("GET", "https://panel.example.com/sub", nil)
+	to, _ := http.NewRequest("GET", "https://cdn.example.com/sub", nil)
+
+	if err := checkRedirect(to, []*http.Request{from}); err != nil {
+		t.Errorf("checkRedirect: %v", err)
+	}
+}
+
+// x-hwid identifies the user's device. Go strips only Authorization/Cookie on a
+// cross-host redirect, so the HWID headers would otherwise reach a third party.
+func TestFetchBody_DropsHWIDHeadersOnCrossHostRedirect(t *testing.T) {
+	var got http.Header
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer other.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	if _, err := fetchBody(origin.URL, WithHWID("dev-hwid", "linux", "pc")); err != nil {
+		t.Fatalf("fetchBody: %v", err)
+	}
+	for _, h := range []string{"X-Hwid", "X-Device-Os", "X-Device-Model"} {
+		if v := got.Get(h); v != "" {
+			t.Errorf("header %s leaked to other host: %q", h, v)
+		}
+	}
+}
+
+// Same-host redirects are ordinary panel behavior and must keep working.
+func TestFetchBody_KeepsHWIDHeadersOnSameHostRedirect(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/final" {
+			http.Redirect(w, r, "/final", http.StatusFound)
+			return
+		}
+		got = r.Header.Clone()
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	if _, err := fetchBody(srv.URL, WithHWID("dev-hwid", "linux", "pc")); err != nil {
+		t.Fatalf("fetchBody: %v", err)
+	}
+	if got.Get("X-Hwid") != "dev-hwid" {
+		t.Errorf("X-Hwid = %q, want dev-hwid", got.Get("X-Hwid"))
 	}
 }

@@ -32,6 +32,28 @@ func WithHWID(hwid, deviceOS, deviceModel string) FetchOption {
 // FetchOption.
 const defaultUserAgent = "v2rayNG/1.8.5"
 
+// hwidHeaders are the device-identifying headers WithHWID sets. Go strips only
+// Authorization/Cookie/WWW-Authenticate across hosts, so these need dropping by
+// hand or a redirect hands the user's device id to a third party.
+var hwidHeaders = []string{"x-hwid", "x-device-os", "x-device-model"}
+
+// checkRedirect keeps a subscription request from downgrading to plaintext and
+// from carrying the HWID headers off the original host. Panels redirect
+// legitimately, so redirects themselves stay allowed.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	prev := via[len(via)-1]
+	if prev.URL.Scheme == "https" && req.URL.Scheme != "https" {
+		return fmt.Errorf("подписка перенаправлена с https на %s://%s — отказ, токен и заголовки устройства ушли бы открытым текстом",
+			req.URL.Scheme, req.URL.Host)
+	}
+	if req.URL.Host != prev.URL.Host {
+		for _, h := range hwidHeaders {
+			req.Header.Del(h)
+		}
+	}
+	return nil
+}
+
 func Fetch(rawURL string, opts ...FetchOption) ([]SubEntry, error) {
 	// A bare link carries the server inline — there is nothing to fetch, and the
 	// branch lives here so every caller (menu, scripted selection, --dump-links)
@@ -69,7 +91,7 @@ func fetchBody(rawURL string, opts ...FetchOption) ([]byte, error) {
 		opt(req)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: checkRedirect}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("subscription fetch: %w", err)

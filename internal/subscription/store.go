@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -100,7 +101,40 @@ func RemoveSubscription(index int) error {
 		sb.WriteString(e.url + "\n")
 	}
 
-	return os.WriteFile(subscriptionsFile, []byte(sb.String()), 0600)
+	return writeFileAtomic(subscriptionsFile, []byte(sb.String()))
+}
+
+// writeFileAtomic replaces a file through a temp file in the same directory, so
+// a crash or a full disk leaves the previous contents intact rather than a
+// truncated one. This file is the user's only copy of their subscription
+// tokens; losing it costs them access.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".subscriptions-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp subscriptions: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		_ = tmp.Close()        // already closed on the success path
+		_ = os.Remove(tmpName) // no-op once the rename succeeded
+	}()
+
+	if err := tmp.Chmod(0600); err != nil {
+		return fmt.Errorf("chmod temp subscriptions: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fmt.Errorf("write temp subscriptions: %w", err)
+	}
+	// Without the sync the rename can land before the bytes do, leaving an empty
+	// file after a power loss.
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("sync temp subscriptions: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp subscriptions: %w", err)
+	}
+	return os.Rename(tmpName, path)
 }
 
 func SaveSubscription(rawURL string) error {

@@ -222,3 +222,21 @@ type timeoutError struct{}
 func (timeoutError) Error() string   { return "i/o timeout" }
 func (timeoutError) Timeout() bool   { return true }
 func (timeoutError) Temporary() bool { return true }
+
+// A JSON subscription may spell the protocol "hysteria" rather than "hy2".
+// Leaving it unnormalized makes RunBenchmark TCP-ping a UDP-only server and
+// report "timeout" where "n/a" is the truth.
+func TestParseXrayJSON_NormalizesHysteria(t *testing.T) {
+	e := parseXrayJSON(map[string]interface{}{
+		"protocol": "hysteria", "address": "a.example.com",
+		"port": float64(443), "password": "x",
+	})
+	if e.Protocol != "hysteria2" {
+		t.Fatalf("Protocol = %q, want hysteria2", e.Protocol)
+	}
+
+	results := RunBenchmark([]SubEntry{e}, time.Second)
+	if got := results[0].String(); got != "n/a" {
+		t.Errorf("benchmark = %q, want n/a", got)
+	}
+}

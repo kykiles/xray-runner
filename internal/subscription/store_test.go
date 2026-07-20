@@ -96,3 +96,41 @@ func TestLoadSubscriptions_WithoutComments(t *testing.T) {
 		t.Errorf("Name[0] = %q, want hostname", subs[0].Name)
 	}
 }
+
+// Guards the rewrite of RemoveSubscription: the entry goes away, the rest
+// survive, and no scratch file is left in the directory.
+func TestRemoveSubscription_RewritesRemainingEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "subscriptions.txt")
+	content := "# A\nhttps://a.example.com/sub\n# B\nhttps://b.example.com/sub\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	orig := subscriptionsFile
+	subscriptionsFile = path
+	defer func() { subscriptionsFile = orig }()
+
+	if err := RemoveSubscription(0); err != nil {
+		t.Fatalf("RemoveSubscription: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected only subscriptions.txt, got %v", names)
+	}
+
+	subs, err := LoadSubscriptions()
+	if err != nil {
+		t.Fatalf("LoadSubscriptions: %v", err)
+	}
+	if len(subs) != 1 || subs[0].URL != "https://b.example.com/sub" {
+		t.Errorf("after removing index 0, got %+v", subs)
+	}
+}
