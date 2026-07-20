@@ -28,6 +28,14 @@ import (
 // leaves generous headroom while still bounding the write.
 const maxUncompressedSize = 512 << 20
 
+// maxDownloadSize bounds an asset whose size the release JSON did not state;
+// when it does, that exact size is the limit instead. maxResponseSize bounds the
+// API responses and the checksum files, which are text and tiny by comparison.
+const (
+	maxDownloadSize = 128 << 20
+	maxResponseSize = 8 << 20
+)
+
 // CoreRepo is the official xray-core repository; its releases carry the core zip
 // per OS/arch. GeoRepo is where the geoip.dat / geosite.dat databases are
 // published — the core releases no longer ship them.
@@ -57,6 +65,14 @@ type Release struct {
 }
 
 func httpClient() *http.Client { return &http.Client{Timeout: 60 * time.Second} }
+
+// downloadClient is for the release artifacts. http.Client.Timeout covers
+// reading the body, and the core zip is ~20 MB, so a flat 60s cap would kill
+// the download on a slow link. Only the wait for response headers is bounded
+// here; the transfer itself is bounded by the caller's context.
+func downloadClient() *http.Client {
+	return &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 30 * time.Second}}
+}
 
 // SameVersion reports whether a release tag names the installed core version.
 // Tags carry a leading "v" (v26.6.27) while the binary reports the bare number
@@ -124,7 +140,7 @@ func getJSON(ctx context.Context, url string, dst any) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GitHub API вернул %s", resp.Status)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize)).Decode(dst); err != nil {
 		return fmt.Errorf("разбор ответа GitHub: %w", err)
 	}
 	return nil
@@ -144,7 +160,7 @@ func httpGetBytes(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %s", resp.Status)
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 }
 
 // fetchChecksum downloads a checksum file next to an asset and extracts the
@@ -260,7 +276,7 @@ func download(ctx context.Context, a Asset) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resp, err := httpClient().Do(req)
+	resp, err := downloadClient().Do(req)
 	if err != nil {
 		return "", fmt.Errorf("скачивание %s: %w", a.Name, err)
 	}
@@ -272,7 +288,28 @@ func download(ctx context.Context, a Asset) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	// The release JSON states the exact asset size, so anything longer is a
+	// server we should not be streaming to disk. Read one byte past the limit to
+	// tell a correctly sized asset from an oversized one.
+	limit := a.Size
+	if limit <= 0 {
+		limit = maxDownloadSize
+	}
+	n, err := io.CopyN(tmp, resp.Body, limit+1)
+	if err != nil && err != io.EOF {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("запись %s: %w", a.Name, err)
+	}
+	if n > limit {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("скачивание %s: размер превышает %d байт", a.Name, limit)
+	}
+	// Flush to disk before anyone renames this file into place: verifySHA256
+	// reads back through the page cache and would not notice a half-written
+	// file that a crash later leaves on disk.
+	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
 		return "", fmt.Errorf("запись %s: %w", a.Name, err)
@@ -313,16 +350,26 @@ func InstallCore(ctx context.Context, a Asset, xrayPath string) error {
 		return err
 	}
 	if err := swap(newPath, xrayPath); err != nil {
+		_ = os.Remove(newPath)
 		return err
 	}
 	return finalizeFile(xrayPath, 0o755)
 }
 
 // InstallGeo downloads both databases into dir, replacing the existing files.
+// Both are fetched and verified before either is swapped in, so a failure on the
+// second one leaves the previous pair intact instead of a half-updated mix.
 func InstallGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
+	staged := make(map[string]string, 2) // dst -> staged .new path
+	cleanup := func() {
+		for _, newPath := range staged {
+			_ = os.Remove(newPath)
+		}
+	}
 	for _, a := range []Asset{geoip, geosite} {
 		src, err := download(ctx, a)
 		if err != nil {
+			cleanup()
 			return err
 		}
 		// The geo repo publishes a "<name>.sha256sum" next to each database.
@@ -332,6 +379,7 @@ func InstallGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
 			slog.Warn("контрольная сумма гео-базы недоступна, устанавливаю без проверки", "asset", a.Name, "error", cerr)
 		} else if verr := verifySHA256(src, want); verr != nil {
 			_ = os.Remove(src)
+			cleanup()
 			return verr
 		}
 		dst := filepath.Join(dir, a.Name)
@@ -340,14 +388,20 @@ func InstallGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
 			// os.Rename fails across filesystems; fall back to a copy.
 			if err := copyFile(src, newPath); err != nil {
 				_ = os.Remove(src)
+				cleanup()
 				return err
 			}
 			_ = os.Remove(src)
 		}
+		staged[dst] = newPath
+	}
+	for dst, newPath := range staged {
 		if err := swap(newPath, dst); err != nil {
+			cleanup()
 			return err
 		}
 		if err := finalizeFile(dst, 0o644); err != nil {
+			cleanup()
 			return err
 		}
 	}
@@ -389,32 +443,45 @@ func extractZipFile(zipPath, want, dst string) error {
 		if filepath.Base(f.Name) != want {
 			continue
 		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		defer rc.Close()
-		out, err := os.Create(dst)
-		if err != nil {
-			return err
-		}
-		// Bound the write so a decompression bomb can't fill the disk (gosec
-		// G110). io.CopyN stops at the cap and reports io.EOF for a normal,
-		// smaller entry; hitting the cap exactly means the entry is oversized.
-		n, err := io.CopyN(out, rc, maxUncompressedSize)
-		if err != nil && err != io.EOF {
-			_ = out.Close()
-			_ = os.Remove(dst)
-			return err
-		}
-		if n == maxUncompressedSize {
-			_ = out.Close()
-			_ = os.Remove(dst)
-			return fmt.Errorf("%s в архиве превышает лимит %d байт", want, maxUncompressedSize)
-		}
-		return out.Close()
+		return writeZipEntry(f, dst)
 	}
 	return fmt.Errorf("%s не найден в архиве", want)
+}
+
+// writeZipEntry writes one zip entry to dst. It is its own function so the
+// readers close on every path without a defer inside the search loop.
+func writeZipEntry(f *zip.File, dst string) error {
+	rc, err := f.Open()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rc.Close() }()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	// Bound the write so a decompression bomb can't fill the disk (gosec
+	// G110). io.CopyN stops at the cap and reports io.EOF for a normal,
+	// smaller entry; hitting the cap exactly means the entry is oversized.
+	n, err := io.CopyN(out, rc, maxUncompressedSize)
+	if err != nil && err != io.EOF {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	if n == maxUncompressedSize {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("%s в архиве превышает лимит %d байт", filepath.Base(f.Name), maxUncompressedSize)
+	}
+	// This file is renamed over the running core, so it must be on disk
+	// before the swap, not just in the page cache.
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	return out.Close()
 }
 
 func copyFile(src, dst string) error {
