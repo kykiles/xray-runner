@@ -15,6 +15,8 @@ type fakeIP struct {
 	findErr     error
 	tunIndex    string
 	tunIndexErr error
+	bindAlias   string
+	bindErr     error
 	cmds        []string
 }
 
@@ -22,6 +24,10 @@ func (f *fakeIP) lookPath(bin string) error { return nil }
 
 func (f *fakeIP) run(bin string, args ...string) ([]byte, error) {
 	joined := strings.Join(args, " ")
+	// Checked first: the DirectBind script names both cmdlets.
+	if strings.Contains(joined, "InterfaceAlias") {
+		return []byte(f.bindAlias), f.bindErr
+	}
 	if strings.Contains(joined, "Find-NetRoute") {
 		return []byte(f.findRoute), f.findErr
 	}
@@ -176,5 +182,45 @@ func TestParseFindNetRoute(t *testing.T) {
 				t.Errorf("got hop=%q idx=%q, want hop=%q idx=%q", hop, idx, tt.hop, tt.idx)
 			}
 		})
+	}
+}
+
+// Windows ignores sockopt.mark, so freedom outbounds are pinned to the physical
+// adapter by name. Xray looks that name up with net.InterfaceByName, which on
+// Windows matches the adapter's InterfaceAlias.
+func TestDirectBind_ReportsPhysicalAdapter(t *testing.T) {
+	f := &fakeIP{bindAlias: "Ethernet\r\n"}
+	withFakeIP(t, f)
+
+	bind, err := DirectBind()
+	if err != nil {
+		t.Fatalf("DirectBind: %v", err)
+	}
+
+	if bind.Interface != "Ethernet" {
+		t.Errorf("Interface = %q, want Ethernet", bind.Interface)
+	}
+	if bind.Mark != 0 {
+		t.Errorf("Mark = %d, want 0: xray does not implement it on windows", bind.Mark)
+	}
+}
+
+// Binding to an empty adapter name would silently disable the escape hatch and
+// bring the routing loop back, so it has to fail loudly instead.
+func TestDirectBind_FailsWhenAdapterIsUnknown(t *testing.T) {
+	f := &fakeIP{bindAlias: "  \r\n"}
+	withFakeIP(t, f)
+
+	if _, err := DirectBind(); err == nil {
+		t.Fatal("expected an error when the physical adapter cannot be named")
+	}
+}
+
+func TestDirectBind_FailsWhenLookupFails(t *testing.T) {
+	f := &fakeIP{bindErr: errors.New("Find-NetRoute failed")}
+	withFakeIP(t, f)
+
+	if _, err := DirectBind(); err == nil {
+		t.Fatal("expected an error when the route lookup fails")
 	}
 }

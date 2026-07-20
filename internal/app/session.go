@@ -245,19 +245,23 @@ type sessionPorts struct {
 }
 
 // buildSessionConfig produces the xray config for the target in the active
-// mode. In TUN mode it also marks the freedom outbounds: the panel's routing
-// sends plenty of traffic out `direct`, and without the mark those packets fall
-// back into the tunnel they left and loop.
+// mode. In TUN mode it also binds the freedom outbounds to the physical path:
+// the panel's routing sends plenty of traffic out `direct`, and unbound those
+// packets fall back into the tunnel they left and loop.
 func (a *App) buildSessionConfig(t *target) (json.RawMessage, sessionPorts, error) {
 	raw, ports, err := a.buildModeConfig(t)
 	if err != nil || a.mode != "tun" {
 		return raw, ports, err
 	}
-	marked, err := xraycfg.MarkDirectOutbounds(raw)
+	bind, err := system.DirectBind()
 	if err != nil {
-		return nil, sessionPorts{}, fmt.Errorf("пометить прямые outbound-ы: %w", err)
+		return nil, sessionPorts{}, fmt.Errorf("определить прямой путь мимо туннеля: %w", err)
 	}
-	return marked, ports, nil
+	bound, err := xraycfg.BindDirectOutbounds(raw, bind)
+	if err != nil {
+		return nil, sessionPorts{}, fmt.Errorf("привязать прямые outbound-ы: %w", err)
+	}
+	return bound, ports, nil
 }
 
 // buildModeConfig picks the config source for the target: a profile as-is, a

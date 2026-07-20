@@ -35,6 +35,12 @@ var ipCmd commander = execCommander{}
 // that — and nothing that belongs to another VPN client on the host.
 var installed *TunRouteConfig
 
+// DirectBind reports how freedom outbounds leave the tunnel on this platform.
+// Linux marks the sockets; EnableTunRouting installs the matching ip rule.
+func DirectBind() (xraycfg.DirectBind, error) {
+	return xraycfg.DirectBind{Mark: xraycfg.DirectFwMark}, nil
+}
+
 // parseRouteGet extracts the gateway and device from `ip route get` output,
 // e.g. "45.150.32.235 via 192.168.31.1 dev wlp3s0 src 192.168.31.94 uid 0".
 // A destination on the local link has no "via" and returns an empty gateway.

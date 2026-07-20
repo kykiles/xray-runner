@@ -8,16 +8,16 @@ import (
 // In TUN mode every packet leaving a freedom outbound has to carry the firewall
 // mark, otherwise the split-default route sends it straight back into the
 // tunnel and the connection loops until it is dropped.
-func TestMarkDirectOutbounds_MarksFreedom(t *testing.T) {
+func TestBindDirectOutbounds_MarksFreedom(t *testing.T) {
 	raw := json.RawMessage(`{"outbounds":[
 		{"tag":"proxy","protocol":"vless"},
 		{"tag":"direct","protocol":"freedom"},
 		{"tag":"block","protocol":"blackhole"}
 	]}`)
 
-	marked, err := MarkDirectOutbounds(raw)
+	marked, err := BindDirectOutbounds(raw, DirectBind{Mark: DirectFwMark})
 	if err != nil {
-		t.Fatalf("MarkDirectOutbounds: %v", err)
+		t.Fatalf("BindDirectOutbounds: %v", err)
 	}
 
 	var cfg struct {
@@ -53,14 +53,14 @@ func TestMarkDirectOutbounds_MarksFreedom(t *testing.T) {
 
 // Panels ship freedom outbounds with their own streamSettings; marking must add
 // to that block, not replace it.
-func TestMarkDirectOutbounds_KeepsExistingStreamSettings(t *testing.T) {
+func TestBindDirectOutbounds_KeepsExistingStreamSettings(t *testing.T) {
 	raw := json.RawMessage(`{"outbounds":[
 		{"tag":"direct","protocol":"freedom","streamSettings":{"sockopt":{"tcpFastOpen":true}}}
 	]}`)
 
-	marked, err := MarkDirectOutbounds(raw)
+	marked, err := BindDirectOutbounds(raw, DirectBind{Mark: DirectFwMark})
 	if err != nil {
-		t.Fatalf("MarkDirectOutbounds: %v", err)
+		t.Fatalf("BindDirectOutbounds: %v", err)
 	}
 
 	var cfg struct {
@@ -85,14 +85,61 @@ func TestMarkDirectOutbounds_KeepsExistingStreamSettings(t *testing.T) {
 	}
 }
 
+// Windows ignores sockopt.mark entirely, so there the freedom outbound is
+// pinned to the physical adapter instead — IP_UNICAST_IF bypasses the routing
+// table, which is what breaks the loop.
+func TestBindDirectOutbounds_PinsInterface(t *testing.T) {
+	raw := json.RawMessage(`{"outbounds":[{"tag":"direct","protocol":"freedom"}]}`)
+
+	bound, err := BindDirectOutbounds(raw, DirectBind{Interface: "Ethernet"})
+	if err != nil {
+		t.Fatalf("BindDirectOutbounds: %v", err)
+	}
+
+	var cfg struct {
+		Outbounds []struct {
+			Stream struct {
+				Sockopt struct {
+					Mark      int    `json:"mark"`
+					Interface string `json:"interface"`
+				} `json:"sockopt"`
+			} `json:"streamSettings"`
+		} `json:"outbounds"`
+	}
+	if err := json.Unmarshal(bound, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cfg.Outbounds[0].Stream.Sockopt.Interface != "Ethernet" {
+		t.Errorf("interface = %q, want Ethernet: %s", cfg.Outbounds[0].Stream.Sockopt.Interface, bound)
+	}
+	// A mark xray cannot honour would only mislead whoever reads the config.
+	if cfg.Outbounds[0].Stream.Sockopt.Mark != 0 {
+		t.Errorf("mark must stay unset on the interface path: %s", bound)
+	}
+}
+
+// A platform with no escape hatch must get the config it would have got before,
+// rather than a half-applied sockopt.
+func TestBindDirectOutbounds_ZeroBindChangesNothing(t *testing.T) {
+	raw := json.RawMessage(`{"outbounds":[{"tag":"direct","protocol":"freedom"}]}`)
+
+	bound, err := BindDirectOutbounds(raw, DirectBind{})
+	if err != nil {
+		t.Fatalf("BindDirectOutbounds: %v", err)
+	}
+	if string(bound) != string(raw) {
+		t.Errorf("config changed: %s", bound)
+	}
+}
+
 // The rest of the config must survive untouched: dns, routing and inbounds are
 // what the session depends on.
-func TestMarkDirectOutbounds_LeavesRestAlone(t *testing.T) {
+func TestBindDirectOutbounds_LeavesRestAlone(t *testing.T) {
 	raw := json.RawMessage(`{"dns":{"servers":["1.1.1.1"]},"routing":{"rules":[{"type":"field"}]},"outbounds":[{"tag":"direct","protocol":"freedom"}]}`)
 
-	marked, err := MarkDirectOutbounds(raw)
+	marked, err := BindDirectOutbounds(raw, DirectBind{Mark: DirectFwMark})
 	if err != nil {
-		t.Fatalf("MarkDirectOutbounds: %v", err)
+		t.Fatalf("BindDirectOutbounds: %v", err)
 	}
 
 	var cfg map[string]json.RawMessage

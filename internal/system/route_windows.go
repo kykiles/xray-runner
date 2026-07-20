@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+
+	"xray-runner/internal/xraycfg"
 )
 
 // splitDefault covers the whole IPv4 space in two halves. Each is more
@@ -23,6 +25,33 @@ var ipCmd commander = execCommander{}
 // installed remembers what EnableTunRouting added so teardown removes exactly
 // that — and nothing that belongs to another VPN client on the host.
 var installed *TunRouteConfig
+
+// bindProbe is the destination used to learn which adapter carries the host's
+// internet traffic. The VPN servers cannot stand in for it: a server on the
+// local link says nothing about the physical default path.
+const bindProbe = "1.1.1.1"
+
+// DirectBind reports how freedom outbounds leave the tunnel on this platform.
+// Windows drops sockopt.mark on the floor — xray implements it for Linux only —
+// so the sockets are pinned to the physical adapter instead. Xray resolves the
+// name through net.InterfaceByName and applies IP_UNICAST_IF, which picks the
+// outgoing adapter directly and so ignores the split default route.
+//
+// This must run before EnableTunRouting: once the split default is in place,
+// Find-NetRoute answers with the tun adapter.
+func DirectBind() (xraycfg.DirectBind, error) {
+	out, err := powershell(fmt.Sprintf(
+		`$r = Find-NetRoute -RemoteIPAddress '%s' -ErrorAction Stop | Select-Object -First 1; (Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction Stop).InterfaceAlias`,
+		bindProbe))
+	if err != nil {
+		return xraycfg.DirectBind{}, fmt.Errorf("определить физический адаптер: %w\n%s", err, out)
+	}
+	alias := strings.TrimSpace(string(out))
+	if alias == "" {
+		return xraycfg.DirectBind{}, fmt.Errorf("физический адаптер не найден")
+	}
+	return xraycfg.DirectBind{Interface: alias}, nil
+}
 
 // parseFindNetRoute reads the "<next hop> <interface index>" line produced by
 // the Find-NetRoute call below. An on-link destination reports 0.0.0.0.
