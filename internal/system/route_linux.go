@@ -5,7 +5,10 @@ package system
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
+
+	"xray-runner/internal/xraycfg"
 )
 
 // splitDefault covers the whole IPv4 space in two halves. Each is more
@@ -13,6 +16,17 @@ import (
 // deleting the physical default route — which stays available for the
 // server exception below and for a clean teardown.
 var splitDefault = []string{"0.0.0.0/1", "128.0.0.0/1"}
+
+// directTable holds a copy of the physical default route. Packets carrying
+// xraycfg.DirectFwMark — everything xray sends out a freedom outbound — are
+// steered here instead of the split default, so traffic the panel routes
+// `direct` leaves through the real uplink rather than looping back into the tun.
+const directTable = "8888"
+
+// markProbe is the destination used to learn the physical default path. The
+// server exceptions cannot stand in for it: a server on the local link has no
+// gateway, which says nothing about how the host reaches the internet.
+const markProbe = "1.1.1.1"
 
 // ipCmd is overridable in tests.
 var ipCmd commander = execCommander{}
@@ -71,6 +85,18 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 		exceptions = append(exceptions, exception{ip: ip, via: via, dev: dev})
 	}
 
+	// The physical path for marked traffic is resolved here, alongside the
+	// server exceptions, for the same reason: after the split default is in
+	// place `ip route get` answers with the tun device.
+	out, err := ipCmd.run("ip", "route", "get", markProbe)
+	if err != nil {
+		return fmt.Errorf("определить физический маршрут по умолчанию: %w\n%s", err, out)
+	}
+	directVia, directDev, err := parseRouteGet(string(out))
+	if err != nil {
+		return fmt.Errorf("разобрать физический маршрут по умолчанию: %w", err)
+	}
+
 	saved := cfg
 	installed = &saved
 
@@ -85,6 +111,22 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 			_ = DisableTunRouting()
 			return fmt.Errorf("исключить сервер %s из туннеля: %w\n%s", e.ip, err, out)
 		}
+	}
+
+	// Marked traffic gets its escape hatch before the split default exists,
+	// otherwise direct connections loop during the gap between the two.
+	directRoute := []string{"route", "add", "default"}
+	if directVia != "" {
+		directRoute = append(directRoute, "via", directVia)
+	}
+	directRoute = append(directRoute, "dev", directDev, "table", directTable)
+	if out, err := ipCmd.run("ip", directRoute...); err != nil {
+		_ = DisableTunRouting()
+		return fmt.Errorf("проложить прямой маршрут мимо туннеля: %w\n%s", err, out)
+	}
+	if out, err := ipCmd.run("ip", "rule", "add", "fwmark", strconv.Itoa(xraycfg.DirectFwMark), "lookup", directTable); err != nil {
+		_ = DisableTunRouting()
+		return fmt.Errorf("вывести прямой трафик из туннеля: %w\n%s", err, out)
 	}
 
 	for _, half := range splitDefault {
@@ -111,6 +153,8 @@ func DisableTunRouting() error {
 	for _, half := range splitDefault {
 		_, _ = ipCmd.run("ip", "route", "del", half, "dev", installed.Iface)
 	}
+	_, _ = ipCmd.run("ip", "rule", "del", "fwmark", strconv.Itoa(xraycfg.DirectFwMark), "lookup", directTable)
+	_, _ = ipCmd.run("ip", "route", "flush", "table", directTable)
 	for _, ip := range installed.ServerIPs {
 		_, _ = ipCmd.run("ip", "route", "del", ip+"/32")
 	}

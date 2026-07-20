@@ -92,12 +92,77 @@ func TestEnableTunRouting_ExcludesServerViaPhysicalGateway(t *testing.T) {
 	}
 }
 
+// Traffic the panel's routing sends out `direct` leaves xray through a freedom
+// outbound carrying the firewall mark. Without a rule lifting those packets out
+// of the split default they re-enter the tun they just left and loop forever.
+func TestEnableTunRouting_LiftsMarkedTrafficOutOfTheTunnel(t *testing.T) {
+	f := &fakeIP{routeGetOut: wanRouteGet}
+	withFakeIP(t, f)
+
+	if err := EnableTunRouting(tunCfg); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+
+	if !f.has("route add default via 192.168.31.1 dev wlp3s0 table "+directTable) ||
+		!f.has("rule add fwmark 255 lookup "+directTable) {
+		t.Errorf("marked traffic has no physical path, got: %v", f.cmds)
+	}
+}
+
+// The rule must be in place before the split default exists, or direct traffic
+// loops during the window between the two.
+func TestEnableTunRouting_InstallsMarkRuleBeforeSplitDefault(t *testing.T) {
+	f := &fakeIP{routeGetOut: wanRouteGet}
+	withFakeIP(t, f)
+
+	if err := EnableTunRouting(tunCfg); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+
+	rule, split := -1, -1
+	for i, c := range f.cmds {
+		if strings.Contains(c, "rule add fwmark") {
+			rule = i
+		}
+		if strings.Contains(c, "route add 0.0.0.0/1") {
+			split = i
+		}
+	}
+	if rule < 0 || split < 0 || rule > split {
+		t.Errorf("mark rule (%d) must come before split default (%d): %v", rule, split, f.cmds)
+	}
+}
+
+// A leftover ip rule survives the process and silently steers the host's
+// traffic into an empty table on the next boot.
+func TestDisableTunRouting_RemovesMarkRuleAndTable(t *testing.T) {
+	f := &fakeIP{routeGetOut: wanRouteGet}
+	withFakeIP(t, f)
+
+	if err := EnableTunRouting(tunCfg); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	f.cmds = nil
+
+	DisableTunRouting()
+
+	for _, want := range []string{
+		"rule del fwmark 255 lookup " + directTable,
+		"route flush table " + directTable,
+	} {
+		if !f.has(want) {
+			t.Errorf("teardown missing %q, got: %v", want, f.cmds)
+		}
+	}
+}
+
 // A balancer profile rotates across all its servers, so every one of them must
 // stay on the physical path — not just the first.
 func TestEnableTunRouting_ExcludesEveryServerOfBalancerProfile(t *testing.T) {
 	f := &fakeIP{routeGets: map[string]string{
 		"45.150.32.235": wanRouteGet,
 		"203.0.113.7":   "203.0.113.7 via 192.168.31.1 dev wlp3s0 src 192.168.31.94 ",
+		markProbe:       wanRouteGet,
 	}}
 	withFakeIP(t, f)
 
