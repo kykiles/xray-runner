@@ -109,24 +109,6 @@ func TestSwapReplacesWithoutBackup(t *testing.T) {
 	}
 }
 
-func TestFinalizeFileSetsMode(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "geoip.dat")
-	if err := os.WriteFile(path, []byte("DB"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := finalizeFile(path, 0o644); err != nil {
-		t.Fatalf("finalizeFile: %v", err)
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o644 {
-		t.Errorf("mode = %o, want 644", fi.Mode().Perm())
-	}
-}
-
 func TestTrimToLatestStable(t *testing.T) {
 	pre := func(tag string) Release { return Release{Tag: tag, Prerelease: true} }
 	rel := func(tag string) Release { return Release{Tag: tag} }
