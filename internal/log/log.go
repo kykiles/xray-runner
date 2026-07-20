@@ -23,7 +23,10 @@ func Init(cfg *config.Config) func() {
 		logFile = "xray-runner.log"
 	}
 
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	// Truncated, not appended: xray's own output lands here, and a TUN session
+	// that hits a routing loop writes tens of megabytes in minutes. Keeping only
+	// the current run makes the file readable and bounds it by one run.
+	f, err := os.OpenFile(logFile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		// The only stderr write we allow: without it a broken log path would be
 		// invisible, since there is no console logging to fall back on.
