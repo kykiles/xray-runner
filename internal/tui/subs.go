@@ -58,6 +58,8 @@ type subsModel struct {
 	// default so the personal token does not sit on screen (S-3); revealing is
 	// per-row and deliberate.
 	reveal bool
+	width  int // terminal width; 0 until the first WindowSizeMsg
+	height int // terminal height; 0 until the first WindowSizeMsg
 }
 
 // SelectSubscription shows the subscription list. On SubsSelected the returned
@@ -94,6 +96,11 @@ func (m subsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.action = SubsSelected
 		return m, tea.Quit
+	}
+
+	if ws, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width, m.height = ws.Width, ws.Height
+		return m, nil
 	}
 
 	key, ok := msg.(tea.KeyMsg)
@@ -223,7 +230,7 @@ func (m subsModel) updateConfirmDelete(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m subsModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Мои подписки") + "\n\n")
+	b.WriteString(renderLogo(m.width, m.height) + "\n\n")
 
 	if m.mode == subsAdding {
 		b.WriteString("  Вставьте URL подписки (http/https) или ссылку на сервер\n")
