@@ -153,3 +153,41 @@ func TestBindDirectOutbounds_LeavesRestAlone(t *testing.T) {
 		t.Errorf("routing changed: %s", cfg["routing"])
 	}
 }
+
+// Panel exports carry explicit nulls. Unmarshalling `null` into a map sets it
+// back to nil, so the marking code has to re-make the map before writing to it —
+// otherwise a subscription can crash the process on connect.
+func TestBindDirectOutbounds_NullBlocks(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{"null streamSettings", `{"outbounds":[{"tag":"direct","protocol":"freedom","streamSettings":null}]}`},
+		{"null sockopt", `{"outbounds":[{"tag":"direct","protocol":"freedom","streamSettings":{"sockopt":null}}]}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			marked, err := BindDirectOutbounds(json.RawMessage(tt.raw), DirectBind{Mark: DirectFwMark})
+			if err != nil {
+				t.Fatalf("BindDirectOutbounds: %v", err)
+			}
+
+			var cfg struct {
+				Outbounds []struct {
+					Stream struct {
+						Sockopt struct {
+							Mark int `json:"mark"`
+						} `json:"sockopt"`
+					} `json:"streamSettings"`
+				} `json:"outbounds"`
+			}
+			if err := json.Unmarshal(marked, &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if cfg.Outbounds[0].Stream.Sockopt.Mark != DirectFwMark {
+				t.Errorf("mark = %d, want %d: %s", cfg.Outbounds[0].Stream.Sockopt.Mark, DirectFwMark, marked)
+			}
+		})
+	}
+}

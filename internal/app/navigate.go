@@ -36,7 +36,11 @@ func (t target) isProfile() bool { return t.entry == nil }
 // has no profile structure (URL list, bare link) simply finds no owner and stays
 // on the template path.
 func (t *target) attachProfile(profiles []subscription.Profile) {
-	owner := subscription.ProfileFor(profiles, t.entry)
+	t.attachOwner(subscription.ProfileFor(profiles, t.entry))
+}
+
+// attachOwner links the server to an already known profile.
+func (t *target) attachOwner(owner *subscription.Profile) {
 	if owner == nil {
 		return
 	}
@@ -118,6 +122,21 @@ func (n *nav) entries() []subscription.SubEntry {
 		return subscription.FlattenNamed(n.profiles)
 	}
 	return n.profiles[n.profIdx].Entries
+}
+
+// owningProfile returns the profile whose routing a picked server must run
+// under. Outside flat mode the server screen was opened from one specific
+// profile, and that is the answer — a panel that publishes an autoselect
+// profile next to per-location ones lists the same endpoint several times under
+// different outbound tags, so matching by endpoint would pin the tag against a
+// profile the user never chose and silently connect to another server. Only the
+// flat screen, which mixes every profile's servers, has no opened profile to
+// go by and falls back to the endpoint match.
+func (n *nav) owningProfile(e *subscription.SubEntry) *subscription.Profile {
+	if !n.flat && n.profIdx < len(n.profiles) {
+		return &n.profiles[n.profIdx]
+	}
+	return subscription.ProfileFor(n.profiles, e)
 }
 
 // profileTitle names the profile the servers came from; a flat subscription has
@@ -296,7 +315,7 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 		profileName: a.nav.profileTitle(),
 		entry:       selected,
 	}
-	t.attachProfile(a.nav.profiles)
+	t.attachOwner(a.nav.owningProfile(selected))
 	return t, nil
 }
 

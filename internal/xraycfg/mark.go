@@ -67,11 +67,16 @@ func BindDirectOutbounds(raw json.RawMessage, bind DirectBind) (json.RawMessage,
 // withBind adds the binding to an outbound's sockopt, keeping whatever stream
 // and sockopt settings the panel already configured.
 func withBind(raw json.RawMessage, bind DirectBind) (json.RawMessage, error) {
+	// An explicit `null` unmarshals into a nil map rather than leaving the
+	// empty one alone, so both blocks are re-made before anything is written.
 	stream := map[string]json.RawMessage{}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &stream); err != nil {
 			return nil, fmt.Errorf("streamSettings: %w", err)
 		}
+	}
+	if stream == nil {
+		stream = map[string]json.RawMessage{}
 	}
 
 	sockopt := map[string]json.RawMessage{}
@@ -79,6 +84,9 @@ func withBind(raw json.RawMessage, bind DirectBind) (json.RawMessage, error) {
 		if err := json.Unmarshal(stream["sockopt"], &sockopt); err != nil {
 			return nil, fmt.Errorf("sockopt: %w", err)
 		}
+	}
+	if sockopt == nil {
+		sockopt = map[string]json.RawMessage{}
 	}
 
 	if bind.Mark != 0 {

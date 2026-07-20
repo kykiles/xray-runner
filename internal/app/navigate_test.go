@@ -62,3 +62,52 @@ func TestServerHosts_BareEntry(t *testing.T) {
 		t.Errorf("hosts = %v, want [a.invalid]", hosts)
 	}
 }
+
+// A panel commonly publishes an autoselect profile alongside per-location ones,
+// so the same server appears in several profiles under different outbound tags.
+// The server screen was opened from a known profile, and that profile — not the
+// first one holding a matching endpoint — is the one whose routing must run:
+// pinning the tag against the wrong profile silently connects elsewhere.
+func TestOwningProfile_UsesTheOpenedProfileNotFirstMatch(t *testing.T) {
+	serverB := subscription.SubEntry{
+		Protocol: "vless", Address: "b.example.com", Port: 443,
+		UUID: "11111111-2222-3333-4444-555555555555",
+	}
+	autoselect := subscription.Profile{
+		Name: "Автовыбор",
+		Raw:  []byte(`{"remarks":"Автовыбор"}`),
+		Entries: []subscription.SubEntry{
+			{Protocol: "vless", Address: "a.example.com", Port: 443, UUID: "aaaaaaaa-2222-3333-4444-555555555555"},
+			serverB,
+		},
+		Balancer: &subscription.BalancerInfo{Tag: "balancer", Strategy: "random"},
+	}
+	germany := subscription.Profile{
+		Name:    "Germany",
+		Raw:     []byte(`{"remarks":"Germany"}`),
+		Entries: []subscription.SubEntry{serverB},
+	}
+	profiles := []subscription.Profile{autoselect, germany}
+
+	t.Run("expanded profile wins over first match", func(t *testing.T) {
+		n := &nav{profiles: profiles, profIdx: 1}
+		got := n.owningProfile(&serverB)
+		if got == nil {
+			t.Fatal("owningProfile returned nil")
+		}
+		if got.Name != "Germany" {
+			t.Errorf("owningProfile = %q, want %q", got.Name, "Germany")
+		}
+	})
+
+	t.Run("flat list falls back to endpoint match", func(t *testing.T) {
+		n := &nav{profiles: profiles, flat: true}
+		got := n.owningProfile(&serverB)
+		if got == nil {
+			t.Fatal("owningProfile returned nil")
+		}
+		if got.Name != "Автовыбор" {
+			t.Errorf("owningProfile = %q, want %q", got.Name, "Автовыбор")
+		}
+	})
+}
