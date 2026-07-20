@@ -3,23 +3,14 @@ package xraycfg
 import (
 	"encoding/base64"
 	"fmt"
-	"net"
 	"net/url"
-	"strconv"
 	"strings"
 )
 
 func BuildSSOutbound(u *url.URL) (*SSOutbound, error) {
-	host, portStr, err := net.SplitHostPort(u.Host)
+	host, port, err := splitHostPort(u.Host)
 	if err != nil {
-		return nil, fmt.Errorf("parse host:port: %w", err)
-	}
-	if strings.Contains(host, ":") {
-		return nil, fmt.Errorf("IPv6 addresses are not supported (IPv6 is disabled): %s", host)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid port %q: %w", portStr, err)
+		return nil, err
 	}
 
 	b64 := u.User.Username()

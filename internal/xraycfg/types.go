@@ -1,9 +1,6 @@
 package xraycfg
 
-import (
-	"encoding/json"
-	"fmt"
-)
+import "encoding/json"
 
 const TunInterfaceName = "xray-tun"
 
@@ -203,11 +200,17 @@ type TUNSettings struct {
 }
 
 func BuildTUNInbound() Inbound {
-	settings := fmt.Sprintf(`{"mtu":9000,"address":["%s/24"],"networks":["tcp","udp"],"name":%q}`, TunAddr, TunInterfaceName)
+	// The settings are a fixed struct, so marshalling cannot fail.
+	settings, _ := json.Marshal(TUNSettings{
+		MTU:           9000,
+		Address:       []string{TunAddr + "/24"},
+		Networks:      []string{"tcp", "udp"},
+		InterfaceName: TunInterfaceName,
+	})
 	return Inbound{
 		Tag:      "tun",
 		Protocol: "tun",
-		Settings: json.RawMessage(settings),
+		Settings: settings,
 		Sniffing: &SniffingConfig{
 			Enabled:      true,
 			RouteOnly:    true,

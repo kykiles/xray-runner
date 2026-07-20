@@ -8,17 +8,31 @@ import (
 	"strings"
 )
 
-func BuildVLESSOutbound(u *url.URL) (*VLESSOutbound, error) {
-	host, portStr, err := net.SplitHostPort(u.Host)
+// splitHostPort is the address check every builder shares (M-3): IPv6 is
+// unsupported while the tunnel runs v4-only, and a port outside 1..65535 must
+// fail here rather than deep inside xray at launch.
+func splitHostPort(hostport string) (string, int, error) {
+	host, portStr, err := net.SplitHostPort(hostport)
 	if err != nil {
-		return nil, fmt.Errorf("parse host:port: %w", err)
+		return "", 0, fmt.Errorf("parse host:port: %w", err)
 	}
 	if strings.Contains(host, ":") {
-		return nil, fmt.Errorf("IPv6 addresses are not supported (IPv6 is disabled): %s", host)
+		return "", 0, fmt.Errorf("IPv6 addresses are not supported (IPv6 is disabled): %s", host)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid port %q: %w", portStr, err)
+		return "", 0, fmt.Errorf("invalid port %q: %w", portStr, err)
+	}
+	if port < 1 || port > 65535 {
+		return "", 0, fmt.Errorf("port %d out of range 1..65535", port)
+	}
+	return host, port, nil
+}
+
+func BuildVLESSOutbound(u *url.URL) (*VLESSOutbound, error) {
+	host, port, err := splitHostPort(u.Host)
+	if err != nil {
+		return nil, err
 	}
 	uuid := u.User.Username()
 	q := u.Query()
@@ -130,6 +144,11 @@ func setSecuritySettings(ss *StreamSettings, q url.Values) {
 		}
 		if alpn := q.Get("alpn"); alpn != "" {
 			tls.ALPN = strings.Split(alpn, ",")
+		}
+		// M-1: the caller only sets this after checking its own opt-in, so a
+		// subscription alone can never turn certificate verification off.
+		if ai := q.Get("allowInsecure"); ai == "1" || ai == "true" {
+			tls.AllowInsecure = true
 		}
 		ss.TLSSettings = tls
 	}

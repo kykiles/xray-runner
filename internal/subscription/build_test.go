@@ -114,6 +114,45 @@ func TestBuildVLESS_TransportSettings(t *testing.T) {
 	}
 }
 
+// TestBuildOutbound_AllowInsecure covers M-1: the local ALLOW_INSECURE opt-in
+// used to reach hysteria2 only, so vless/trojan/vmess silently kept certificate
+// verification on. The subscription's own flag must still be powerless without
+// the local opt-in (S-1).
+func TestBuildOutbound_AllowInsecure(t *testing.T) {
+	base := map[string]SubEntry{
+		"vless":  {Protocol: "vless", Address: "a", Port: 443, UUID: "u", Security: "tls", SNI: "s.example"},
+		"trojan": {Protocol: "trojan", Address: "a", Port: 443, Password: "p", Security: "tls", SNI: "s.example"},
+		"vmess":  {Protocol: "vmess", Address: "a", Port: 443, UUID: "u", Security: "tls", SNI: "s.example"},
+	}
+
+	for name, e := range base {
+		t.Run(name+"_opted_in", func(t *testing.T) {
+			entry := e
+			entry.Insecure = true
+			entry.AllowInsecure = true
+			raw, err := BuildOutboundJSON(&entry)
+			if err != nil {
+				t.Fatalf("BuildOutboundJSON: %v", err)
+			}
+			if !strings.Contains(string(raw), `"allowInsecure":true`) {
+				t.Errorf("expected allowInsecure in JSON:\n%s", raw)
+			}
+		})
+
+		t.Run(name+"_no_local_opt_in", func(t *testing.T) {
+			entry := e
+			entry.Insecure = true
+			raw, err := BuildOutboundJSON(&entry)
+			if err != nil {
+				t.Fatalf("BuildOutboundJSON: %v", err)
+			}
+			if strings.Contains(string(raw), "allowInsecure") {
+				t.Errorf("subscription flag alone must not disable verification:\n%s", raw)
+			}
+		})
+	}
+}
+
 func TestEncodeURL_TrojanRoundTrip(t *testing.T) {
 	e := SubEntry{
 		Protocol: "trojan", Address: "tr.example.com", Port: 8443,

@@ -113,6 +113,11 @@ func setTransportQuery(q url.Values, e *SubEntry) {
 	if e.XHTTPMode != "" {
 		q.Set("mode", e.XHTTPMode)
 	}
+	// M-1/S-1: honor the subscription's insecure flag only behind the local
+	// opt-in. Without this the ALLOW_INSECURE setting reached hysteria2 alone.
+	if e.Insecure && e.AllowInsecure {
+		q.Set("allowInsecure", "1")
+	}
 }
 
 func buildTrojan(e *SubEntry) (json.RawMessage, error) {
@@ -200,6 +205,10 @@ func buildVMess(e *SubEntry) (json.RawMessage, error) {
 		}
 		if e.ALPN != "" {
 			tls.ALPN = strings.Split(e.ALPN, ",")
+		}
+		// M-1/S-1: same opt-in gate as the other protocols.
+		if e.Insecure && e.AllowInsecure {
+			tls.AllowInsecure = true
 		}
 		ss.TLSSettings = tls
 	case "reality":

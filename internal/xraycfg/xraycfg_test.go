@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -86,6 +87,94 @@ func TestBuildVLESSOutboundErrors(t *testing.T) {
 	})
 }
 
+// TestBuildOutbounds_RejectOutOfRangePort covers M-3: strconv.Atoi happily
+// accepts 0 and 99999, so a broken link used to surface as an opaque xray
+// runtime error instead of a parse failure.
+func TestBuildOutbounds_RejectOutOfRangePort(t *testing.T) {
+	ports := []string{"0", "99999", "-1"}
+	for _, p := range ports {
+		t.Run("vless_"+p, func(t *testing.T) {
+			u := &url.URL{Scheme: "vless", Host: "example.com:" + p, User: url.User("uuid")}
+			if _, err := BuildVLESSOutbound(u); err == nil {
+				t.Fatalf("port %s: expected error, got nil", p)
+			}
+		})
+		t.Run("trojan_"+p, func(t *testing.T) {
+			u := &url.URL{Scheme: "trojan", Host: "example.com:" + p, User: url.User("secret")}
+			if _, err := BuildTrojanOutbound(u); err == nil {
+				t.Fatalf("port %s: expected error, got nil", p)
+			}
+		})
+		t.Run("ss_"+p, func(t *testing.T) {
+			u := &url.URL{Scheme: "ss", Host: "example.com:" + p, User: url.User("YWVzLTI1Ni1nY206c2VjcmV0")}
+			if _, err := BuildSSOutbound(u); err == nil {
+				t.Fatalf("port %s: expected error, got nil", p)
+			}
+		})
+	}
+}
+
+// TestSecuritySettings_AllowInsecure covers M-1: the caller's opt-in has to
+// reach TLSSettings. Reality has no X.509 verification to switch off, so the
+// flag must never appear there.
+func TestSecuritySettings_AllowInsecure(t *testing.T) {
+	t.Run("tls_honors_flag", func(t *testing.T) {
+		u, err := url.Parse("vless://uuid@example.com:443?security=tls&sni=a.com&allowInsecure=1")
+		if err != nil {
+			t.Fatalf("parse URL: %v", err)
+		}
+		ob, err := BuildVLESSOutbound(u)
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		if ob.Stream.TLSSettings == nil || !ob.Stream.TLSSettings.AllowInsecure {
+			t.Fatal("expected AllowInsecure to be set")
+		}
+	})
+
+	t.Run("tls_defaults_off", func(t *testing.T) {
+		u, err := url.Parse("vless://uuid@example.com:443?security=tls&sni=a.com")
+		if err != nil {
+			t.Fatalf("parse URL: %v", err)
+		}
+		ob, err := BuildVLESSOutbound(u)
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		if ob.Stream.TLSSettings.AllowInsecure {
+			t.Fatal("AllowInsecure must stay off without the flag")
+		}
+	})
+
+	t.Run("trojan_honors_flag", func(t *testing.T) {
+		u, err := url.Parse("trojan://secret@example.com:443?security=tls&allowInsecure=true")
+		if err != nil {
+			t.Fatalf("parse URL: %v", err)
+		}
+		ob, err := BuildTrojanOutbound(u)
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		if ob.Stream.TLSSettings == nil || !ob.Stream.TLSSettings.AllowInsecure {
+			t.Fatal("expected AllowInsecure to be set")
+		}
+	})
+
+	t.Run("reality_ignores_flag", func(t *testing.T) {
+		u, err := url.Parse("vless://uuid@example.com:443?security=reality&pbk=k&allowInsecure=1")
+		if err != nil {
+			t.Fatalf("parse URL: %v", err)
+		}
+		ob, err := BuildVLESSOutbound(u)
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		if ob.Stream.TLSSettings != nil {
+			t.Fatal("reality must not produce tlsSettings")
+		}
+	})
+}
+
 func TestBuildSSOutboundErrors(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -106,6 +195,164 @@ func TestBuildSSOutboundErrors(t *testing.T) {
 				t.Fatal("expected error, got nil")
 			}
 		})
+	}
+}
+
+// TestTransportSettings covers L-4: every transport branch of
+// setTransportSettings, shared by vless and trojan, was untested.
+func TestTransportSettings(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		check func(*testing.T, *StreamSettings)
+	}{
+		{"ws", "type=ws&path=/p&host=h.example", func(t *testing.T, ss *StreamSettings) {
+			if ss.Network != "ws" || ss.WSSettings == nil {
+				t.Fatalf("no ws settings: %+v", ss)
+			}
+			if ss.WSSettings.Path != "/p" || ss.WSSettings.Headers.Host != "h.example" {
+				t.Errorf("ws settings = %+v", ss.WSSettings)
+			}
+		}},
+		{"grpc_multi", "type=grpc&serviceName=svc&mode=multi&authority=a.example", func(t *testing.T, ss *StreamSettings) {
+			if ss.GRPCSettings == nil {
+				t.Fatal("no grpc settings")
+			}
+			if ss.GRPCSettings.ServiceName != "svc" || !ss.GRPCSettings.MultiMode || ss.GRPCSettings.Authority != "a.example" {
+				t.Errorf("grpc settings = %+v", ss.GRPCSettings)
+			}
+		}},
+		{"splithttp_normalizes_to_xhttp", "type=splithttp&path=/x&host=h.example&mode=stream-one", func(t *testing.T, ss *StreamSettings) {
+			if ss.Network != "xhttp" {
+				t.Errorf("network = %q, want xhttp", ss.Network)
+			}
+			if ss.XHTTPSettings == nil || ss.XHTTPSettings.Mode != "stream-one" || ss.XHTTPSettings.Path != "/x" {
+				t.Errorf("xhttp settings = %+v", ss.XHTTPSettings)
+			}
+		}},
+		{"httpupgrade", "type=httpupgrade&path=/hu&host=h.example", func(t *testing.T, ss *StreamSettings) {
+			if ss.HTTPUpgradeSettings == nil || ss.HTTPUpgradeSettings.Path != "/hu" {
+				t.Errorf("httpupgrade settings = %+v", ss.HTTPUpgradeSettings)
+			}
+		}},
+		{"no_type_defaults_to_tcp", "", func(t *testing.T, ss *StreamSettings) {
+			if ss.Network != "tcp" {
+				t.Errorf("network = %q, want tcp", ss.Network)
+			}
+		}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			u, err := url.Parse("vless://uuid@example.com:443?" + c.query)
+			if err != nil {
+				t.Fatalf("parse URL: %v", err)
+			}
+			ob, err := BuildVLESSOutbound(u)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			c.check(t, ob.Stream)
+		})
+	}
+}
+
+// TestBuildTrojanOutbound covers L-4: trojan had no test of its own even though
+// it shares the transport/security helpers with vless.
+func TestBuildTrojanOutbound(t *testing.T) {
+	u, err := url.Parse("trojan://s3cret@tr.example.com:8443?type=ws&path=/t&security=tls&sni=sni.example&alpn=h2,http/1.1")
+	if err != nil {
+		t.Fatalf("parse URL: %v", err)
+	}
+	ob, err := BuildTrojanOutbound(u)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if ob.Tag != "proxy" || ob.Protocol != "trojan" {
+		t.Errorf("tag/protocol = %s/%s", ob.Tag, ob.Protocol)
+	}
+	srv := ob.Settings.Servers[0]
+	if srv.Address != "tr.example.com" || srv.Port != 8443 || srv.Password != "s3cret" {
+		t.Errorf("server = %+v", srv)
+	}
+	if ob.Stream.WSSettings == nil || ob.Stream.WSSettings.Path != "/t" {
+		t.Errorf("ws settings = %+v", ob.Stream.WSSettings)
+	}
+	if ob.Stream.TLSSettings.ServerName != "sni.example" {
+		t.Errorf("sni = %q", ob.Stream.TLSSettings.ServerName)
+	}
+	if !reflect.DeepEqual(ob.Stream.TLSSettings.ALPN, []string{"h2", "http/1.1"}) {
+		t.Errorf("alpn = %v", ob.Stream.TLSSettings.ALPN)
+	}
+}
+
+// TestAddCatchAllRule covers L-4: the rule that sends everything unmatched to
+// the proxy must land last, after the template's own rules.
+func TestAddCatchAllRule(t *testing.T) {
+	rulesOf := func(t *testing.T, raw json.RawMessage) []map[string]interface{} {
+		t.Helper()
+		var r struct {
+			Rules []map[string]interface{} `json:"rules"`
+		}
+		if err := json.Unmarshal(raw, &r); err != nil {
+			t.Fatalf("unmarshal routing: %v", err)
+		}
+		return r.Rules
+	}
+
+	t.Run("appends_after_existing", func(t *testing.T) {
+		rules := rulesOf(t, AddCatchAllRule(json.RawMessage(`{"rules":[{"outboundTag":"direct","domain":["geosite:ru"]}]}`)))
+		if len(rules) != 2 {
+			t.Fatalf("rules = %d, want 2", len(rules))
+		}
+		if rules[0]["outboundTag"] != "direct" {
+			t.Errorf("existing rule moved: %+v", rules[0])
+		}
+		if rules[1]["outboundTag"] != "proxy" || rules[1]["network"] != "tcp,udp" {
+			t.Errorf("catch-all = %+v", rules[1])
+		}
+	})
+
+	t.Run("nil_routing", func(t *testing.T) {
+		if rules := rulesOf(t, AddCatchAllRule(nil)); len(rules) != 1 {
+			t.Fatalf("rules = %d, want 1", len(rules))
+		}
+	})
+
+	t.Run("malformed_degrades_to_catch_all", func(t *testing.T) {
+		if rules := rulesOf(t, AddCatchAllRule(json.RawMessage(`{broken`))); len(rules) != 1 {
+			t.Fatalf("rules = %d, want 1", len(rules))
+		}
+	})
+}
+
+// TestMergeConfig covers L-4: the proxy outbound has to come first, since xray
+// treats the first outbound as the default for unmatched traffic.
+func TestMergeConfig(t *testing.T) {
+	tc := &XrayConfig{
+		Inbounds:  []Inbound{{Tag: "socks", Port: 1080, Protocol: "socks"}},
+		Outbounds: []json.RawMessage{json.RawMessage(`{"tag":"direct","protocol":"freedom"}`)},
+		Routing:   json.RawMessage(`{"rules":[]}`),
+		Log:       &LogConfig{Loglevel: "debug"},
+	}
+
+	got := MergeConfig(tc, json.RawMessage(`{"tag":"proxy","protocol":"vless"}`))
+
+	if len(got.Outbounds) != 2 {
+		t.Fatalf("outbounds = %d, want 2", len(got.Outbounds))
+	}
+	if OutboundTag(got.Outbounds[0]) != "proxy" {
+		t.Errorf("first outbound = %q, want proxy", OutboundTag(got.Outbounds[0]))
+	}
+	if OutboundTag(got.Outbounds[1]) != "direct" {
+		t.Errorf("second outbound = %q, want direct", OutboundTag(got.Outbounds[1]))
+	}
+	// The caller owns the log level, so MergeConfig must not carry one over.
+	if got.Log != nil {
+		t.Errorf("log = %+v, want nil", got.Log)
+	}
+	if len(got.Inbounds) != 1 || got.Inbounds[0].Tag != "socks" {
+		t.Errorf("inbounds = %+v", got.Inbounds)
 	}
 }
 
@@ -192,5 +439,23 @@ func TestBuildTUNInboundInterfaceName(t *testing.T) {
 	}
 	if settings.Name != TunInterfaceName {
 		t.Errorf("tun settings name = %q, want %q", settings.Name, TunInterfaceName)
+	}
+}
+
+// TestBuildTUNInboundSettings pins the whole settings block so L-2 (building it
+// from the TUNSettings struct instead of a format string) cannot drift.
+func TestBuildTUNInboundSettings(t *testing.T) {
+	var got TUNSettings
+	if err := json.Unmarshal(BuildTUNInbound().Settings, &got); err != nil {
+		t.Fatalf("unmarshal tun settings: %v", err)
+	}
+	want := TUNSettings{
+		MTU:           9000,
+		Address:       []string{TunAddr + "/24"},
+		Networks:      []string{"tcp", "udp"},
+		InterfaceName: TunInterfaceName,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("tun settings = %+v, want %+v", got, want)
 	}
 }
