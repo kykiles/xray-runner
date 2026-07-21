@@ -170,8 +170,16 @@ func (m profilesModel) View() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Серверы") + "\n\n")
 
-	b.WriteString("  " + header(fmt.Sprintf("  %s %s %s",
-		pad("NAME", 30), pad("SERVERS", 8), "BALANCER")))
+	// The PING column appears only once a measurement is running or done, so the
+	// list stays narrow until there is anything to show there.
+	showPing := m.benching || len(m.results) > 0
+
+	head := fmt.Sprintf("  %s %s %s",
+		pad("NAME", 30), pad("SERVERS", 8), pad("BALANCER", balancerWidth))
+	if showPing {
+		head += "  " + padLeft("PING", pingWidth)
+	}
+	b.WriteString("  " + header(head))
 
 	keys := "  ↑/↓ выбор · enter подключиться · → раскрыть серверы · ← назад · q выход"
 	if m.bench != nil {
@@ -203,10 +211,16 @@ func (m profilesModel) View() string {
 		if name == "" {
 			name = "(без имени)"
 		}
+		mode := truncate(p.Mode(), balancerWidth)
+		if showPing {
+			// Pad BALANCER to a fixed width so the PING numbers behind it share one
+			// right-aligned column instead of drifting with the mode length.
+			mode = pad(mode, balancerWidth)
+		}
 		line := fmt.Sprintf("%s %s %s",
 			pad(truncate(name, 30), 30),
 			pad(fmt.Sprintf("%d", len(p.Entries)), 8),
-			p.Mode())
+			mode)
 		if i == m.cursor {
 			line = selectedStyle.Render(line)
 		}
@@ -216,9 +230,9 @@ func (m profilesModel) View() string {
 			if r.Error != nil {
 				style = errStyle
 			}
-			line += "  " + style.Render("▸ "+r.String())
+			line += "  " + style.Render(padLeft(r.String(), pingWidth))
 		} else if m.benching {
-			line += "  " + dimStyle.Render("▸ ...")
+			line += "  " + dimStyle.Render(padLeft("...", pingWidth))
 		}
 		b.WriteString("  " + cursor + clip(line, m.width-4) + "\n")
 	}

@@ -32,11 +32,13 @@ var supportedProtocols = map[string]bool{
 	"hysteria":  true,
 }
 
-// Fixed column widths for the server table: HOST is padded only while the PING
-// column is shown, PING fits the widest cell ("timeout").
+// Fixed column widths for the server and profile tables: the last column before
+// PING (HOST, BALANCER) is padded only while the PING column is shown, PING fits
+// the widest cell ("timeout").
 const (
-	hostWidth = 28
-	pingWidth = 7
+	hostWidth     = 28
+	balancerWidth = 20 // "balancer/leastPing" and friends
+	pingWidth     = 7
 )
 
 type benchResultMsg subscription.BenchmarkResult
