@@ -32,6 +32,13 @@ var supportedProtocols = map[string]bool{
 	"hysteria":  true,
 }
 
+// Fixed column widths for the server table: HOST is padded only while the PING
+// column is shown, PING fits the widest cell ("timeout").
+const (
+	hostWidth = 28
+	pingWidth = 7
+)
+
 type benchResultMsg subscription.BenchmarkResult
 type benchDoneMsg struct{}
 type refreshDoneMsg struct {
@@ -383,14 +390,22 @@ func (m serversModel) View() string {
 		keys = "  фильтр: поиск по всем столбцам · enter применить · esc сбросить"
 	}
 
+	// The PING column appears only once a measurement is running or done, so the
+	// list stays narrow until there is anything to show there.
+	showPing := m.benching || len(m.results) > 0
+
 	vis := m.visible()
 	start, end := 0, len(vis)
 	var above, below int
 	if len(vis) == 0 {
 		b.WriteString(dimStyle.Render("  Ничего не найдено") + "\n")
 	} else {
-		b.WriteString("  " + header(fmt.Sprintf("  %s %s %s %s",
-			pad("NAME", 26), pad("PROTOCOL", 9), pad("TRANSPORT", 9), "HOST")))
+		head := fmt.Sprintf("  %s %s %s %s",
+			pad("NAME", 26), pad("PROTOCOL", 9), pad("TRANSPORT", 9), pad("HOST", hostWidth))
+		if showPing {
+			head += "  " + padLeft("PING", pingWidth)
+		}
+		b.WriteString("  " + header(head))
 
 		// Fit the row list into the terminal, reserving the fixed chrome so the
 		// legend never gets pushed off the bottom (task #3): title(2) + header(1)
@@ -421,11 +436,17 @@ func (m serversModel) View() string {
 
 		name := flagSpace(orDash(mark(e)))
 		hostPort := fmt.Sprintf("%s:%d", e.Address, e.Port)
+		host := truncate(hostPort, hostWidth)
+		if showPing {
+			// Pad HOST to a fixed width so the PING numbers behind it share one
+			// right-aligned column instead of drifting with the host length.
+			host = pad(host, hostWidth)
+		}
 		line := fmt.Sprintf("%s %s %s %s",
 			pad(truncate(name, 26), 26),
 			pad(e.Protocol, 9),
 			pad(orDash(e.Network), 9),
-			truncate(hostPort, 28))
+			host)
 		if pos == m.cursor {
 			line = selectedStyle.Render(line)
 		}
@@ -435,9 +456,9 @@ func (m serversModel) View() string {
 			if r.Error != nil {
 				mark = errStyle
 			}
-			line += "  " + mark.Render("▸ "+r.String())
+			line += "  " + mark.Render(padLeft(r.String(), pingWidth))
 		} else if m.benching {
-			line += "  " + dimStyle.Render("▸ ...")
+			line += "  " + dimStyle.Render(padLeft("...", pingWidth))
 		}
 
 		if !supportedProtocols[e.Protocol] {

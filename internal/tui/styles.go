@@ -98,6 +98,15 @@ func pad(s string, w int) string {
 	return s
 }
 
+// padLeft left-pads s to w display columns, so numbers line up on their right
+// edge in a table column.
+func padLeft(s string, w int) string {
+	if n := lipgloss.Width(s); n < w {
+		return strings.Repeat(" ", w-n) + s
+	}
+	return s
+}
+
 // truncate shortens s to w display columns, keeping the table from wrapping on
 // narrow terminals.
 func truncate(s string, w int) string {

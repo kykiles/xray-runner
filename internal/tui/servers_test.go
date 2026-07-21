@@ -4,9 +4,11 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"xray-runner/internal/subscription"
 )
@@ -239,5 +241,41 @@ func TestServers_RefreshBlockedWhileBenching(t *testing.T) {
 	}
 	if got.(serversModel).refreshing {
 		t.Error("refresh started while benching")
+	}
+}
+
+// Task #1: ping results share one right-aligned PING column, so short and long
+// host names must not shift the numbers sideways.
+func TestServersView_PingColumnAligns(t *testing.T) {
+	entries := []subscription.SubEntry{
+		{Remarks: "a", Address: "s.io", Port: 443, Protocol: "vless", Network: "tcp"},
+		{Remarks: "b", Address: "very-long-host-name.example.com", Port: 8443, Protocol: "vless", Network: "ws"},
+	}
+	m := serversModel{
+		entries: entries,
+		order:   identityOrder(len(entries)),
+		filter:  textinput.New(),
+		results: map[int]subscription.BenchmarkResult{
+			0: {Index: 0, Latency: 12 * time.Millisecond},
+			1: {Index: 1, Latency: 1234 * time.Millisecond},
+		},
+		width:  200,
+		height: 24,
+	}
+	out := m.View()
+	if !strings.Contains(out, "PING") {
+		t.Fatalf("no PING header:\n%s", out)
+	}
+	var cols []int
+	for _, l := range strings.Split(out, "\n") {
+		if i := strings.Index(l, "ms"); i >= 0 {
+			cols = append(cols, lipgloss.Width(l[:i+2]))
+		}
+	}
+	if len(cols) != 2 {
+		t.Fatalf("want 2 ping cells, got %d:\n%s", len(cols), out)
+	}
+	if cols[0] != cols[1] {
+		t.Errorf("ping cells end at columns %d and %d, want the same", cols[0], cols[1])
 	}
 }
