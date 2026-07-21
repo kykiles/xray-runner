@@ -83,10 +83,10 @@ func (m connectingModel) View() string {
 	b.WriteString(titleStyle.Render("Подключение") + "\n\n")
 	if m.canceling {
 		b.WriteString("  " + m.spinner.View() + " " + warnStyle.Render("Отмена, откатываю настройки…") + "\n")
-		b.WriteString(legend("  подождите…"))
+		b.WriteString(legend(0, "  подождите…"))
 		return b.String()
 	}
 	b.WriteString("  " + m.spinner.View() + " Подключение к «" + m.title + "»…\n")
-	b.WriteString(legend("  запуск ядра и настройка маршрутизации · ctrl+c отменить"))
+	b.WriteString(legend(0, "  запуск ядра и настройка маршрутизации · ctrl+c отменить"))
 	return b.String()
 }

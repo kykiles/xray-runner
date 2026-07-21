@@ -130,8 +130,9 @@ func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Cyrillic twins mirror the Russian layout (task #7): q→й, j→о, k→л, s→ы,
 	// a→ф, d→в, u→г.
 	switch key.String() {
-	case "q", "й", "left":
-		// Top level: ← exits like q, since there is nowhere further back (task #1).
+	case "q", "й":
+		// Top level: only q leaves the program — ← has nowhere further back to go,
+		// and quitting on it would make the "← назад" reflex an accidental exit.
 		m.action = SubsQuit
 		return m, tea.Quit
 	case "up", "k", "л":
@@ -251,7 +252,7 @@ func (m subsModel) View() string {
 		if m.status != "" {
 			b.WriteString("\n  " + m.status + "\n")
 		}
-		b.WriteString(legend("  enter добавить · esc назад · ctrl+c выход"))
+		b.WriteString(legend(m.width, "  enter добавить · esc назад · ctrl+c выход"))
 		return b.String()
 	}
 
@@ -287,10 +288,10 @@ func (m subsModel) View() string {
 		b.WriteString("\n  " + m.status + "\n")
 	}
 
-	keys := "  ↑/↓ выбор · enter/→ открыть · s показать URL · + добавить · d удалить · u обновить · q/← выход"
+	keys := "  ↑/↓ выбор · → открыть · s показать URL · + добавить · d удалить · u обновить · q выход"
 	if m.reveal {
-		keys = "  ↑/↓ выбор · enter/→ открыть · s скрыть URL · + добавить · d удалить · u обновить · q/← выход"
+		keys = "  ↑/↓ выбор · → открыть · s скрыть URL · + добавить · d удалить · u обновить · q выход"
 	}
-	b.WriteString(legend(keys))
+	b.WriteString(legend(m.width, keys))
 	return b.String()
 }

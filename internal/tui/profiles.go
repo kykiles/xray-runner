@@ -173,19 +173,18 @@ func (m profilesModel) View() string {
 	b.WriteString("  " + header(fmt.Sprintf("  %s %s %s",
 		pad("NAME", 30), pad("SERVERS", 8), "BALANCER")))
 
-	keys := "  ↑/↓ выбор · enter запустить профиль · → раскрыть серверы · ←/esc назад · q выход"
+	keys := "  ↑/↓ выбор · enter подключиться · → раскрыть серверы · ← назад · q выход"
 	if m.bench != nil {
-		keys = "  ↑/↓ выбор · enter запустить профиль · → раскрыть серверы · b пинг · ←/esc назад · q выход"
+		keys = "  ↑/↓ выбор · enter подключиться · → раскрыть серверы · b пинг · ← назад · q выход"
 	}
 
 	// Fit the row list into the terminal, reserving the fixed chrome (task #3):
-	// title(2) + header(1) + legend + two indicator lines, plus the status block.
+	// title(2) + header(1) + legend + two indicator lines + the status block. The
+	// status block is reserved even while empty, so starting a ping does not
+	// shrink the list out from under the cursor (task #4).
 	budget := len(m.profiles)
 	if m.height > 0 {
-		reserved := 2 + 1 + legendHeight(keys) + 2
-		if m.benching || m.status != "" {
-			reserved += 2
-		}
+		reserved := 2 + 1 + legendHeight(m.width, keys) + 2 + 2
 		if budget = m.height - reserved; budget < 1 {
 			budget = 1
 		}
@@ -225,12 +224,13 @@ func (m profilesModel) View() string {
 	}
 	b.WriteString(moreDown(below))
 
+	// The block always occupies its two lines, empty or not — see the budget above.
 	if m.benching {
 		b.WriteString("\n  " + dimStyle.Render(fmt.Sprintf("⏳ Замер latency... %d/%d", m.benchDone, len(m.profiles))) + "\n")
-	} else if m.status != "" {
+	} else {
 		b.WriteString("\n  " + m.status + "\n")
 	}
 
-	b.WriteString(legend(keys))
+	b.WriteString(legend(m.width, keys))
 	return b.String()
 }

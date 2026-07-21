@@ -73,10 +73,16 @@ func clip(s string, w int) string {
 	return lipgloss.NewStyle().MaxWidth(w).Render(s)
 }
 
-// legend renders the bottom key hints one command per line (vertical), splitting
-// the " · "-joined string it receives and re-indenting each entry.
-func legend(items string) string {
-	parts := strings.Split(strings.TrimLeft(items, " "), " · ")
+// legend renders the bottom key hints on one line, indented to the same left
+// edge as the rest of the screen. A terminal too narrow for the whole line falls
+// back to one command per line, so no hint gets cut off. width<=0 (size not yet
+// known) assumes the line fits.
+func legend(width int, items string) string {
+	line := strings.TrimLeft(items, " ")
+	if width <= 0 || lipgloss.Width(line)+2 <= width {
+		return legendStyle.Render("  " + line)
+	}
+	parts := strings.Split(line, " · ")
 	for i := range parts {
 		parts[i] = "  " + parts[i]
 	}
@@ -132,11 +138,11 @@ func window(total, cursor, height int) (start, end, above, below int) {
 	return start, end, start, total - end
 }
 
-// legendHeight is how many terminal lines legend(keys) occupies: one row per
-// " · "-separated hint plus the one-line top margin. List screens reserve it so
-// the row window never pushes the legend off the bottom.
-func legendHeight(keys string) int {
-	return len(strings.Split(strings.TrimLeft(keys, " "), " · ")) + 1
+// legendHeight is how many terminal lines legend(width, keys) occupies, counted
+// off the rendered result so the two never drift apart. List screens reserve it
+// so the row window never pushes the legend off the bottom.
+func legendHeight(width int, keys string) int {
+	return strings.Count(legend(width, keys), "\n") + 1
 }
 
 // moreUp/moreDown render the scroll indicators for a windowed list. Both always

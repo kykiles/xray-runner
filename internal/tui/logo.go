@@ -33,17 +33,30 @@ const minLogoHeight = 16
 
 // renderLogo picks the widest wordmark that fits, falling back to a plain title
 // when the terminal is too short and to plain text when it is too narrow.
-// width and height are 0 until the first WindowSizeMsg.
+// width and height are 0 until the first WindowSizeMsg. Every variant carries
+// the same two-column indent as the list and the legend below it, so the whole
+// screen lines up on one left edge (task #8).
 func renderLogo(width, height int) string {
 	if height > 0 && height < minLogoHeight {
-		return titleStyle.Render("Мои подписки")
+		return titleStyle.Render("  Мои подписки")
 	}
 	for _, art := range []string{logoFull, logoCompact} {
-		if width >= artWidth(art) {
-			return titleStyle.Render(art)
+		if width >= artWidth(art)+2 {
+			return titleStyle.Render(indent(art))
 		}
 	}
-	return titleStyle.Render("xray-runner")
+	return titleStyle.Render("  xray-runner")
+}
+
+// indent shifts every non-empty line of the wordmark two columns right.
+func indent(art string) string {
+	lines := strings.Split(art, "\n")
+	for i, l := range lines {
+		if l != "" {
+			lines[i] = "  " + l
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // artWidth reports the display columns of the widest line in art.

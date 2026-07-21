@@ -176,9 +176,9 @@ func (m updateModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case updReleases:
 		return m.keyReleases(key)
 	case updDone:
-		// Any key returns to the menu; esc/q leaves the screen.
+		// Any key returns to the menu; ←/esc/q leaves the screen.
 		switch key.String() {
-		case "esc", "q", "й":
+		case "esc", "left", "q", "й":
 			return m, tea.Quit
 		}
 		m.stage = updMenu
@@ -194,7 +194,7 @@ func (m updateModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m updateModel) keyMenu(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
-	case "esc", "q", "й":
+	case "esc", "left", "q", "й":
 		return m, tea.Quit
 	case "up", "k", "л":
 		if m.cursor > 0 {
@@ -204,7 +204,7 @@ func (m updateModel) keyMenu(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < len(updateMenu)-1 {
 			m.cursor++
 		}
-	case "enter":
+	case "enter", "right":
 		switch m.cursor {
 		case 0:
 			m.kind = kindCore
@@ -236,7 +236,7 @@ func (m updateModel) keyReleases(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < len(m.releases)-1 {
 			m.cursor++
 		}
-	case "enter":
+	case "enter", "right":
 		r := m.releases[m.cursor]
 		a, _ := updater.CoreAsset(r)
 		m.pendingTag = r.Tag
@@ -330,7 +330,7 @@ func (m updateModel) View() string {
 			}
 			b.WriteString("  " + cursor + line + "\n")
 		}
-		b.WriteString(legend("  ↑/↓ выбор · enter выбрать · esc назад"))
+		b.WriteString(legend(m.width, "  ↑/↓ выбор · → выбрать · ← назад"))
 
 	case updReleases:
 		b.WriteString(dimStyle.Render("  Выберите версию ядра:") + "\n\n")
@@ -342,13 +342,13 @@ func (m updateModel) View() string {
 			}
 		}
 
-		keys := "  ↑/↓ выбор · enter установить · esc назад"
+		keys := "  ↑/↓ выбор · → установить · ← назад"
 		// L-3: fit the list into the terminal like the other list screens do,
 		// reserving the fixed chrome: title(1) + header(2) + prompt(2) + legend +
 		// the two scroll indicator lines.
 		budget := len(m.releases)
 		if m.height > 0 {
-			if budget = m.height - (1 + 2 + 2 + legendHeight(keys) + 2); budget < 1 {
+			if budget = m.height - (1 + 2 + 2 + legendHeight(m.width, keys) + 2); budget < 1 {
 				budget = 1
 			}
 		}
@@ -370,11 +370,11 @@ func (m updateModel) View() string {
 			b.WriteString("  " + cursor + clip(tag+note, m.width-4) + "\n")
 		}
 		b.WriteString(moreDown(below))
-		b.WriteString(legend(keys))
+		b.WriteString(legend(m.width, keys))
 
 	case updWorking:
 		b.WriteString("  " + m.spinner.View() + " " + dimStyle.Render(m.status) + "\n")
-		b.WriteString(legend("  подождите…"))
+		b.WriteString(legend(m.width, "  подождите…"))
 
 	case updDone:
 		if m.err != nil {
@@ -382,7 +382,7 @@ func (m updateModel) View() string {
 		} else {
 			b.WriteString("  " + okStyle.Render("✔ Готово") + "\n")
 		}
-		b.WriteString(legend("  любая клавиша · назад в меню · esc выход"))
+		b.WriteString(legend(m.width, "  любая клавиша назад в меню · ← выход"))
 	}
 
 	return b.String()

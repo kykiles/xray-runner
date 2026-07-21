@@ -103,7 +103,7 @@ func TestUpdateView_ReleaseListFitsTerminal(t *testing.T) {
 	if n := strings.Count(out, "\n"); n > 14 {
 		t.Errorf("view is %d lines on a 14-line terminal:\n%s", n, out)
 	}
-	if !strings.Contains(out, "enter установить") {
+	if !strings.Contains(out, "→ установить") {
 		t.Errorf("legend pushed off the screen:\n%s", out)
 	}
 }

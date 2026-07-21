@@ -16,7 +16,9 @@ func TestRenderLogo(t *testing.T) {
 		want          string
 	}{
 		{"wide terminal shows the full logo", 120, 30, "██████╗"},
-		{"exact fit shows the full logo", artWidth(logoFull), 30, "██████╗"},
+		// +2 for the indent every variant carries, so the whole screen shares one
+		// left edge (task #8).
+		{"exact fit shows the full logo", artWidth(logoFull) + 2, 30, "██████╗"},
 		{"narrow terminal shows the compact logo", 60, 30, "██ █ ██ █"},
 		{"too narrow for either falls back to text", 20, 30, "xray-runner"},
 		{"unknown size falls back to text", 0, 0, "xray-runner"},

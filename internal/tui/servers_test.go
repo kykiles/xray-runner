@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -135,6 +136,54 @@ func TestServersView_RowsDoNotShiftWhileScrolling(t *testing.T) {
 		}
 		if got != want {
 			t.Errorf("cursor %d: first row on line %d, want %d", cursor, got, want)
+		}
+	}
+}
+
+// Task #4: pressing b used to grow the chrome by the ping-progress line, which
+// shrank the row budget and pushed the bottom servers behind the scroll. The
+// status block is reserved whether or not it has anything to say, so the row
+// count must not change when a benchmark starts — and the view must still fit.
+func TestServersView_BenchmarkKeepsRowCount(t *testing.T) {
+	entries := make([]subscription.SubEntry, 40)
+	for i := range entries {
+		entries[i] = subscription.SubEntry{
+			Remarks: "srv", Address: "host.example.com", Port: 443,
+			Protocol: "vless", Network: "tcp",
+		}
+	}
+	model := func(benching bool) serversModel {
+		return serversModel{
+			entries: entries,
+			order:   identityOrder(len(entries)),
+			filter:  textinput.New(),
+			results: map[int]subscription.BenchmarkResult{},
+			bench: func(context.Context, []subscription.SubEntry, func(subscription.BenchmarkResult)) []subscription.BenchmarkResult {
+				return nil
+			},
+			benching: benching,
+			width:    120,
+			height:   24,
+		}
+	}
+
+	rows := func(out string) int {
+		n := 0
+		for _, l := range strings.Split(out, "\n") {
+			if strings.Contains(l, "host.example.com") {
+				n++
+			}
+		}
+		return n
+	}
+
+	idle, busy := model(false).View(), model(true).View()
+	if a, b := rows(idle), rows(busy); a != b {
+		t.Errorf("benchmark changed the row count: %d idle, %d while benching", a, b)
+	}
+	for name, out := range map[string]string{"idle": idle, "benching": busy} {
+		if n := strings.Count(out, "\n"); n > 24 {
+			t.Errorf("%s view is %d lines on a 24-line terminal:\n%s", name, n, out)
 		}
 	}
 }

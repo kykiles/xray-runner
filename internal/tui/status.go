@@ -44,6 +44,7 @@ type statusModel struct {
 	note    string
 	noteErr bool
 	action  StatusAction
+	width   int // terminal width; 0 until the first WindowSizeMsg
 }
 
 type statusTickMsg time.Time
@@ -88,6 +89,9 @@ func statusTick() tea.Cmd {
 
 func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		return m, nil
 	case statusTickMsg:
 		return m, statusTick()
 	case sessionEndedMsg:
@@ -128,7 +132,9 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m statusModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Подключено") + "\n\n")
+	// The title carries the same two-column indent as the rows below it, so the
+	// whole screen lines up on one left edge (task #3).
+	b.WriteString(titleStyle.Render("  Подключено") + "\n\n")
 
 	row := func(label, value string) {
 		b.WriteString("  " + dimStyle.Render(pad(label, 10)) + value + "\n")
@@ -150,8 +156,8 @@ func (m statusModel) View() string {
 		b.WriteString("\n  " + style.Render(m.note) + "\n")
 	}
 
-	keys := fmt.Sprintf("  ←/esc назад к серверам · m режим %s · r перезапуск · q выход", m.info.NextMode)
-	b.WriteString(legend(keys))
+	keys := fmt.Sprintf("  ← назад к серверам · m режим %s · r перезапуск · q выход", m.info.NextMode)
+	b.WriteString(legend(m.width, keys))
 	return b.String()
 }
 

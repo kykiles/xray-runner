@@ -375,9 +375,9 @@ func (m serversModel) View() string {
 		b.WriteString("  Фильтр: " + m.filter.View() + "\n\n")
 	}
 
-	keys := "  ↑/↓ выбор · enter/→ подключить · / фильтр · ←/esc назад · q выход"
+	keys := "  ↑/↓ выбор · → подключить · / фильтр · ← назад · q выход"
 	if m.bench != nil {
-		keys = "  ↑/↓ выбор · enter/→ подключить · b пинг · r обновить · / фильтр · ←/esc назад · q выход"
+		keys = "  ↑/↓ выбор · → подключить · b пинг · r обновить · / фильтр · ← назад · q выход"
 	}
 	if m.filtering {
 		keys = "  фильтр: поиск по всем столбцам · enter применить · esc сбросить"
@@ -394,14 +394,13 @@ func (m serversModel) View() string {
 
 		// Fit the row list into the terminal, reserving the fixed chrome so the
 		// legend never gets pushed off the bottom (task #3): title(2) + header(1)
-		// + legend + two indicator lines, plus the filter/status blocks when shown.
+		// + legend + two indicator lines + the status block, plus the filter when
+		// shown. The status block is reserved even while empty, so starting a ping
+		// does not shrink the list out from under the cursor (task #4).
 		budget := len(vis)
 		if m.height > 0 {
-			reserved := 2 + 1 + legendHeight(keys) + 2
+			reserved := 2 + 1 + legendHeight(m.width, keys) + 2 + 2
 			if m.filtering || m.filter.Value() != "" {
-				reserved += 2
-			}
-			if m.benching || m.refreshing || m.status != "" {
 				reserved += 2
 			}
 			if budget = m.height - reserved; budget < 1 {
@@ -452,15 +451,17 @@ func (m serversModel) View() string {
 	}
 	b.WriteString(moreDown(below))
 
-	if m.benching {
+	// The block always occupies its two lines, empty or not — see the budget above.
+	switch {
+	case m.benching:
 		b.WriteString("\n  " + dimStyle.Render(fmt.Sprintf("⏳ Замер latency... %d/%d", m.benchDone, len(m.entries))) + "\n")
-	} else if m.refreshing {
+	case m.refreshing:
 		b.WriteString("\n  " + dimStyle.Render("⏳ Обновление подписки...") + "\n")
-	} else if m.status != "" {
+	default:
 		b.WriteString("\n  " + m.status + "\n")
 	}
 
-	b.WriteString(legend(keys))
+	b.WriteString(legend(m.width, keys))
 	return b.String()
 }
 
