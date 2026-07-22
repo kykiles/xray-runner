@@ -60,6 +60,7 @@ type serversModel struct {
 	filtering  bool
 	benching   bool
 	benchDone  int
+	benchTotal int
 	refreshing bool
 	status     string
 	width      int // terminal width; 0 until the first WindowSizeMsg
@@ -268,13 +269,29 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.benching || m.bench == nil {
 			return m, nil
 		}
+		// Ping what is on screen: with a filter applied the rest is not the list
+		// the user is looking at.
+		vis := m.visible()
+		if len(vis) == 0 {
+			return m, nil
+		}
+		entries := make([]subscription.SubEntry, len(vis))
+		for i, idx := range vis {
+			entries[i] = m.entries[idx]
+		}
 		m.benching = true
 		m.benchDone = 0
+		m.benchTotal = len(entries)
 		m.status = ""
-		entries, bench, ctx := m.entries, m.bench, m.ctx
+		bench, ctx := m.bench, m.ctx
 		var cmd tea.Cmd
 		m.benchCh, cmd = startBench(len(entries), func(on func(subscription.BenchmarkResult)) {
-			bench(ctx, entries, on)
+			// The benchmark indexes the slice it got; map back to entry indices,
+			// which is what m.results is keyed by.
+			bench(ctx, entries, func(r subscription.BenchmarkResult) {
+				r.Index = vis[r.Index]
+				on(r)
+			})
 		})
 		return m, cmd
 	case "r", "к":
@@ -422,7 +439,7 @@ func (m serversModel) View() string {
 	// The block always occupies its two lines, empty or not — see the budget above.
 	switch {
 	case m.benching:
-		b.WriteString("\n  " + dimStyle.Render(fmt.Sprintf("⏳ Замер latency... %d/%d", m.benchDone, len(m.entries))) + "\n")
+		b.WriteString("\n  " + dimStyle.Render(fmt.Sprintf("⏳ Замер latency... %d/%d", m.benchDone, m.benchTotal)) + "\n")
 	case m.refreshing:
 		b.WriteString("\n  " + dimStyle.Render("⏳ Обновление подписки...") + "\n")
 	default:

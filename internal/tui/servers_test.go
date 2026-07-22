@@ -100,6 +100,50 @@ func TestFlagSpace(t *testing.T) {
 	}
 }
 
+// A fixed filter narrows the ping to what is on screen, and the results still
+// land on the right entries: the benchmark indexes the slice it got, so the
+// indices must be mapped back to the full list.
+func TestServersBenchmarkOnlyFiltered(t *testing.T) {
+	var benched []string
+	m := serversModel{
+		ctx:     context.Background(),
+		entries: filterFixture,
+		filter:  textinput.New(),
+		results: map[int]subscription.BenchmarkResult{},
+		bench: func(_ context.Context, entries []subscription.SubEntry, on func(subscription.BenchmarkResult)) []subscription.BenchmarkResult {
+			for i, e := range entries {
+				benched = append(benched, e.Address)
+				on(subscription.BenchmarkResult{Index: i, Latency: time.Millisecond})
+			}
+			return nil
+		},
+	}
+	m.filter.SetValue("ws")
+
+	next, _ := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+	sm := next.(serversModel)
+
+	for r := range sm.benchCh {
+		sm.results[r.Index] = r
+	}
+
+	// "ws" matches the two ws transports and the ws-node host.
+	if want := []string{"de1.example.ru", "ws-node.example.com", "nl1.example.ru"}; !equal(benched, want) {
+		t.Errorf("benchmarked %v, want %v", benched, want)
+	}
+	for _, idx := range []int{0, 2, 3} {
+		if _, ok := sm.results[idx]; !ok {
+			t.Errorf("no result for entry %d", idx)
+		}
+	}
+	if _, ok := sm.results[1]; ok {
+		t.Error("entry 1 was filtered out but got a result")
+	}
+	if sm.benchTotal != 3 {
+		t.Errorf("benchTotal = %d, want 3", sm.benchTotal)
+	}
+}
+
 // The first row must stay on the same line while scrolling: at either end of
 // the list one scroll indicator has nothing to report, and dropping its line
 // used to pull the whole list up by one.
