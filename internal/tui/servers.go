@@ -27,6 +27,7 @@ var supportedProtocols = map[string]bool{
 	"vless":     true,
 	"vmess":     true,
 	"ss":        true,
+	"trojan":    true,
 	"hysteria2": true,
 	"hysteria":  true,
 }
