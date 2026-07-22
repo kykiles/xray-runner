@@ -89,10 +89,34 @@ func legend(width int, items string) string {
 	return legendStyle.Render(strings.Join(parts, "\n"))
 }
 
+// vs16 is the variation selector that asks for emoji presentation: ☁ + U+FE0F.
+const vs16 = '️'
+
+// dispWidth is how many columns the terminal actually advances for s. lipgloss
+// counts a VS16 sequence (☁️) as two, but terminals advance by one when the base
+// character is narrow on its own — the glyph then overpaints the next cell and
+// every column after it drifts left. Whether the base is narrow is asked of
+// lipgloss itself, so there is no second width table to keep in sync: ☁ is 1
+// (adjusted down), ⚪ is already 2 (left alone).
+func dispWidth(s string) int {
+	w := lipgloss.Width(s)
+	if !strings.ContainsRune(s, vs16) {
+		return w
+	}
+	var prev rune
+	for _, r := range s {
+		if r == vs16 && lipgloss.Width(string(prev)) == 1 {
+			w--
+		}
+		prev = r
+	}
+	return w
+}
+
 // pad right-pads s to w display columns. Server names carry flag emoji, which
 // occupy two columns each, so %-*s (byte-based) would misalign the table.
 func pad(s string, w int) string {
-	if n := lipgloss.Width(s); n < w {
+	if n := dispWidth(s); n < w {
 		return s + strings.Repeat(" ", w-n)
 	}
 	return s
@@ -101,7 +125,7 @@ func pad(s string, w int) string {
 // padLeft left-pads s to w display columns, so numbers line up on their right
 // edge in a table column.
 func padLeft(s string, w int) string {
-	if n := lipgloss.Width(s); n < w {
+	if n := dispWidth(s); n < w {
 		return strings.Repeat(" ", w-n) + s
 	}
 	return s
@@ -110,12 +134,12 @@ func padLeft(s string, w int) string {
 // truncate shortens s to w display columns, keeping the table from wrapping on
 // narrow terminals.
 func truncate(s string, w int) string {
-	if lipgloss.Width(s) <= w {
+	if dispWidth(s) <= w {
 		return s
 	}
 	var b strings.Builder
 	for _, r := range s {
-		if lipgloss.Width(b.String()+string(r)) > w-1 {
+		if dispWidth(b.String()+string(r)) > w-1 {
 			break
 		}
 		b.WriteRune(r)

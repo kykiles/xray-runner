@@ -176,9 +176,10 @@ func (m updateModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case updReleases:
 		return m.keyReleases(key)
 	case updDone:
-		// Any key returns to the menu; ←/esc/q leaves the screen.
-		switch key.String() {
-		case "esc", "left", "q", "й":
+		// Any key returns to the update menu, ← included: it means "one step back"
+		// everywhere else, and quitting the whole screen on it dropped the user all
+		// the way out to the subscription list. Only q leaves.
+		if s := key.String(); s == "q" || s == "й" {
 			return m, tea.Quit
 		}
 		m.stage = updMenu
@@ -382,7 +383,7 @@ func (m updateModel) View() string {
 		} else {
 			b.WriteString("  " + okStyle.Render("✔ Готово") + "\n")
 		}
-		b.WriteString(legend(m.width, "  любая клавиша назад в меню · ← выход"))
+		b.WriteString(legend(m.width, "  любая клавиша назад в меню · q выход"))
 	}
 
 	return b.String()

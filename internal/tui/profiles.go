@@ -114,14 +114,16 @@ func (m profilesModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.benchDone = 0
 		m.status = ""
 		return m, m.startBenchmark()
-	case "right", "l", "д":
-		if len(m.profiles) == 0 {
+	case "s", "ы":
+		// Peek inside a balancer: see, ping and pick its servers one by one. A
+		// single-server profile has nothing to unfold.
+		if len(m.profiles) == 0 || m.profiles[m.cursor].Balancer == nil {
 			return m, nil
 		}
 		m.action = ProfileExpand
 		m.choice = m.cursor
 		return m, tea.Quit
-	case "enter":
+	case "enter", "right", "l", "д":
 		if len(m.profiles) == 0 {
 			return m, nil
 		}
@@ -136,6 +138,28 @@ func (m profilesModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+// face is the server a profile puts on display. Behind a balancer they are
+// interchangeable endpoints, so the first one stands in for the group.
+func face(p subscription.Profile) subscription.SubEntry {
+	if len(p.Entries) == 0 {
+		return subscription.SubEntry{}
+	}
+	return p.Entries[0]
+}
+
+// keys is the legend. "s серверы" shows up only on a balancer row — that is the
+// only place there is anything to unfold.
+func (m profilesModel) keys() string {
+	keys := "  ↑/↓ выбор · → подключить"
+	if m.cursor < len(m.profiles) && m.profiles[m.cursor].Balancer != nil {
+		keys += " · s серверы"
+	}
+	if m.bench != nil {
+		keys += " · b пинг"
+	}
+	return keys + " · ← назад · q выход"
 }
 
 // startBenchmark launches the measurement goroutine; results stream back into
@@ -174,17 +198,9 @@ func (m profilesModel) View() string {
 	// list stays narrow until there is anything to show there.
 	showPing := m.benching || len(m.results) > 0
 
-	head := fmt.Sprintf("  %s %s %s",
-		pad("NAME", 30), pad("SERVERS", 8), pad("BALANCER", balancerWidth))
-	if showPing {
-		head += "  " + padLeft("PING", pingWidth)
-	}
-	b.WriteString("  " + header(head))
+	b.WriteString(tableHead(showPing))
 
-	keys := "  ↑/↓ выбор · enter подключиться · → раскрыть серверы · ← назад · q выход"
-	if m.bench != nil {
-		keys = "  ↑/↓ выбор · enter подключиться · → раскрыть серверы · b пинг · ← назад · q выход"
-	}
+	keys := m.keys()
 
 	// Fit the row list into the terminal, reserving the fixed chrome (task #3):
 	// title(2) + header(1) + legend + two indicator lines + the status block. The
@@ -207,33 +223,17 @@ func (m profilesModel) View() string {
 			cursor = cursorStyle.Render("▸ ")
 		}
 
-		name := flagSpace(p.Name)
+		name := p.Name
 		if name == "" {
 			name = "(без имени)"
 		}
-		mode := truncate(p.Mode(), balancerWidth)
-		if showPing {
-			// Pad BALANCER to a fixed width so the PING numbers behind it share one
-			// right-aligned column instead of drifting with the mode length.
-			mode = pad(mode, balancerWidth)
-		}
-		line := fmt.Sprintf("%s %s %s",
-			pad(truncate(name, 30), 30),
-			pad(fmt.Sprintf("%d", len(p.Entries)), 8),
-			mode)
+		line := tableRow(name, face(p), showPing)
 		if i == m.cursor {
 			line = selectedStyle.Render(line)
 		}
 
-		if r, ok := m.results[i]; ok {
-			style := okStyle
-			if r.Error != nil {
-				style = errStyle
-			}
-			line += "  " + style.Render(padLeft(r.String(), pingWidth))
-		} else if m.benching {
-			line += "  " + dimStyle.Render(padLeft("...", pingWidth))
-		}
+		r, measured := m.results[i]
+		line += pingCell(r, measured, m.benching)
 		b.WriteString("  " + cursor + clip(line, m.width-4) + "\n")
 	}
 	b.WriteString(moreDown(below))

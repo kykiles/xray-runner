@@ -113,6 +113,28 @@ type nav struct {
 	// a panel publishing one config per location. Its profile screen would be a
 	// server list in disguise, so the menu shows the servers directly.
 	flat bool
+	// loadedURL/loadedAt back the fetch cache: walking back to the subscription
+	// list and into the same subscription again used to re-download it every
+	// time. `r` on the server screen forces a fresh fetch.
+	loadedURL string
+	loadedAt  time.Time
+}
+
+// subCacheTTL is how long a fetched subscription is reused before the menu goes
+// back to the panel for it.
+const subCacheTTL = 10 * time.Minute
+
+// setProfiles stores a freshly fetched subscription and stamps the cache.
+func (n *nav) setProfiles(subURL string, profiles []subscription.Profile) {
+	n.profiles = profiles
+	n.flat = subscription.AllSingle(profiles)
+	n.loadedURL = subURL
+	n.loadedAt = time.Now()
+}
+
+// fresh reports whether the subscription already in hand can be shown as-is.
+func (n *nav) fresh(subURL string) bool {
+	return n.loadedURL == subURL && len(n.profiles) > 0 && time.Since(n.loadedAt) < subCacheTTL
 }
 
 // entries lists the servers the server screen shows: every server of the
@@ -169,13 +191,15 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 		// subscription screen, so the shell does not flash during the network
 		// fetch (task #3). Results are stashed in a.nav for the next level.
 		Load: func(rawURL string) error {
+			if a.nav.fresh(rawURL) {
+				return nil
+			}
 			profiles, err := a.loadProfiles(rawURL)
 			if err != nil {
 				return err
 			}
-			a.nav.profiles = profiles
+			a.nav.setProfiles(rawURL, profiles)
 			a.nav.profIdx = 0
-			a.nav.flat = subscription.AllSingle(profiles)
 			return nil
 		},
 	}
@@ -264,8 +288,7 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 		if err != nil {
 			return nil, err
 		}
-		a.nav.profiles = profiles
-		a.nav.flat = subscription.AllSingle(profiles)
+		a.nav.setProfiles(subURL, profiles)
 		if a.nav.profIdx >= len(profiles) {
 			a.nav.profIdx = 0
 		}

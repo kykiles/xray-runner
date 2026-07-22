@@ -32,15 +32,6 @@ var supportedProtocols = map[string]bool{
 	"hysteria":  true,
 }
 
-// Fixed column widths for the server and profile tables: the last column before
-// PING (HOST, BALANCER) is padded only while the PING column is shown, PING fits
-// the widest cell ("timeout").
-const (
-	hostWidth     = 28
-	balancerWidth = 20 // "balancer/leastPing" and friends
-	pingWidth     = 7
-)
-
 type benchResultMsg subscription.BenchmarkResult
 type benchDoneMsg struct{}
 type refreshDoneMsg struct {
@@ -402,12 +393,7 @@ func (m serversModel) View() string {
 	if len(vis) == 0 {
 		b.WriteString(dimStyle.Render("  Ничего не найдено") + "\n")
 	} else {
-		head := fmt.Sprintf("  %s %s %s %s",
-			pad("NAME", 26), pad("PROTOCOL", 9), pad("TRANSPORT", 9), pad("HOST", hostWidth))
-		if showPing {
-			head += "  " + padLeft("PING", pingWidth)
-		}
-		b.WriteString("  " + header(head))
+		b.WriteString(tableHead(showPing))
 
 		// Fit the row list into the terminal, reserving the fixed chrome so the
 		// legend never gets pushed off the bottom (task #3): title(2) + header(1)
@@ -436,32 +422,13 @@ func (m serversModel) View() string {
 			cursor = cursorStyle.Render("▸ ")
 		}
 
-		name := flagSpace(orDash(mark(e)))
-		hostPort := fmt.Sprintf("%s:%d", e.Address, e.Port)
-		host := truncate(hostPort, hostWidth)
-		if showPing {
-			// Pad HOST to a fixed width so the PING numbers behind it share one
-			// right-aligned column instead of drifting with the host length.
-			host = pad(host, hostWidth)
-		}
-		line := fmt.Sprintf("%s %s %s %s",
-			pad(truncate(name, 26), 26),
-			pad(e.Protocol, 9),
-			pad(orDash(e.Network), 9),
-			host)
+		line := tableRow(orDash(mark(e)), e, showPing)
 		if pos == m.cursor {
 			line = selectedStyle.Render(line)
 		}
 
-		if r, ok := m.results[idx]; ok {
-			mark := okStyle
-			if r.Error != nil {
-				mark = errStyle
-			}
-			line += "  " + mark.Render(padLeft(r.String(), pingWidth))
-		} else if m.benching {
-			line += "  " + dimStyle.Render(padLeft("...", pingWidth))
-		}
+		r, measured := m.results[idx]
+		line += pingCell(r, measured, m.benching)
 
 		if !supportedProtocols[e.Protocol] {
 			line += "  " + warnStyle.Render("⚠ не поддерживается")
@@ -486,14 +453,6 @@ func (m serversModel) View() string {
 
 	b.WriteString(legend(m.width, keys))
 	return b.String()
-}
-
-// orDash keeps empty table cells visible as a placeholder instead of a hole.
-func orDash(s string) string {
-	if s == "" {
-		return "—"
-	}
-	return s
 }
 
 // mark is the server's name from the subscription. Xray-config subscriptions
