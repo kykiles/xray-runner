@@ -32,6 +32,31 @@ type ServerConfigFunc func(e *subscription.SubEntry) (string, error)
 // the path it landed at.
 type SaveConfigFunc func(name, text string) (string, error)
 
+// PingCache holds the last measurement of every server pinged this run, so
+// returning to the list after a connection still shows what was measured
+// instead of an empty column — a ping run is slow, and the numbers are only
+// there to say roughly where each server stands. It is keyed by endpoint, not
+// by position: a refresh or another profile shifts the indices, the endpoint
+// stays. `r` on the server screen drops it — that is the way to force a fresh
+// measurement.
+type PingCache map[string]subscription.BenchmarkResult
+
+func pingKey(e subscription.SubEntry) string {
+	return fmt.Sprintf("%s:%d", e.Address, e.Port)
+}
+
+// restore maps the cache onto the entry list currently on screen.
+func (c PingCache) restore(entries []subscription.SubEntry) map[int]subscription.BenchmarkResult {
+	out := make(map[int]subscription.BenchmarkResult, len(c))
+	for i, e := range entries {
+		if r, ok := c[pingKey(e)]; ok {
+			r.Index = i
+			out[i] = r
+		}
+	}
+	return out
+}
+
 var supportedProtocols = map[string]bool{
 	"vless":     true,
 	"vmess":     true,
@@ -56,6 +81,7 @@ type serversModel struct {
 	bench   BenchmarkFunc
 
 	results    map[int]subscription.BenchmarkResult // key: entry index
+	pings      PingCache                            // the same results, kept across screens
 	cursor     int                                  // position within visible rows
 	filter     textinput.Model
 	filtering  bool
@@ -84,8 +110,10 @@ type serversModel struct {
 // came from; it may be empty. lastAddress/lastPort name the server connected to
 // last time, so returning to the list lands the cursor back on it; an empty
 // address or no match starts at the top. filter is the search the screen was
-// left with, restored on the way back in and handed out again on exit.
-func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, lastAddress string, lastPort int, filter string, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc, preview ServerConfigFunc, save SaveConfigFunc) (*subscription.SubEntry, ServerAction, string, error) {
+// left with, restored on the way back in and handed out again on exit. pings
+// carries the measurements across screens; the screen writes into it as results
+// arrive, so nothing is lost on any exit path.
+func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, lastAddress string, lastPort int, filter string, pings PingCache, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc, preview ServerConfigFunc, save SaveConfigFunc) (*subscription.SubEntry, ServerAction, string, error) {
 	// Leaving the screen ends its benchmark: the measurement runs in a goroutine
 	// nobody waits for, and its results land in a model that no longer exists.
 	ctx, cancel := context.WithCancel(ctx)
@@ -97,6 +125,10 @@ func SelectServer(ctx context.Context, title string, entries []subscription.SubE
 	fi.Width = 40
 	fi.SetValue(filter)
 
+	if pings == nil {
+		pings = PingCache{}
+	}
+
 	m := serversModel{
 		ctx:     ctx,
 		title:   title,
@@ -105,14 +137,15 @@ func SelectServer(ctx context.Context, title string, entries []subscription.SubE
 		bench:   bench,
 		preview: preview,
 		saveCfg: save,
-		results: map[int]subscription.BenchmarkResult{},
+		results: pings.restore(entries),
+		pings:   pings,
 		filter:  fi,
 		action:  ServerQuit,
 		choice:  -1,
 	}
 	m.cursor = m.cursorAt(lastAddress, lastPort)
 
-	res, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	res, err := runScreen(m)
 	if err != nil {
 		return nil, ServerQuit, "", err
 	}
@@ -190,6 +223,7 @@ func (m serversModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case benchResultMsg:
 		m.results[msg.Index] = subscription.BenchmarkResult(msg)
+		m.pings[pingKey(m.entries[msg.Index])] = subscription.BenchmarkResult(msg)
 		m.benchDone++
 		return m, waitBench(m.benchCh)
 	case benchDoneMsg:
@@ -204,6 +238,7 @@ func (m serversModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.entries = msg.entries
 		m.results = map[int]subscription.BenchmarkResult{}
+		clear(m.pings) // the list is new; keeping old numbers would outlive their servers
 		m.cursor = 0
 		m.status = okStyle.Render(fmt.Sprintf("Подписка обновлена: %d серверов", len(m.entries)))
 		return m, nil

@@ -235,6 +235,9 @@ func (a *App) menuLoop(ctx context.Context) error {
 				// A failed session must not kill the app: report it and let the
 				// user pick another server.
 				slog.Error("session failed", "error", err)
+				// On the normal buffer, so the message is still there when the app
+				// exits instead of being wiped by the next screen.
+				tui.ReleaseScreen()
 				ui.Error(err.Error())
 				a.nav.level = backLevel(t)
 				break
@@ -260,6 +263,9 @@ func (a *App) menuLoop(ctx context.Context) error {
 // cleanup runs once at exit. Per-session teardown already happened in
 // releaseSession; this is the last-resort net for a session that failed midway.
 func (a *App) cleanup() {
+	// The menus keep the alternate buffer up between screens; the shell gets it
+	// back here, before main prints its goodbye.
+	tui.ReleaseScreen()
 	a.releaseSession()
 	_ = os.Remove(a.tmpFile)
 	if a.lockHeld {

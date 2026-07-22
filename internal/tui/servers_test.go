@@ -429,3 +429,37 @@ func TestServers_CursorWithRestoredFilter(t *testing.T) {
 		t.Errorf("cursor for a filtered-out server = %d, want 0", got)
 	}
 }
+
+// The ping survives a session: results go into the shared cache as they arrive
+// and come back keyed by endpoint, so a refreshed or reordered list still shows
+// them on the right rows. A subscription refresh drops them.
+func TestServers_PingCache(t *testing.T) {
+	cache := PingCache{}
+	m := serversModel{
+		entries: filterFixture,
+		filter:  textinput.New(),
+		results: map[int]subscription.BenchmarkResult{},
+		pings:   cache,
+	}
+
+	next, _ := m.Update(benchResultMsg{Index: 1, Latency: 42 * time.Millisecond})
+	if got := cache[pingKey(filterFixture[1])]; got.Latency != 42*time.Millisecond {
+		t.Fatalf("cache miss for entry 1: %+v", got)
+	}
+
+	// Reopening the screen with the same servers in another order.
+	reordered := []subscription.SubEntry{filterFixture[1], filterFixture[0]}
+	restored := cache.restore(reordered)
+	if r, ok := restored[0]; !ok || r.Latency != 42*time.Millisecond || r.Index != 0 {
+		t.Fatalf("restored[0] = %+v, ok=%v", r, ok)
+	}
+	if _, ok := restored[1]; ok {
+		t.Error("an unmeasured server got a result")
+	}
+
+	// r wipes it: the new list may not hold these servers at all.
+	after, _ := next.(serversModel).Update(refreshDoneMsg{entries: reordered})
+	if len(cache) != 0 || len(after.(serversModel).results) != 0 {
+		t.Errorf("refresh kept %d cached / %d shown results", len(cache), len(after.(serversModel).results))
+	}
+}

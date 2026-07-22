@@ -70,7 +70,7 @@ func SelectProfile(ctx context.Context, profiles []subscription.Profile, cursor 
 		m.cursor = cursor
 	}
 
-	res, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	res, err := runScreen(m)
 	if err != nil {
 		return -1, ProfileQuit, err
 	}

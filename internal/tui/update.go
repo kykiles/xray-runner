@@ -72,7 +72,7 @@ func RunUpdate(ctx context.Context, xrayPath, installed string) error {
 	dir := filepath.Dir(xrayPath)
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(cursorStyle))
 	m := updateModel{ctx: ctx, xrayPath: xrayPath, dir: dir, installed: installed, geoDate: geoDate(dir), spinner: sp}
-	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	_, err := runScreen(m)
 	return err
 }
 

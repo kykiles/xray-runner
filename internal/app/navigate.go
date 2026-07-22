@@ -123,6 +123,9 @@ type nav struct {
 	// clears it on ← (first press drops the filter, second one goes back), so
 	// walking up a level resets it without any help from here.
 	filter string
+	// pings keeps the last measurement of each server for the whole run, so
+	// coming back from a session shows the numbers instead of an empty column.
+	pings tui.PingCache
 }
 
 // subCacheTTL is how long a fetched subscription is reused before the menu goes
@@ -230,6 +233,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 			if action == tui.SubsUpdate {
 				// Update core/geo, then return to the subscription list.
 				if err := tui.RunUpdate(ctx, a.binary, coreVersion(a.binary)); err != nil {
+					tui.ReleaseScreen() // readable on the normal buffer, see menuLoop
 					ui.Error(err.Error())
 				}
 				continue
@@ -311,8 +315,12 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 		lastAddress, lastPort = state.ServerAddress, state.ServerPort
 	}
 
+	if a.nav.pings == nil {
+		a.nav.pings = tui.PingCache{}
+	}
+
 	pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
-	selected, action, filter, err := tui.SelectServer(ctx, a.nav.profileTitle(), a.nav.entries(), lastAddress, lastPort, a.nav.filter, refresh, pb.Run, a.serverConfig, a.saveConfig)
+	selected, action, filter, err := tui.SelectServer(ctx, a.nav.profileTitle(), a.nav.entries(), lastAddress, lastPort, a.nav.filter, a.nav.pings, refresh, pb.Run, a.serverConfig, a.saveConfig)
 	if err != nil {
 		return nil, fmt.Errorf("TUI: %w", err)
 	}

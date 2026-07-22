@@ -59,7 +59,7 @@ func ShowStatus(info StatusInfo, updates <-chan StatusUpdate) (StatusAction, err
 		started: time.Now(),
 		action:  StatusQuit,
 	}
-	res, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	res, err := runScreen(m)
 	if err != nil {
 		return StatusQuit, err
 	}

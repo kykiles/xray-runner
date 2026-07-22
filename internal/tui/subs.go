@@ -83,7 +83,7 @@ func SelectSubscription(subs []subscription.NamedSubscription, cursor int, cb Su
 		m.input.Focus()
 	}
 
-	res, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	res, err := runScreen(m)
 	if err != nil {
 		return subs, -1, SubsQuit, err
 	}

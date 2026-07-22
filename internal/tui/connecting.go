@@ -38,7 +38,7 @@ type connectingModel struct {
 func ShowConnecting(title string, connect func() error, cancel func()) error {
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(cursorStyle))
 	m := connectingModel{title: title, connect: connect, cancel: cancel, spinner: sp}
-	res, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	res, err := runScreen(m)
 	if err != nil {
 		return err
 	}
