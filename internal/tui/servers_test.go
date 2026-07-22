@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -114,7 +115,6 @@ func TestServersView_RowsDoNotShiftWhileScrolling(t *testing.T) {
 	for _, cursor := range []int{0, 1, 20, 38, 39} {
 		m := serversModel{
 			entries: entries,
-			order:   identityOrder(len(entries)),
 			cursor:  cursor,
 			filter:  textinput.New(),
 			results: map[int]subscription.BenchmarkResult{},
@@ -157,7 +157,6 @@ func TestServersView_BenchmarkKeepsRowCount(t *testing.T) {
 	model := func(benching bool) serversModel {
 		return serversModel{
 			entries: entries,
-			order:   identityOrder(len(entries)),
 			filter:  textinput.New(),
 			results: map[int]subscription.BenchmarkResult{},
 			bench: func(context.Context, []subscription.SubEntry, func(subscription.BenchmarkResult)) []subscription.BenchmarkResult {
@@ -224,7 +223,6 @@ func TestSelectServer_CursorOnLastConnected(t *testing.T) {
 func TestServers_RefreshBlockedWhileBenching(t *testing.T) {
 	m := serversModel{
 		entries:  filterFixture,
-		order:    identityOrder(len(filterFixture)),
 		results:  map[int]subscription.BenchmarkResult{},
 		filter:   textinput.New(),
 		benching: true,
@@ -253,7 +251,6 @@ func TestServersView_PingColumnAligns(t *testing.T) {
 	}
 	m := serversModel{
 		entries: entries,
-		order:   identityOrder(len(entries)),
 		filter:  textinput.New(),
 		results: map[int]subscription.BenchmarkResult{
 			0: {Index: 0, Latency: 12 * time.Millisecond},
@@ -277,5 +274,35 @@ func TestServersView_PingColumnAligns(t *testing.T) {
 	}
 	if cols[0] != cols[1] {
 		t.Errorf("ping cells end at columns %d and %d, want the same", cols[0], cols[1])
+	}
+}
+
+// Task #2: a finished ping must not reshuffle the list — the subscription's own
+// order is the intended one — and the fastest server is called out by color.
+func TestServers_PingKeepsOrderAndMarksBest(t *testing.T) {
+	m := serversModel{
+		entries: filterFixture,
+		filter:  textinput.New(),
+		results: map[int]subscription.BenchmarkResult{
+			0: {Index: 0, Latency: 300 * time.Millisecond},
+			1: {Index: 1, Latency: 50 * time.Millisecond},
+			2: {Index: 2, Error: errors.New("timeout")},
+			3: {Index: 3, Latency: 120 * time.Millisecond},
+		},
+	}
+	got, _ := m.Update(benchDoneMsg{})
+	final := got.(serversModel)
+
+	for pos, idx := range final.visible() {
+		if pos != idx {
+			t.Fatalf("ping reordered the list: position %d holds entry %d", pos, idx)
+		}
+	}
+	if best := bestResult(final.results); best != 1 {
+		t.Errorf("bestResult = %d, want 1 (the 50ms server)", best)
+	}
+	// A failed measurement never wins, even as the only one.
+	if best := bestResult(map[int]subscription.BenchmarkResult{2: {Error: errors.New("x")}}); best != -1 {
+		t.Errorf("bestResult over failures only = %d, want -1", best)
 	}
 }

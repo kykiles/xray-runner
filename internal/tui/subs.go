@@ -64,13 +64,19 @@ type subsModel struct {
 
 // SelectSubscription shows the subscription list. On SubsSelected the returned
 // index points into the (possibly reloaded) list, which is also returned.
-func SelectSubscription(subs []subscription.NamedSubscription, cb SubsCallbacks) ([]subscription.NamedSubscription, int, SubsAction, error) {
+// cursor is where the highlight starts: coming back from a subscription lands
+// on the one just used, so the last-used one is visible at a glance. An index
+// past the end (the list shrank) falls back to the top.
+func SelectSubscription(subs []subscription.NamedSubscription, cursor int, cb SubsCallbacks) ([]subscription.NamedSubscription, int, SubsAction, error) {
 	ti := textinput.New()
 	ti.Placeholder = "https://... или vless://..."
 	ti.CharLimit = 512
 	ti.Width = 60
 
-	m := subsModel{subs: subs, cb: cb, input: ti, action: SubsQuit, choice: -1}
+	if cursor < 0 || cursor >= len(subs) {
+		cursor = 0
+	}
+	m := subsModel{subs: subs, cb: cb, cursor: cursor, input: ti, action: SubsQuit, choice: -1}
 	// Nothing to select yet — go straight to the add prompt.
 	if len(subs) == 0 {
 		m.mode = subsAdding

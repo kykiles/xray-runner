@@ -72,7 +72,7 @@ func (m profilesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case benchResultMsg:
 		m.results[msg.Index] = subscription.BenchmarkResult(msg)
 		m.benchDone++
-		return m, m.waitBenchResult()
+		return m, waitBench(m.benchCh)
 	case benchDoneMsg:
 		m.benching = false
 		m.status = okStyle.Render("Пинг завершён")
@@ -113,7 +113,12 @@ func (m profilesModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.benching = true
 		m.benchDone = 0
 		m.status = ""
-		return m, m.startBenchmark()
+		profiles, bench, ctx := m.profiles, m.bench, m.ctx
+		var cmd tea.Cmd
+		m.benchCh, cmd = startBench(len(profiles), func(on func(subscription.BenchmarkResult)) {
+			bench(ctx, profiles, on)
+		})
+		return m, cmd
 	case "s", "ы":
 		// Peek inside a balancer: see, ping and pick its servers one by one. A
 		// single-server profile has nothing to unfold.
@@ -162,34 +167,6 @@ func (m profilesModel) keys() string {
 	return keys + " · ← назад · q выход"
 }
 
-// startBenchmark launches the measurement goroutine; results stream back into
-// Update through benchCh so rows update live.
-func (m *profilesModel) startBenchmark() tea.Cmd {
-	ch := make(chan subscription.BenchmarkResult, len(m.profiles)+1)
-	m.benchCh = ch
-	profiles := m.profiles
-	bench := m.bench
-	ctx := m.ctx
-	go func() {
-		bench(ctx, profiles, func(r subscription.BenchmarkResult) {
-			ch <- r
-		})
-		close(ch)
-	}()
-	return m.waitBenchResult()
-}
-
-func (m profilesModel) waitBenchResult() tea.Cmd {
-	ch := m.benchCh
-	return func() tea.Msg {
-		r, ok := <-ch
-		if !ok {
-			return benchDoneMsg{}
-		}
-		return benchResultMsg(r)
-	}
-}
-
 func (m profilesModel) View() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Серверы") + "\n\n")
@@ -202,18 +179,9 @@ func (m profilesModel) View() string {
 
 	keys := m.keys()
 
-	// Fit the row list into the terminal, reserving the fixed chrome (task #3):
-	// title(2) + header(1) + legend + two indicator lines + the status block. The
-	// status block is reserved even while empty, so starting a ping does not
-	// shrink the list out from under the cursor (task #4).
-	budget := len(m.profiles)
-	if m.height > 0 {
-		reserved := 2 + 1 + legendHeight(m.width, keys) + 2 + 2
-		if budget = m.height - reserved; budget < 1 {
-			budget = 1
-		}
-	}
+	budget := rowBudget(m.height, m.width, keys, len(m.profiles), 0)
 	start, end, above, below := window(len(m.profiles), m.cursor, budget)
+	best := bestResult(m.results)
 
 	b.WriteString(moreUp(above))
 	for i := start; i < end; i++ {
@@ -227,13 +195,18 @@ func (m profilesModel) View() string {
 		if name == "" {
 			name = "(без имени)"
 		}
+		// Gold marks a profile that hides a balancer — the rows worth opening with
+		// s, and the only ones that unfold into a server list.
 		line := tableRow(name, face(p), showPing)
-		if i == m.cursor {
+		switch {
+		case p.Balancer != nil:
+			line = goldStyle.Bold(i == m.cursor).Render(line)
+		case i == m.cursor:
 			line = selectedStyle.Render(line)
 		}
 
 		r, measured := m.results[i]
-		line += pingCell(r, measured, m.benching)
+		line += pingCell(r, measured, m.benching, i == best)
 		b.WriteString("  " + cursor + clip(line, m.width-4) + "\n")
 	}
 	b.WriteString(moreDown(below))

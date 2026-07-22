@@ -3,8 +3,34 @@ package tui
 import (
 	"fmt"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"xray-runner/internal/subscription"
 )
+
+// startBench runs the measurement in the background and streams its results
+// back into Update through the returned channel. Both list screens share it —
+// only what gets measured differs, which is all run closes over.
+func startBench(n int, run func(onResult func(subscription.BenchmarkResult))) (chan subscription.BenchmarkResult, tea.Cmd) {
+	ch := make(chan subscription.BenchmarkResult, n+1)
+	go func() {
+		run(func(r subscription.BenchmarkResult) { ch <- r })
+		close(ch)
+	}()
+	return ch, waitBench(ch)
+}
+
+// waitBench turns the next result off the channel into a message; a closed
+// channel ends the run.
+func waitBench(ch chan subscription.BenchmarkResult) tea.Cmd {
+	return func() tea.Msg {
+		r, ok := <-ch
+		if !ok {
+			return benchDoneMsg{}
+		}
+		return benchResultMsg(r)
+	}
+}
 
 // Both list screens draw one and the same table — NAME PROTOCOL TRANSPORT HOST,
 // plus a right-aligned PING once a measurement runs — so a layout change lands
@@ -48,14 +74,33 @@ func tableRow(name string, e subscription.SubEntry, showPing bool) string {
 		host)
 }
 
+// bestResult is the index of the lowest successful latency, or -1 when nothing
+// has been measured yet. Rows keep the subscription's own order, so the fastest
+// one is called out by color instead of by position.
+func bestResult(results map[int]subscription.BenchmarkResult) int {
+	best := -1
+	for idx, r := range results {
+		if r.Error != nil {
+			continue
+		}
+		if best < 0 || r.Latency < results[best].Latency {
+			best = idx
+		}
+	}
+	return best
+}
+
 // pingCell is the row's PING cell: the measured result, or a placeholder while
 // the benchmark is still working through the list. Empty when neither applies.
-func pingCell(r subscription.BenchmarkResult, measured, benching bool) string {
+func pingCell(r subscription.BenchmarkResult, measured, benching, best bool) string {
 	switch {
 	case measured:
 		style := okStyle
-		if r.Error != nil {
+		switch {
+		case r.Error != nil:
 			style = errStyle
+		case best:
+			style = bestStyle
 		}
 		return "  " + style.Render(padLeft(r.String(), pingWidth))
 	case benching:

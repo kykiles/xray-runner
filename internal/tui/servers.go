@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -47,7 +46,6 @@ type serversModel struct {
 	bench   BenchmarkFunc
 
 	results    map[int]subscription.BenchmarkResult // key: entry index
-	order      []int                                // display order over entries
 	cursor     int                                  // position within visible rows
 	filter     textinput.Model
 	filtering  bool
@@ -82,7 +80,6 @@ func SelectServer(ctx context.Context, title string, entries []subscription.SubE
 		refresh: refresh,
 		bench:   bench,
 		results: map[int]subscription.BenchmarkResult{},
-		order:   identityOrder(len(entries)),
 		cursor:  indexOfServer(entries, lastAddress, lastPort),
 		filter:  fi,
 		action:  ServerQuit,
@@ -115,14 +112,6 @@ func indexOfServer(entries []subscription.SubEntry, address string, port int) in
 	return 0
 }
 
-func identityOrder(n int) []int {
-	order := make([]int, n)
-	for i := range order {
-		order[i] = i
-	}
-	return order
-}
-
 func (m serversModel) Init() tea.Cmd { return nil }
 
 // entryHaystack is the entry flattened to one lowercase string spanning every
@@ -146,15 +135,14 @@ func matchAll(e subscription.SubEntry, terms []string) bool {
 	return true
 }
 
-// visible returns entry indices matching the filter, in display order.
+// visible returns entry indices matching the filter. The subscription's own
+// order is kept as-is — it is the order the panel meant, and a ping run must
+// not shuffle it (task #2); the fastest server is called out by color instead.
 func (m serversModel) visible() []int {
 	terms := strings.Fields(strings.ToLower(strings.TrimSpace(m.filter.Value())))
-	if len(terms) == 0 {
-		return m.order
-	}
-	var out []int
-	for _, idx := range m.order {
-		if matchAll(m.entries[idx], terms) {
+	out := make([]int, 0, len(m.entries))
+	for idx := range m.entries {
+		if len(terms) == 0 || matchAll(m.entries[idx], terms) {
 			out = append(out, idx)
 		}
 	}
@@ -170,10 +158,9 @@ func (m serversModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case benchResultMsg:
 		m.results[msg.Index] = subscription.BenchmarkResult(msg)
 		m.benchDone++
-		return m, m.waitBenchResult()
+		return m, waitBench(m.benchCh)
 	case benchDoneMsg:
 		m.benching = false
-		m.sortByLatency()
 		m.status = okStyle.Render("Пинг завершён")
 		return m, nil
 	case refreshDoneMsg:
@@ -183,7 +170,6 @@ func (m serversModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.entries = msg.entries
-		m.order = identityOrder(len(m.entries))
 		m.results = map[int]subscription.BenchmarkResult{}
 		m.cursor = 0
 		m.status = okStyle.Render(fmt.Sprintf("Подписка обновлена: %d серверов", len(m.entries)))
@@ -252,7 +238,12 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.benching = true
 		m.benchDone = 0
 		m.status = ""
-		return m, m.startBenchmark()
+		entries, bench, ctx := m.entries, m.bench, m.ctx
+		var cmd tea.Cmd
+		m.benchCh, cmd = startBench(len(entries), func(on func(subscription.BenchmarkResult)) {
+			bench(ctx, entries, on)
+		})
+		return m, cmd
 	case "r", "к":
 		// H-1: refreshing mid-benchmark swaps the entry list out from under the
 		// running measurement, and results streaming in with the old indices then
@@ -292,75 +283,12 @@ func (m *serversModel) clampCursor() {
 	}
 }
 
-// startBenchmark launches the measurement goroutine; results stream back into
-// Update through benchCh so rows update live (WS-8).
-func (m *serversModel) startBenchmark() tea.Cmd {
-	ch := make(chan subscription.BenchmarkResult, len(m.entries)+1)
-	m.benchCh = ch
-	entries := m.entries
-	bench := m.bench
-	ctx := m.ctx
-	go func() {
-		bench(ctx, entries, func(r subscription.BenchmarkResult) {
-			ch <- r
-		})
-		close(ch)
-	}()
-	return m.waitBenchResult()
-}
-
-func (m serversModel) waitBenchResult() tea.Cmd {
-	ch := m.benchCh
-	return func() tea.Msg {
-		r, ok := <-ch
-		if !ok {
-			return benchDoneMsg{}
-		}
-		return benchResultMsg(r)
-	}
-}
-
 func (m serversModel) startRefresh() tea.Cmd {
 	refresh := m.refresh
 	return func() tea.Msg {
 		entries, err := refresh()
 		return refreshDoneMsg{entries: entries, err: err}
 	}
-}
-
-// sortByLatency reorders rows: measured servers ascending, then unmeasured/
-// failed ones in original order. The cursor follows its entry.
-func (m *serversModel) sortByLatency() {
-	current := -1
-	if vis := m.visible(); len(vis) > 0 && m.cursor < len(vis) {
-		current = vis[m.cursor]
-	}
-
-	order := identityOrder(len(m.entries))
-	sort.SliceStable(order, func(a, b int) bool {
-		ra, okA := m.results[order[a]]
-		rb, okB := m.results[order[b]]
-		goodA := okA && ra.Error == nil
-		goodB := okB && rb.Error == nil
-		if goodA != goodB {
-			return goodA
-		}
-		if !goodA {
-			return false
-		}
-		return ra.Latency < rb.Latency
-	})
-	m.order = order
-
-	if current >= 0 {
-		for pos, idx := range m.visible() {
-			if idx == current {
-				m.cursor = pos
-				break
-			}
-		}
-	}
-	m.clampCursor()
 }
 
 func (m serversModel) View() string {
@@ -395,23 +323,16 @@ func (m serversModel) View() string {
 	} else {
 		b.WriteString(tableHead(showPing))
 
-		// Fit the row list into the terminal, reserving the fixed chrome so the
-		// legend never gets pushed off the bottom (task #3): title(2) + header(1)
-		// + legend + two indicator lines + the status block, plus the filter when
-		// shown. The status block is reserved even while empty, so starting a ping
-		// does not shrink the list out from under the cursor (task #4).
-		budget := len(vis)
-		if m.height > 0 {
-			reserved := 2 + 1 + legendHeight(m.width, keys) + 2 + 2
-			if m.filtering || m.filter.Value() != "" {
-				reserved += 2
-			}
-			if budget = m.height - reserved; budget < 1 {
-				budget = 1
-			}
+		// The filter row is the only chrome this screen adds over the profile one.
+		extra := 0
+		if m.filtering || m.filter.Value() != "" {
+			extra = 2
 		}
+		budget := rowBudget(m.height, m.width, keys, len(vis), extra)
 		start, end, above, below = window(len(vis), m.cursor, budget)
 	}
+
+	best := bestResult(m.results)
 
 	b.WriteString(moreUp(above))
 	for pos := start; pos < end; pos++ {
@@ -428,7 +349,7 @@ func (m serversModel) View() string {
 		}
 
 		r, measured := m.results[idx]
-		line += pingCell(r, measured, m.benching)
+		line += pingCell(r, measured, m.benching, idx == best)
 
 		if !supportedProtocols[e.Protocol] {
 			line += "  " + warnStyle.Render("⚠ не поддерживается")

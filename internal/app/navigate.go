@@ -211,7 +211,9 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 
 		switch a.nav.level {
 		case levelSubs:
-			subs, choice, action, err := tui.SelectSubscription(a.nav.subs, cb)
+			// subIdx carries the last opened subscription back in, so returning
+			// from a subscription lands the cursor on it instead of the top.
+			subs, choice, action, err := tui.SelectSubscription(a.nav.subs, a.nav.subIdx, cb)
 			if err != nil {
 				return nil, fmt.Errorf("TUI: %w", err)
 			}

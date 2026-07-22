@@ -18,6 +18,12 @@ var (
 	okStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	warnStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	// goldStyle marks a row that hides more behind it: a profile with a balancer,
+	// the only kind that unfolds into a server list.
+	goldStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	// bestStyle marks the fastest measured ping. The list is no longer sorted by
+	// latency, so the winner has to stand out where it stands.
+	bestStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
 	// urlStyle renders a revealed subscription URL: underlined and unfaded so the
 	// terminal shows it as a link and the whole token can be copied.
 	urlStyle = lipgloss.NewStyle().Underline(true)
@@ -36,6 +42,8 @@ func InitStyles() {
 	okStyle = okStyle.Foreground(envColor("COLOR_OK", "2"))
 	warnStyle = warnStyle.Foreground(envColor("COLOR_WARN", "3"))
 	selectedStyle = selectedStyle.Foreground(envColor("COLOR_SELECTED", "6"))
+	goldStyle = goldStyle.Foreground(envColor("COLOR_BALANCER", "220"))
+	bestStyle = bestStyle.Foreground(envColor("COLOR_BEST", "10"))
 }
 
 func envColor(key, def string) lipgloss.Color {
@@ -169,6 +177,19 @@ func window(total, cursor, height int) (start, end, above, below int) {
 	}
 	end = start + height
 	return start, end, start, total - end
+}
+
+// rowBudget is how many list rows fit on screen once the fixed chrome is
+// reserved (task #3): title(2) + header(1) + legend + two scroll indicators +
+// the status block. The status block is reserved even while empty, so starting
+// a ping does not shrink the list out from under the cursor (task #4). extra
+// counts screen-specific lines, like the filter row. Both list screens share
+// this so the two never drift apart. height<=0 (size unknown) shows everything.
+func rowBudget(height, width int, keys string, total, extra int) int {
+	if height <= 0 {
+		return total
+	}
+	return max(1, height-(2+1+legendHeight(width, keys)+2+2+extra))
 }
 
 // legendHeight is how many terminal lines legend(width, keys) occupies, counted
