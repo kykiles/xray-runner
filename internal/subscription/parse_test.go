@@ -43,6 +43,18 @@ func TestParseURL_SSInvalidBase64(t *testing.T) {
 	}
 }
 
+// A JSON subscription may spell the protocol "hysteria" rather than "hy2";
+// everything downstream keys off the normalized name.
+func TestParseXrayJSON_NormalizesHysteria(t *testing.T) {
+	e := parseXrayJSON(map[string]interface{}{
+		"protocol": "hysteria", "address": "a.example.com",
+		"port": float64(443), "password": "x",
+	})
+	if e.Protocol != "hysteria2" {
+		t.Fatalf("Protocol = %q, want hysteria2", e.Protocol)
+	}
+}
+
 func TestParseURL_Hy2AliasNormalizedToHysteria2(t *testing.T) {
 	e, err := parseURL("hy2://pass@h.example.com:443?sni=h.example.com#hy2server")
 	if err != nil {
