@@ -198,28 +198,51 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 // and the request lands in the balancer's fallbackTag ("block" in panel
 // configs). A few seconds later the same profile answers — which is why it
 // connected fine while the benchmark reported a timeout.
+//
+// The first successful request is only the warm-up: it pays DNS, the TCP dial
+// and both TLS handshakes on top of the round trip, so it reads far higher than
+// the link is. The number reported is the one after that, over the connection
+// already in the pool — see warmProbe.
 func probe(ctx context.Context, client *http.Client, checkURL string, deadline time.Time) subscription.BenchmarkResult {
 	var lastErr error
 	for {
-		req, _ := http.NewRequestWithContext(ctx, "GET", checkURL, nil)
-		start := time.Now()
-		resp, err := client.Do(req)
-		switch {
-		case err != nil:
-			lastErr = err
-		case resp.StatusCode == 200 || resp.StatusCode == 204:
-			_ = resp.Body.Close()
-			return subscription.BenchmarkResult{Latency: time.Since(start)}
-		default:
-			_ = resp.Body.Close()
-			lastErr = fmt.Errorf("unexpected status %d", resp.StatusCode)
+		latency, err := timeRequest(ctx, client, checkURL)
+		if err == nil {
+			return warmProbe(ctx, client, checkURL, latency)
 		}
+		lastErr = err
 
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			return subscription.BenchmarkResult{Error: lastErr}
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
+}
+
+// warmProbe repeats the request over the connection the first one established
+// and reports that timing — what the link feels like in use, and the same thing
+// the connected screen shows. cold is the fallback if the repeat fails.
+func warmProbe(ctx context.Context, client *http.Client, checkURL string, cold time.Duration) subscription.BenchmarkResult {
+	latency, err := timeRequest(ctx, client, checkURL)
+	if err != nil {
+		return subscription.BenchmarkResult{Latency: cold}
+	}
+	return subscription.BenchmarkResult{Latency: latency}
+}
+
+// timeRequest times one GET; a non-2xx answer counts as a failure.
+func timeRequest(ctx context.Context, client *http.Client, checkURL string) (time.Duration, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", checkURL, nil)
+	start := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 && resp.StatusCode != 204 {
+		return 0, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	return time.Since(start), nil
 }
 
 func (pb *ProxyBenchmarker) Run(ctx context.Context, entries []subscription.SubEntry, onResult func(subscription.BenchmarkResult)) []subscription.BenchmarkResult {

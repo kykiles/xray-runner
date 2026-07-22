@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -27,7 +26,7 @@ func matching(t *testing.T, query string) []string {
 	terms := strings.Fields(strings.ToLower(strings.TrimSpace(query)))
 	var out []string
 	for _, e := range filterFixture {
-		if len(terms) == 0 || matchAll(e, terms) {
+		if matchTerms(entryHaystack(e), terms) {
 			out = append(out, e.Address)
 		}
 	}
@@ -108,7 +107,7 @@ func TestServersBenchmarkOnlyFiltered(t *testing.T) {
 	m := serversModel{
 		ctx:     context.Background(),
 		entries: filterFixture,
-		filter:  textinput.New(),
+		filter:  newFilter(),
 		results: map[int]subscription.BenchmarkResult{},
 		bench: func(_ context.Context, entries []subscription.SubEntry, on func(subscription.BenchmarkResult)) []subscription.BenchmarkResult {
 			for i, e := range entries {
@@ -118,12 +117,12 @@ func TestServersBenchmarkOnlyFiltered(t *testing.T) {
 			return nil
 		},
 	}
-	m.filter.SetValue("ws")
+	m.filter.input.SetValue("ws")
 
 	next, _ := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
 	sm := next.(serversModel)
 
-	for r := range sm.benchCh {
+	for r := range sm.run.ch {
 		sm.results[r.Index] = r
 	}
 
@@ -139,8 +138,8 @@ func TestServersBenchmarkOnlyFiltered(t *testing.T) {
 	if _, ok := sm.results[1]; ok {
 		t.Error("entry 1 was filtered out but got a result")
 	}
-	if sm.benchTotal != 3 {
-		t.Errorf("benchTotal = %d, want 3", sm.benchTotal)
+	if sm.run.total != 3 {
+		t.Errorf("benchTotal = %d, want 3", sm.run.total)
 	}
 }
 
@@ -161,7 +160,7 @@ func TestServersView_RowsDoNotShiftWhileScrolling(t *testing.T) {
 		m := serversModel{
 			entries: entries,
 			cursor:  cursor,
-			filter:  textinput.New(),
+			filter:  newFilter(),
 			results: map[int]subscription.BenchmarkResult{},
 			width:   120,
 			height:  24,
@@ -202,12 +201,12 @@ func TestServersView_BenchmarkKeepsRowCount(t *testing.T) {
 	model := func(benching bool) serversModel {
 		return serversModel{
 			entries: entries,
-			filter:  textinput.New(),
+			filter:  newFilter(),
 			results: map[int]subscription.BenchmarkResult{},
 			bench: func(context.Context, []subscription.SubEntry, func(subscription.BenchmarkResult)) []subscription.BenchmarkResult {
 				return nil
 			},
-			benching: benching,
+			run:     benchState{running: benching},
 			width:    120,
 			height:   24,
 		}
@@ -269,8 +268,8 @@ func TestServers_RefreshBlockedWhileBenching(t *testing.T) {
 	m := serversModel{
 		entries:  filterFixture,
 		results:  map[int]subscription.BenchmarkResult{},
-		filter:   textinput.New(),
-		benching: true,
+		filter:   newFilter(),
+		run:     benchState{running: true},
 		refresh: func() ([]subscription.SubEntry, error) {
 			t.Fatal("refresh must not start while a benchmark is running")
 			return nil, nil
@@ -296,7 +295,7 @@ func TestServersView_PingColumnAligns(t *testing.T) {
 	}
 	m := serversModel{
 		entries: entries,
-		filter:  textinput.New(),
+		filter:  newFilter(),
 		results: map[int]subscription.BenchmarkResult{
 			0: {Index: 0, Latency: 12 * time.Millisecond},
 			1: {Index: 1, Latency: 1234 * time.Millisecond},
@@ -327,7 +326,7 @@ func TestServersView_PingColumnAligns(t *testing.T) {
 func TestServers_PingKeepsOrderAndMarksBest(t *testing.T) {
 	m := serversModel{
 		entries: filterFixture,
-		filter:  textinput.New(),
+		filter:  newFilter(),
 		results: map[int]subscription.BenchmarkResult{
 			0: {Index: 0, Latency: 300 * time.Millisecond},
 			1: {Index: 1, Latency: 50 * time.Millisecond},
@@ -360,7 +359,7 @@ func TestConfigViewer_OpenScrollClose(t *testing.T) {
 			{Remarks: "de", Address: "de1.example.ru", Port: 443, Protocol: "vless", UUID: "u-1", Network: "ws"},
 		},
 		results: map[int]subscription.BenchmarkResult{},
-		filter:  textinput.New(),
+		filter:  newFilter(),
 		height:  10,
 		width:   80,
 		preview: func(e *subscription.SubEntry) (string, error) {
@@ -417,8 +416,8 @@ func TestProfileConfigViewer_OpenClose(t *testing.T) {
 // Coming back from a session restores the filter, and the cursor must land on
 // the connected server counted among the *visible* rows.
 func TestServers_CursorWithRestoredFilter(t *testing.T) {
-	fi := textinput.New()
-	fi.SetValue("ws")
+	fi := newFilter()
+	fi.input.SetValue("ws")
 	m := serversModel{entries: filterFixture, filter: fi}
 	// "ws" leaves de1 (transport), ws-node (host) and nl1 (transport).
 	if got := m.cursorAt("nl1.example.ru", 0); got != 2 {
@@ -437,12 +436,12 @@ func TestServers_PingCache(t *testing.T) {
 	cache := PingCache{}
 	m := serversModel{
 		entries: filterFixture,
-		filter:  textinput.New(),
+		filter:  newFilter(),
 		results: map[int]subscription.BenchmarkResult{},
 		pings:   cache,
 	}
 
-	next, _ := m.Update(benchResultMsg{Index: 1, Latency: 42 * time.Millisecond})
+	next, _ := m.Update(benchResultMsg{BenchmarkResult: subscription.BenchmarkResult{Index: 1, Latency: 42 * time.Millisecond}})
 	if got := cache[pingKey(filterFixture[1])]; got.Latency != 42*time.Millisecond {
 		t.Fatalf("cache miss for entry 1: %+v", got)
 	}

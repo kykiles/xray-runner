@@ -8,27 +8,16 @@ import (
 	"xray-runner/internal/subscription"
 )
 
-// startBench runs the measurement in the background and streams its results
-// back into Update through the returned channel. Both list screens share it —
-// only what gets measured differs, which is all run closes over.
-func startBench(n int, run func(onResult func(subscription.BenchmarkResult))) (chan subscription.BenchmarkResult, tea.Cmd) {
-	ch := make(chan subscription.BenchmarkResult, n+1)
-	go func() {
-		run(func(r subscription.BenchmarkResult) { ch <- r })
-		close(ch)
-	}()
-	return ch, waitBench(ch)
-}
-
 // waitBench turns the next result off the channel into a message; a closed
-// channel ends the run.
-func waitBench(ch chan subscription.BenchmarkResult) tea.Cmd {
+// channel ends the run. gen tags the message with the run it came from, so a
+// screen can drop what a cancelled run is still emitting.
+func waitBench(ch chan subscription.BenchmarkResult, gen int) tea.Cmd {
 	return func() tea.Msg {
 		r, ok := <-ch
 		if !ok {
-			return benchDoneMsg{}
+			return benchDoneMsg{gen: gen}
 		}
-		return benchResultMsg(r)
+		return benchResultMsg{gen: gen, BenchmarkResult: r}
 	}
 }
 

@@ -212,6 +212,16 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
 			// traffic; give the first check a warm-up window of retries so a
 			// cold miss doesn't flash "нет связи" the instant we connect.
 			ok, latency = connectivityWarmup(ctx, probe, connectivityWarmupWindow, connectivityWarmupInterval)
+			// The first request over a fresh connection pays DNS, the dial and the
+			// TLS handshake on top of the round trip: it reads far higher than the
+			// link is, and then "falls" over the next checks as the pooled
+			// connection gets reused. Report the warm number from the start — it is
+			// also what the benchmark measures, so the two finally agree.
+			if ok {
+				if warmOK, warm := probe(); warmOK {
+					latency = warm
+				}
+			}
 		} else {
 			ok, latency = probe()
 		}

@@ -39,13 +39,12 @@ type profilesModel struct {
 	action   ProfileAction
 	choice   int
 
-	results   map[int]subscription.BenchmarkResult // key: profile index
-	benching  bool
-	benchDone int
-	status    string
-	width     int // terminal width; 0 until the first WindowSizeMsg
-	height    int // terminal height; 0 until the first WindowSizeMsg
-	benchCh   chan subscription.BenchmarkResult
+	results map[int]subscription.BenchmarkResult // key: profile index
+	filter  filterState
+	run     benchState
+	status  string
+	width   int // terminal width; 0 until the first WindowSizeMsg
+	height  int // terminal height; 0 until the first WindowSizeMsg
 }
 
 // SelectProfile shows the profiles of a JSON subscription. It returns the chosen
@@ -65,6 +64,7 @@ func SelectProfile(ctx context.Context, profiles []subscription.Profile, cursor 
 		action:   ProfileQuit,
 		choice:   -1,
 		results:  map[int]subscription.BenchmarkResult{},
+		filter:   newFilter(),
 	}
 	if cursor > 0 && cursor < len(profiles) {
 		m.cursor = cursor
@@ -87,11 +87,19 @@ func (m profilesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 	case benchResultMsg:
-		m.results[msg.Index] = subscription.BenchmarkResult(msg)
-		m.benchDone++
-		return m, waitBench(m.benchCh)
+		// A cancelled run keeps emitting for a moment; its numbers belong to a
+		// selection the user has already moved on from.
+		if !m.run.accept(msg.gen) {
+			return m, nil
+		}
+		m.results[msg.Index] = msg.BenchmarkResult
+		m.run.done++
+		return m, waitBench(m.run.ch, msg.gen)
 	case benchDoneMsg:
-		m.benching = false
+		if !m.run.accept(msg.gen) {
+			return m, nil
+		}
+		m.run.stop()
 		m.status = okStyle.Render("Пинг завершён")
 		return m, nil
 	case tea.KeyMsg:
@@ -116,12 +124,21 @@ func (m profilesModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if handled, cmd := m.filter.key(key); handled {
+		m.clampCursor()
+		return m, cmd
+	}
+
 	// Cyrillic twins mirror the Russian layout (task #7): q→й, b→и, j→о, k→л, l→д.
 	switch key.String() {
 	case "q", "й":
 		m.action = ProfileQuit
 		return m, tea.Quit
 	case "esc", "left":
+		if m.filter.clear() {
+			m.clampCursor()
+			return m, nil
+		}
 		m.action = ProfileBack
 		return m, tea.Quit
 	case "up", "k", "л":
@@ -129,41 +146,57 @@ func (m profilesModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor--
 		}
 	case "down", "j", "о":
-		if m.cursor < len(m.profiles)-1 {
+		if m.cursor < len(m.visible())-1 {
 			m.cursor++
 		}
+	case "/", "f", "а":
+		m.filter.start()
+		m.status = ""
 	case "b", "и":
-		if m.benching || m.bench == nil || len(m.profiles) == 0 {
+		if m.bench == nil {
 			return m, nil
 		}
-		m.benching = true
-		m.benchDone = 0
+		// Ping what is on screen, and restart on a second press — same as the
+		// server list.
+		vis := m.visible()
+		if len(vis) == 0 {
+			return m, nil
+		}
+		profiles := make([]subscription.Profile, len(vis))
+		for i, idx := range vis {
+			profiles[i] = m.profiles[idx]
+		}
 		m.status = ""
-		profiles, bench, ctx := m.profiles, m.bench, m.ctx
-		var cmd tea.Cmd
-		m.benchCh, cmd = startBench(len(profiles), func(on func(subscription.BenchmarkResult)) {
-			bench(ctx, profiles, on)
+		bench := m.bench
+		return m, m.run.start(m.ctx, len(profiles), func(ctx context.Context, on func(subscription.BenchmarkResult)) {
+			// The benchmark indexes the slice it got; map back to profile indices,
+			// which is what m.results is keyed by.
+			bench(ctx, profiles, func(r subscription.BenchmarkResult) {
+				r.Index = vis[r.Index]
+				on(r)
+			})
 		})
-		return m, cmd
 	case "c", "с":
 		m.showConfig()
 	case "s", "ы":
 		// Peek inside a balancer: see, ping and pick its servers one by one. A
 		// single-server profile has nothing to unfold.
-		if len(m.profiles) == 0 || m.profiles[m.cursor].Balancer == nil {
+		p, idx, ok := m.current()
+		if !ok || p.Balancer == nil {
 			return m, nil
 		}
 		m.action = ProfileExpand
-		m.choice = m.cursor
+		m.choice = idx
 		return m, tea.Quit
 	case "enter", "right", "l", "д":
-		if len(m.profiles) == 0 {
+		p, idx, ok := m.current()
+		if !ok {
 			return m, nil
 		}
-		m.choice = m.cursor
+		m.choice = idx
 		// A single-server profile has nothing to balance: go straight to its
 		// server rather than launching a pointless one-outbound config.
-		if m.profiles[m.cursor].Balancer == nil {
+		if p.Balancer == nil {
 			m.action = ProfileExpand
 		} else {
 			m.action = ProfileRun
@@ -173,14 +206,39 @@ func (m profilesModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// visible returns profile indices matching the filter, searched over the same
+// columns the table shows.
+func (m profilesModel) visible() []int {
+	return m.filter.visible(len(m.profiles), func(i int) string {
+		return strings.ToLower(m.profiles[i].Name) + " " + entryHaystack(face(m.profiles[i]))
+	})
+}
+
+// current is the profile under the cursor together with its index in the full
+// list — the cursor counts visible rows, everything else counts profiles.
+func (m profilesModel) current() (subscription.Profile, int, bool) {
+	vis := m.visible()
+	if m.cursor >= len(vis) {
+		return subscription.Profile{}, -1, false
+	}
+	idx := vis[m.cursor]
+	return m.profiles[idx], idx, true
+}
+
+func (m *profilesModel) clampCursor() {
+	if n := len(m.visible()); m.cursor >= n {
+		m.cursor = max(0, n-1)
+	}
+}
+
 // showConfig opens the viewer on the full config the profile under the cursor
 // would launch — including the single-server profiles, which have no server
 // screen to open it from.
 func (m *profilesModel) showConfig() {
-	if len(m.profiles) == 0 || m.preview == nil {
+	p, _, ok := m.current()
+	if !ok || m.preview == nil {
 		return
 	}
-	p := m.profiles[m.cursor]
 	text, err := m.preview(p)
 	if err != nil {
 		m.status = errStyle.Render(fmt.Sprintf("Конфиг недоступен: %v", err))
@@ -205,15 +263,18 @@ func face(p subscription.Profile) subscription.SubEntry {
 // keys is the legend. "s серверы" shows up only on a balancer row — that is the
 // only place there is anything to unfold.
 func (m profilesModel) keys() string {
+	if m.filter.typing {
+		return filterKeys
+	}
 	keys := "  ↑/↓ выбор · → подключить"
-	if m.cursor < len(m.profiles) && m.profiles[m.cursor].Balancer != nil {
+	if p, _, ok := m.current(); ok && p.Balancer != nil {
 		keys += " · s серверы"
 	}
 	keys += " · c конфиг"
 	if m.bench != nil {
 		keys += " · b пинг"
 	}
-	return keys + " · ← назад · q выход"
+	return keys + " · / фильтр · ← назад · q выход"
 }
 
 func (m profilesModel) View() string {
@@ -223,23 +284,37 @@ func (m profilesModel) View() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Серверы") + "\n\n")
 
-	// The PING column appears only once a measurement is running or done, so the
-	// list stays narrow until there is anything to show there.
-	showPing := m.benching || len(m.results) > 0
-
-	b.WriteString(tableHead(showPing))
-
 	keys := m.keys()
 
-	budget := rowBudget(m.height, m.width, keys, len(m.profiles), 0)
-	start, end, above, below := window(len(m.profiles), m.cursor, budget)
+	// The filter row costs the same two lines it does on the server screen.
+	extra := 0
+	if m.filter.shown() {
+		b.WriteString("  Фильтр: " + m.filter.input.View() + "\n\n")
+		extra = 2
+	}
+
+	// The PING column appears only once a measurement is running or done, so the
+	// list stays narrow until there is anything to show there.
+	showPing := m.run.running || len(m.results) > 0
+
+	vis := m.visible()
+	start, end := 0, len(vis)
+	var above, below int
+	if len(vis) == 0 {
+		b.WriteString(dimStyle.Render("  Ничего не найдено") + "\n")
+	} else {
+		b.WriteString(tableHead(showPing))
+		budget := rowBudget(m.height, m.width, keys, len(vis), extra)
+		start, end, above, below = window(len(vis), m.cursor, budget)
+	}
 	best := bestResult(m.results)
 
 	b.WriteString(moreUp(above))
-	for i := start; i < end; i++ {
-		p := m.profiles[i]
+	for pos := start; pos < end; pos++ {
+		idx := vis[pos]
+		p := m.profiles[idx]
 		cursor := "  "
-		if i == m.cursor {
+		if pos == m.cursor {
 			cursor = cursorStyle.Render("▸ ")
 		}
 
@@ -252,20 +327,20 @@ func (m profilesModel) View() string {
 		line := tableRow(name, face(p), showPing)
 		switch {
 		case p.Balancer != nil:
-			line = goldStyle.Bold(i == m.cursor).Render(line)
-		case i == m.cursor:
+			line = goldStyle.Bold(pos == m.cursor).Render(line)
+		case pos == m.cursor:
 			line = selectedStyle.Render(line)
 		}
 
-		r, measured := m.results[i]
-		line += pingCell(r, measured, m.benching, i == best)
+		r, measured := m.results[idx]
+		line += pingCell(r, measured, m.run.running, idx == best)
 		b.WriteString("  " + cursor + clip(line, m.width-4) + "\n")
 	}
 	b.WriteString(moreDown(below))
 
 	// The block always occupies its two lines, empty or not — see the budget above.
-	if m.benching {
-		b.WriteString("\n  " + dimStyle.Render(fmt.Sprintf("⏳ Замер latency... %d/%d", m.benchDone, len(m.profiles))) + "\n")
+	if m.run.running {
+		b.WriteString("\n  " + benchLine(m.run) + "\n")
 	} else {
 		b.WriteString("\n  " + m.status + "\n")
 	}

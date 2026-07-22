@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"xray-runner/internal/subscription"
@@ -66,8 +65,11 @@ var supportedProtocols = map[string]bool{
 	"hysteria":  true,
 }
 
-type benchResultMsg subscription.BenchmarkResult
-type benchDoneMsg struct{}
+type benchResultMsg struct {
+	gen int
+	subscription.BenchmarkResult
+}
+type benchDoneMsg struct{ gen int }
 type refreshDoneMsg struct {
 	entries []subscription.SubEntry
 	err     error
@@ -83,11 +85,8 @@ type serversModel struct {
 	results    map[int]subscription.BenchmarkResult // key: entry index
 	pings      PingCache                            // the same results, kept across screens
 	cursor     int                                  // position within visible rows
-	filter     textinput.Model
-	filtering  bool
-	benching   bool
-	benchDone  int
-	benchTotal int
+	filter     filterState
+	run        benchState
 	refreshing bool
 	status     string
 	width      int // terminal width; 0 until the first WindowSizeMsg
@@ -101,8 +100,6 @@ type serversModel struct {
 
 	action ServerAction
 	choice int
-
-	benchCh chan subscription.BenchmarkResult
 }
 
 // SelectServer shows the server list and returns the chosen entry, or the
@@ -119,11 +116,8 @@ func SelectServer(ctx context.Context, title string, entries []subscription.SubE
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	fi := textinput.New()
-	fi.Placeholder = "поиск по всем столбцам"
-	fi.CharLimit = 64
-	fi.Width = 40
-	fi.SetValue(filter)
+	fi := newFilter()
+	fi.input.SetValue(filter)
 
 	if pings == nil {
 		pings = PingCache{}
@@ -151,9 +145,9 @@ func SelectServer(ctx context.Context, title string, entries []subscription.SubE
 	}
 	final := res.(serversModel)
 	if final.action == ServerSelected && final.choice >= 0 {
-		return &final.entries[final.choice], ServerSelected, final.filter.Value(), nil
+		return &final.entries[final.choice], ServerSelected, final.filter.value(), nil
 	}
-	return nil, final.action, final.filter.Value(), nil
+	return nil, final.action, final.filter.value(), nil
 }
 
 // indexOfServer finds the entry matching address:port, or 0 when there is no
@@ -188,31 +182,11 @@ func entryHaystack(e subscription.SubEntry) string {
 		e.Remarks, e.Address, e.Port, e.Protocol, e.Network))
 }
 
-// matchAll reports whether every space-separated term appears somewhere in the
-// entry. Terms narrow the list (AND); each is a plain substring — typing "vless"
-// finds the protocol column, "ws" the transport, part of a name the name column.
-func matchAll(e subscription.SubEntry, terms []string) bool {
-	hay := entryHaystack(e)
-	for _, t := range terms {
-		if !strings.Contains(hay, t) {
-			return false
-		}
-	}
-	return true
-}
-
 // visible returns entry indices matching the filter. The subscription's own
 // order is kept as-is — it is the order the panel meant, and a ping run must
 // not shuffle it (task #2); the fastest server is called out by color instead.
 func (m serversModel) visible() []int {
-	terms := strings.Fields(strings.ToLower(strings.TrimSpace(m.filter.Value())))
-	out := make([]int, 0, len(m.entries))
-	for idx := range m.entries {
-		if len(terms) == 0 || matchAll(m.entries[idx], terms) {
-			out = append(out, idx)
-		}
-	}
-	return out
+	return m.filter.visible(len(m.entries), func(i int) string { return entryHaystack(m.entries[i]) })
 }
 
 func (m serversModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -222,12 +196,20 @@ func (m serversModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 	case benchResultMsg:
-		m.results[msg.Index] = subscription.BenchmarkResult(msg)
-		m.pings[pingKey(m.entries[msg.Index])] = subscription.BenchmarkResult(msg)
-		m.benchDone++
-		return m, waitBench(m.benchCh)
+		// A cancelled run keeps emitting for a moment; its numbers belong to a
+		// selection the user has already moved on from.
+		if !m.run.accept(msg.gen) {
+			return m, nil
+		}
+		m.results[msg.Index] = msg.BenchmarkResult
+		m.pings[pingKey(m.entries[msg.Index])] = msg.BenchmarkResult
+		m.run.done++
+		return m, waitBench(m.run.ch, msg.gen)
 	case benchDoneMsg:
-		m.benching = false
+		if !m.run.accept(msg.gen) {
+			return m, nil
+		}
+		m.run.stop()
 		m.status = okStyle.Render("Пинг завершён")
 		return m, nil
 	case refreshDoneMsg:
@@ -264,20 +246,7 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.filtering {
-		switch key.Type {
-		case tea.KeyEsc:
-			m.filtering = false
-			m.filter.SetValue("")
-			m.filter.Blur()
-			return m, nil
-		case tea.KeyEnter:
-			m.filtering = false
-			m.filter.Blur()
-			return m, nil
-		}
-		var cmd tea.Cmd
-		m.filter, cmd = m.filter.Update(key)
+	if handled, cmd := m.filter.key(key); handled {
 		m.clampCursor()
 		return m, cmd
 	}
@@ -289,8 +258,7 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.action = ServerQuit
 		return m, tea.Quit
 	case "esc", "left":
-		if m.filter.Value() != "" {
-			m.filter.SetValue("")
+		if m.filter.clear() {
 			m.clampCursor()
 			return m, nil
 		}
@@ -305,17 +273,17 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor++
 		}
 	case "/", "f", "а":
-		m.filtering = true
-		m.filter.Focus()
+		m.filter.start()
 		m.status = ""
 	case "c", "с":
 		m.showConfig()
 	case "b", "и":
-		if m.benching || m.bench == nil {
+		if m.bench == nil {
 			return m, nil
 		}
 		// Ping what is on screen: with a filter applied the rest is not the list
-		// the user is looking at.
+		// the user is looking at. Pressing b again restarts the measurement on the
+		// current selection — the old run is cancelled, not waited out.
 		vis := m.visible()
 		if len(vis) == 0 {
 			return m, nil
@@ -324,13 +292,9 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		for i, idx := range vis {
 			entries[i] = m.entries[idx]
 		}
-		m.benching = true
-		m.benchDone = 0
-		m.benchTotal = len(entries)
 		m.status = ""
-		bench, ctx := m.bench, m.ctx
-		var cmd tea.Cmd
-		m.benchCh, cmd = startBench(len(entries), func(on func(subscription.BenchmarkResult)) {
+		bench := m.bench
+		return m, m.run.start(m.ctx, len(entries), func(ctx context.Context, on func(subscription.BenchmarkResult)) {
 			// The benchmark indexes the slice it got; map back to entry indices,
 			// which is what m.results is keyed by.
 			bench(ctx, entries, func(r subscription.BenchmarkResult) {
@@ -338,12 +302,11 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				on(r)
 			})
 		})
-		return m, cmd
 	case "r", "к":
 		// H-1: refreshing mid-benchmark swaps the entry list out from under the
 		// running measurement, and results streaming in with the old indices then
 		// land on whatever server now sits at that position.
-		if m.refresh == nil || m.refreshing || m.benching {
+		if m.refresh == nil || m.refreshing || m.run.running {
 			return m, nil
 		}
 		m.refreshing = true
@@ -418,21 +381,21 @@ func (m serversModel) View() string {
 	}
 	b.WriteString(titleStyle.Render(title) + "\n\n")
 
-	if m.filtering || m.filter.Value() != "" {
-		b.WriteString("  Фильтр: " + m.filter.View() + "\n\n")
+	if m.filter.shown() {
+		b.WriteString("  Фильтр: " + m.filter.input.View() + "\n\n")
 	}
 
 	keys := "  ↑/↓ выбор · → подключить · c конфиг · / фильтр · ← назад · q выход"
 	if m.bench != nil {
 		keys = "  ↑/↓ выбор · → подключить · c конфиг · b пинг · r обновить · / фильтр · ← назад · q выход"
 	}
-	if m.filtering {
-		keys = "  фильтр: поиск по всем столбцам · enter применить · esc сбросить"
+	if m.filter.typing {
+		keys = filterKeys
 	}
 
 	// The PING column appears only once a measurement is running or done, so the
 	// list stays narrow until there is anything to show there.
-	showPing := m.benching || len(m.results) > 0
+	showPing := m.run.running || len(m.results) > 0
 
 	vis := m.visible()
 	start, end := 0, len(vis)
@@ -442,9 +405,8 @@ func (m serversModel) View() string {
 	} else {
 		b.WriteString(tableHead(showPing))
 
-		// The filter row is the only chrome this screen adds over the profile one.
 		extra := 0
-		if m.filtering || m.filter.Value() != "" {
+		if m.filter.shown() {
 			extra = 2
 		}
 		budget := rowBudget(m.height, m.width, keys, len(vis), extra)
@@ -468,7 +430,7 @@ func (m serversModel) View() string {
 		}
 
 		r, measured := m.results[idx]
-		line += pingCell(r, measured, m.benching, idx == best)
+		line += pingCell(r, measured, m.run.running, idx == best)
 
 		if !supportedProtocols[e.Protocol] {
 			line += "  " + warnStyle.Render("⚠ не поддерживается")
@@ -483,8 +445,8 @@ func (m serversModel) View() string {
 
 	// The block always occupies its two lines, empty or not — see the budget above.
 	switch {
-	case m.benching:
-		b.WriteString("\n  " + dimStyle.Render(fmt.Sprintf("⏳ Замер latency... %d/%d", m.benchDone, m.benchTotal)) + "\n")
+	case m.run.running:
+		b.WriteString("\n  " + benchLine(m.run) + "\n")
 	case m.refreshing:
 		b.WriteString("\n  " + dimStyle.Render("⏳ Обновление подписки...") + "\n")
 	default:
