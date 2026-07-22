@@ -32,10 +32,11 @@ func TestProbeRetriesUntilBalancerIsReady(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	const checkURL = "https://example.invalid/generate_204"
 	base, _ := url.Parse(srv.URL)
 	client := &http.Client{Transport: rewriteHost{base}, Timeout: 5 * time.Second}
 
-	got := probe(context.Background(), client, time.Now().Add(5*time.Second))
+	got := probe(context.Background(), client, checkURL, time.Now().Add(5*time.Second))
 	if got.Error != nil {
 		t.Fatalf("probe: %v", got.Error)
 	}
@@ -45,7 +46,7 @@ func TestProbeRetriesUntilBalancerIsReady(t *testing.T) {
 
 	// A permanently dead endpoint still ends as a failure, not a hang.
 	srv.Close()
-	if dead := probe(context.Background(), client, time.Now().Add(500*time.Millisecond)); dead.Error == nil {
+	if dead := probe(context.Background(), client, checkURL, time.Now().Add(500*time.Millisecond)); dead.Error == nil {
 		t.Errorf("want error for always-failing endpoint, got %v", dead.Latency)
 	}
 }

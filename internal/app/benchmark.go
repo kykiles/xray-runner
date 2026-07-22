@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"xray-runner/internal/config"
 	"xray-runner/internal/subscription"
 	"xray-runner/internal/xray"
 	"xray-runner/internal/xraycfg"
@@ -50,15 +51,20 @@ type ProxyBenchmarker struct {
 	concurrency   int
 	timeout       time.Duration
 	allowInsecure bool
+	checkURL      string
 }
 
-func NewProxyBenchmarker(template *xraycfg.XrayConfig, binary string, concurrency int, timeout time.Duration, allowInsecure bool) *ProxyBenchmarker {
+// NewProxyBenchmarker takes the whole config rather than the four knobs it
+// needs: both call sites used to spell the same defaults out by hand, and one
+// of them drifting is a benchmark that measures something else than the session.
+func NewProxyBenchmarker(template *xraycfg.XrayConfig, binary string, cfg *config.Config) *ProxyBenchmarker {
 	return &ProxyBenchmarker{
 		template:      template,
 		xrayBinary:    binary,
-		concurrency:   concurrency,
-		timeout:       timeout,
-		allowInsecure: allowInsecure,
+		concurrency:   cfg.BenchConcurrency,
+		timeout:       cfg.BenchTimeout,
+		allowInsecure: cfg.AllowInsecure,
+		checkURL:      cfg.CheckURLs()[0],
 	}
 }
 
@@ -161,7 +167,9 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 	if err := runner.Start(ctx); err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
-	defer func() { _ = runner.Stop() }()
+	// Stop only signals; without the Wait the finished process stays a zombie
+	// until the app exits, and one press of "b" leaves one per measured item.
+	defer func() { _ = runner.Stop(); _ = runner.Wait() }()
 
 	if !awaitPort(ctx, ports.http, "", pb.timeout) {
 		return subscription.BenchmarkResult{Error: fmt.Errorf("port %d not ready within timeout", ports.http)}
@@ -173,12 +181,15 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 			return url.Parse(proxyURL)
 		},
 	}
+	// The keep-alive connections point at an xray we are about to kill; without
+	// this they sit in the pool until the GC gets around to the transport.
+	defer transport.CloseIdleConnections()
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   5 * time.Second,
 	}
 
-	return probe(ctx, client, time.Now().Add(pb.timeout))
+	return probe(ctx, client, pb.checkURL, time.Now().Add(pb.timeout))
 }
 
 // probe requests the check URL until it succeeds or the deadline passes. One
@@ -187,10 +198,10 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 // and the request lands in the balancer's fallbackTag ("block" in panel
 // configs). A few seconds later the same profile answers — which is why it
 // connected fine while the benchmark reported a timeout.
-func probe(ctx context.Context, client *http.Client, deadline time.Time) subscription.BenchmarkResult {
+func probe(ctx context.Context, client *http.Client, checkURL string, deadline time.Time) subscription.BenchmarkResult {
 	var lastErr error
 	for {
-		req, _ := http.NewRequestWithContext(ctx, "GET", "https://www.google.com/generate_204", nil)
+		req, _ := http.NewRequestWithContext(ctx, "GET", checkURL, nil)
 		start := time.Now()
 		resp, err := client.Do(req)
 		switch {

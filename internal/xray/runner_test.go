@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -65,6 +66,50 @@ func TestRunnerStartStop(t *testing.T) {
 	if err := r.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
+}
+
+// Stop only signals the process; whoever starts one without going through
+// RunWithRetry has to Wait for it too, or it lingers as a zombie until the app
+// exits — the benchmark used to leave one behind per measured server.
+func TestRunnerStopThenWaitReapsProcess(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("process state is read from /proc")
+	}
+	mockBinary := buildMockXray(t, 0, 30*time.Second)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(configPath, []byte("{}"), 0644)
+
+	r := New(mockBinary, configPath)
+	if err := r.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	pid := r.PID()
+
+	if err := r.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	_ = r.Wait()
+
+	if state, ok := procState(pid); ok && state == "Z" {
+		t.Errorf("pid %d is a zombie after Stop+Wait", pid)
+	}
+}
+
+// procState reads the process state field out of /proc/<pid>/stat, e.g. "Z" for
+// a process that died but was never waited for. ok is false once the entry is
+// gone, which is the reaped case.
+func procState(pid int) (string, bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return "", false
+	}
+	// The comm field is parenthesised and may hold spaces; the state follows it.
+	rest := string(data[strings.LastIndexByte(string(data), ')')+1:])
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return "", false
+	}
+	return fields[0], true
 }
 
 func TestRunnerRunWithRetry(t *testing.T) {
