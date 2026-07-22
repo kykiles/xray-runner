@@ -46,9 +46,15 @@ func pingKey(e subscription.SubEntry) string {
 
 // restore maps the cache onto the entry list currently on screen.
 func (c PingCache) restore(entries []subscription.SubEntry) map[int]subscription.BenchmarkResult {
+	return c.restoreBy(len(entries), func(i int) string { return pingKey(entries[i]) })
+}
+
+// restoreBy is restore over any list: n rows, key(i) naming row i. The profile
+// screen keeps its own measurements the same way, keyed by profile.
+func (c PingCache) restoreBy(n int, key func(int) string) map[int]subscription.BenchmarkResult {
 	out := make(map[int]subscription.BenchmarkResult, len(c))
-	for i, e := range entries {
-		if r, ok := c[pingKey(e)]; ok {
+	for i := range n {
+		if r, ok := c[key(i)]; ok {
 			r.Index = i
 			out[i] = r
 		}

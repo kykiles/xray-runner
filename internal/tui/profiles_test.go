@@ -92,3 +92,36 @@ func TestProfilesView_PingColumnAligns(t *testing.T) {
 		t.Errorf("ping cells end at columns %d and %d, want the same", cols[0], cols[1])
 	}
 }
+
+// The profile screen keeps its measurements the same way the server screen
+// does: pinging whole balancers is slow, and connecting and coming back used to
+// wipe the column on exactly the subscriptions where the profile screen is the
+// only place a ping can be taken.
+func TestProfiles_PingCache(t *testing.T) {
+	profiles := []subscription.Profile{
+		{Name: "auto", Entries: []subscription.SubEntry{{Address: "a.example", Port: 443}}},
+		{Name: "nl", Entries: []subscription.SubEntry{{Address: "b.example", Port: 443}}},
+	}
+	cache := PingCache{}
+	m := profilesModel{
+		profiles: profiles,
+		results:  map[int]subscription.BenchmarkResult{},
+		pings:    cache,
+		filter:   newFilter(),
+	}
+
+	m.Update(benchResultMsg{BenchmarkResult: subscription.BenchmarkResult{Index: 1, Latency: 42 * time.Millisecond}})
+	if got := cache[profileKey(profiles[1])]; got.Latency != 42*time.Millisecond {
+		t.Fatalf("cache miss for profile 1: %+v", got)
+	}
+
+	// Reopening the screen — a refresh may have reordered the profiles.
+	reordered := []subscription.Profile{profiles[1], profiles[0]}
+	restored := profilePings(reordered, cache)
+	if r, ok := restored[0]; !ok || r.Latency != 42*time.Millisecond || r.Index != 0 {
+		t.Fatalf("restored[0] = %+v, ok=%v", r, ok)
+	}
+	if _, ok := restored[1]; ok {
+		t.Error("an unmeasured profile got a result")
+	}
+}

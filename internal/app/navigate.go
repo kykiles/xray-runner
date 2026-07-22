@@ -128,7 +128,10 @@ type nav struct {
 	filter string
 	// pings keeps the last measurement of each server for the whole run, so
 	// coming back from a session shows the numbers instead of an empty column.
-	pings tui.PingCache
+	// profPings does the same for the profile screen, which measures whole
+	// balancers and therefore keeps its own numbers.
+	pings     tui.PingCache
+	profPings tui.PingCache
 }
 
 // subCacheTTL is how long a fetched subscription is reused before the menu goes
@@ -137,6 +140,9 @@ const subCacheTTL = 10 * time.Minute
 
 // setProfiles stores a freshly fetched subscription and stamps the cache.
 func (n *nav) setProfiles(subURL string, profiles []subscription.Profile) {
+	// A fresh fetch is a new list: the old numbers belong to profiles that may no
+	// longer be there, and `r` is how the user asks to measure again.
+	clear(n.profPings)
 	n.profiles = profiles
 	n.flat = subscription.AllSingle(profiles)
 	n.loadedURL = subURL
@@ -255,8 +261,11 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				a.nav.level = levelServers
 				continue
 			}
+			if a.nav.profPings == nil {
+				a.nav.profPings = tui.PingCache{}
+			}
 			pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
-			idx, action, err := tui.SelectProfile(ctx, a.nav.profiles, a.nav.profIdx, pb.RunProfiles, a.profileConfig, a.saveConfig)
+			idx, action, err := tui.SelectProfile(ctx, a.nav.profiles, a.nav.profIdx, a.nav.profPings, pb.RunProfiles, a.profileConfig, a.saveConfig)
 			if err != nil {
 				return nil, fmt.Errorf("TUI: %w", err)
 			}

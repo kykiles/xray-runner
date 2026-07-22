@@ -40,6 +40,7 @@ type profilesModel struct {
 	choice   int
 
 	results map[int]subscription.BenchmarkResult // key: profile index
+	pings   PingCache                            // the same results, kept across screens
 	filter  filterState
 	run     benchState
 	status  string
@@ -50,10 +51,17 @@ type profilesModel struct {
 // SelectProfile shows the profiles of a JSON subscription. It returns the chosen
 // profile index together with what the user wants done with it. cursor is the
 // profile picked last time, so coming back lands on it instead of the top.
-func SelectProfile(ctx context.Context, profiles []subscription.Profile, cursor int, bench ProfileBenchmarkFunc, preview ProfileConfigFunc, save SaveConfigFunc) (int, ProfileAction, error) {
+// pings carries the measurements across screens, exactly as on the server list:
+// the screen writes into it as results arrive, so connecting and coming back
+// shows the numbers instead of an empty column.
+func SelectProfile(ctx context.Context, profiles []subscription.Profile, cursor int, pings PingCache, bench ProfileBenchmarkFunc, preview ProfileConfigFunc, save SaveConfigFunc) (int, ProfileAction, error) {
 	// Leaving the screen ends its benchmark — see SelectServer.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	if pings == nil {
+		pings = PingCache{}
+	}
 
 	m := profilesModel{
 		ctx:      ctx,
@@ -63,7 +71,8 @@ func SelectProfile(ctx context.Context, profiles []subscription.Profile, cursor 
 		saveCfg:  save,
 		action:   ProfileQuit,
 		choice:   -1,
-		results:  map[int]subscription.BenchmarkResult{},
+		results:  profilePings(profiles, pings),
+		pings:    pings,
 		filter:   newFilter(),
 	}
 	if cursor > 0 && cursor < len(profiles) {
@@ -93,6 +102,7 @@ func (m profilesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.results[msg.Index] = msg.BenchmarkResult
+		m.pings[profileKey(m.profiles[msg.Index])] = msg.BenchmarkResult
 		m.run.done++
 		return m, waitBench(m.run.ch, msg.gen)
 	case benchDoneMsg:
@@ -250,6 +260,17 @@ func (m *profilesModel) showConfig() {
 		name = "(без имени)"
 	}
 	m.cfg.show(name, text, saver(m.saveCfg, name, text))
+}
+
+// profileKey names a profile in the ping cache. Name alone is what the user
+// sees, but panels repeat names across locations, so the first server's endpoint
+// goes in too — the pair survives a refresh that shifts positions.
+func profileKey(p subscription.Profile) string {
+	return p.Name + "|" + pingKey(face(p))
+}
+
+func profilePings(profiles []subscription.Profile, c PingCache) map[int]subscription.BenchmarkResult {
+	return c.restoreBy(len(profiles), func(i int) string { return profileKey(profiles[i]) })
 }
 
 // face is the server a profile puts on display. Behind a balancer they are
