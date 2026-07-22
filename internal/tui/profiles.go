@@ -194,8 +194,9 @@ func (m profilesModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.choice = idx
-		// A single-server profile has nothing to balance: go straight to its
-		// server rather than launching a pointless one-outbound config.
+		// A profile without a balancer has nothing to balance: hand it over as
+		// its servers rather than launching a pointless one-outbound config. A
+		// lone server connects straight away — see App.singleServerTarget.
 		if p.Balancer == nil {
 			m.action = ProfileExpand
 		} else {

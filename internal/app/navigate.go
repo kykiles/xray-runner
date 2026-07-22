@@ -26,6 +26,9 @@ type target struct {
 	entry       *subscription.SubEntry  // nil for a balancer profile
 	profileRaw  json.RawMessage         // nil for a single server
 	profileSrvs []subscription.SubEntry // servers behind the profile's balancer
+	// fromProfiles marks a server connected straight from the profile screen,
+	// so "back" returns there instead of a one-row server list.
+	fromProfiles bool
 }
 
 func (t target) isProfile() bool { return t.entry == nil }
@@ -96,7 +99,7 @@ const (
 // on the profile screen, so its server list is not a level the user ever passed
 // through — returning there would show servers they never chose from.
 func backLevel(t *target) navLevel {
-	if t.isProfile() {
+	if t.isProfile() || t.fromProfiles {
 		return levelProfiles
 	}
 	return levelServers
@@ -264,6 +267,11 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				a.nav.level = levelSubs
 			case tui.ProfileExpand:
 				a.nav.profIdx = idx
+				// A profile holding one server has nothing to pick from: connect to
+				// it instead of showing a one-row list. Only balancers unfold.
+				if p := a.nav.profiles[idx]; p.Balancer == nil && len(p.Entries) == 1 {
+					return a.singleServerTarget(p)
+				}
 				a.nav.level = levelServers
 			case tui.ProfileRun:
 				p := a.nav.profiles[idx]
@@ -287,6 +295,27 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 			return t, nil
 		}
 	}
+}
+
+// singleServerTarget connects to the only server of a profile, under that
+// profile's routing and dns — the same target the server screen would build.
+func (a *App) singleServerTarget(p subscription.Profile) (*target, error) {
+	subURL := a.nav.subs[a.nav.subIdx].URL
+	entry := p.Entries[0]
+	if err := entry.Validate(); err != nil {
+		return nil, fmt.Errorf("выбранный сервер невалиден: %w", err)
+	}
+	entry.AllowInsecure = a.cfg.AllowInsecure
+	a.rememberSelection(subURL, &entry)
+
+	t := &target{
+		subURL:       subURL,
+		profileName:  p.Name,
+		entry:        &entry,
+		fromProfiles: true,
+	}
+	t.attachOwner(&p)
+	return t, nil
 }
 
 func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {

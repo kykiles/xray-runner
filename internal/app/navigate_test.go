@@ -24,6 +24,14 @@ func TestBackLevel(t *testing.T) {
 			tgt:  target{entry: &subscription.SubEntry{Address: "example.com", Port: 443}},
 			want: levelServers,
 		},
+		{
+			name: "single-server profile returns to the profile screen",
+			tgt: target{
+				entry:        &subscription.SubEntry{Address: "example.com", Port: 443},
+				fromProfiles: true,
+			},
+			want: levelProfiles,
+		},
 	}
 
 	for _, tc := range tests {
