@@ -44,6 +44,10 @@ type profilesModel struct {
 // SelectProfile shows the profiles of a JSON subscription. It returns the chosen
 // profile index together with what the user wants done with it.
 func SelectProfile(ctx context.Context, profiles []subscription.Profile, bench ProfileBenchmarkFunc) (int, ProfileAction, error) {
+	// Leaving the screen ends its benchmark — see SelectServer.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	m := profilesModel{
 		ctx:      ctx,
 		profiles: profiles,

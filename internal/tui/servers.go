@@ -69,6 +69,11 @@ type serversModel struct {
 // last time, so returning to the list lands the cursor back on it; an empty
 // address or no match starts at the top.
 func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, lastAddress string, lastPort int, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc) (*subscription.SubEntry, ServerAction, error) {
+	// Leaving the screen ends its benchmark: the measurement runs in a goroutine
+	// nobody waits for, and its results land in a model that no longer exists.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	fi := textinput.New()
 	fi.Placeholder = "поиск по всем столбцам"
 	fi.CharLimit = 64
