@@ -1,9 +1,7 @@
 package tui
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -24,6 +22,10 @@ const (
 
 // BenchmarkFunc mirrors the app benchmarker: onResult fires per finished entry.
 type BenchmarkFunc func(ctx context.Context, entries []subscription.SubEntry, onResult func(subscription.BenchmarkResult)) []subscription.BenchmarkResult
+
+// ServerConfigFunc renders the full xray config a session with this server
+// would run — the panel's dns and routing included, not just the outbound.
+type ServerConfigFunc func(e *subscription.SubEntry) (string, error)
 
 var supportedProtocols = map[string]bool{
 	"vless":     true,
@@ -59,11 +61,10 @@ type serversModel struct {
 	width      int // terminal width; 0 until the first WindowSizeMsg
 	height     int // terminal height; 0 until the first WindowSizeMsg
 
-	// cfgLines is the outbound JSON of the server under the cursor, split into
-	// lines; non-nil means the config viewer is open instead of the list.
-	cfgLines []string
-	cfgTitle string
-	cfgTop   int
+	// cfg shows the full session config of the server under the cursor; while
+	// open it takes over the screen.
+	cfg     cfgView
+	preview ServerConfigFunc
 
 	action ServerAction
 	choice int
@@ -76,7 +77,7 @@ type serversModel struct {
 // came from; it may be empty. lastAddress/lastPort name the server connected to
 // last time, so returning to the list lands the cursor back on it; an empty
 // address or no match starts at the top.
-func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, lastAddress string, lastPort int, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc) (*subscription.SubEntry, ServerAction, error) {
+func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, lastAddress string, lastPort int, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc, preview ServerConfigFunc) (*subscription.SubEntry, ServerAction, error) {
 	// Leaving the screen ends its benchmark: the measurement runs in a goroutine
 	// nobody waits for, and its results land in a model that no longer exists.
 	ctx, cancel := context.WithCancel(ctx)
@@ -93,6 +94,7 @@ func SelectServer(ctx context.Context, title string, entries []subscription.SubE
 		entries: entries,
 		refresh: refresh,
 		bench:   bench,
+		preview: preview,
 		results: map[int]subscription.BenchmarkResult{},
 		cursor:  indexOfServer(entries, lastAddress, lastPort),
 		filter:  fi,
@@ -202,21 +204,10 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// The config viewer takes over the screen: it only scrolls and closes.
-	if m.cfgLines != nil {
-		switch key.String() {
-		case "esc", "left", "c", "с":
-			m.cfgLines = nil
-		case "q", "й":
+	if m.cfg.open() {
+		if m.cfg.key(key.String(), m.height, m.width) {
 			m.action = ServerQuit
 			return m, tea.Quit
-		case "up", "k", "л":
-			if m.cfgTop > 0 {
-				m.cfgTop--
-			}
-		case "down", "j", "о":
-			if m.cfgTop < len(m.cfgLines)-m.cfgBudget() {
-				m.cfgTop++
-			}
 		}
 		return m, nil
 	}
@@ -313,56 +304,25 @@ func (m serversModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// showConfig opens the viewer on the outbound JSON of the server under the
-// cursor — the very outbound a session would launch, so what is on screen is
-// what actually runs and can be copied elsewhere.
+// showConfig opens the viewer on the full config a session with the server
+// under the cursor would launch — the panel's dns and routing rules included,
+// so what is on screen is what actually runs.
 func (m *serversModel) showConfig() {
 	vis := m.visible()
-	if len(vis) == 0 {
+	if len(vis) == 0 || m.preview == nil {
 		return
 	}
 	e := m.entries[vis[m.cursor]]
-	raw, err := subscription.ProxyOutboundJSON(&e)
-	var buf bytes.Buffer
-	if err == nil {
-		err = json.Indent(&buf, raw, "", "  ")
-	}
+	text, err := m.preview(&e)
 	if err != nil {
 		m.status = errStyle.Render(fmt.Sprintf("Конфиг недоступен: %v", err))
 		return
 	}
-	m.cfgLines = strings.Split(buf.String(), "\n")
-	m.cfgTitle = orDash(mark(e))
-	if m.cfgTitle == "-" {
-		m.cfgTitle = e.Address
+	title := orDash(mark(e))
+	if title == "-" {
+		title = e.Address
 	}
-	m.cfgTop = 0
-}
-
-const cfgKeys = "  ↑/↓ прокрутка · ← назад · q выход"
-
-// cfgBudget is how many JSON lines fit on screen: title(2) + both scroll
-// indicators + the legend.
-func (m serversModel) cfgBudget() int {
-	if m.height <= 0 {
-		return len(m.cfgLines)
-	}
-	return max(1, m.height-(2+2+legendHeight(m.width, cfgKeys)))
-}
-
-func (m serversModel) viewConfig() string {
-	var b strings.Builder
-	b.WriteString(titleStyle.Render(m.cfgTitle+" · конфиг") + "\n\n")
-
-	end := min(m.cfgTop+m.cfgBudget(), len(m.cfgLines))
-	b.WriteString(moreUp(m.cfgTop))
-	for _, line := range m.cfgLines[m.cfgTop:end] {
-		b.WriteString("  " + clip(line, m.width-2) + "\n")
-	}
-	b.WriteString(moreDown(len(m.cfgLines) - end))
-
-	b.WriteString(legend(m.width, cfgKeys))
-	return b.String()
+	m.cfg.show(title, text)
 }
 
 func (m *serversModel) clampCursor() {
@@ -380,8 +340,8 @@ func (m serversModel) startRefresh() tea.Cmd {
 }
 
 func (m serversModel) View() string {
-	if m.cfgLines != nil {
-		return m.viewConfig()
+	if m.cfg.open() {
+		return m.cfg.view(m.width, m.height)
 	}
 	var b strings.Builder
 	title := "Серверы"

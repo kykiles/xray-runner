@@ -244,7 +244,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				continue
 			}
 			pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
-			idx, action, err := tui.SelectProfile(ctx, a.nav.profiles, pb.RunProfiles)
+			idx, action, err := tui.SelectProfile(ctx, a.nav.profiles, pb.RunProfiles, a.profileConfig)
 			if err != nil {
 				return nil, fmt.Errorf("TUI: %w", err)
 			}
@@ -307,7 +307,7 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 	}
 
 	pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
-	selected, action, err := tui.SelectServer(ctx, a.nav.profileTitle(), a.nav.entries(), lastAddress, lastPort, refresh, pb.Run)
+	selected, action, err := tui.SelectServer(ctx, a.nav.profileTitle(), a.nav.entries(), lastAddress, lastPort, refresh, pb.Run, a.serverConfig)
 	if err != nil {
 		return nil, fmt.Errorf("TUI: %w", err)
 	}
@@ -342,6 +342,27 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 	}
 	t.attachOwner(a.nav.owningProfile(selected))
 	return t, nil
+}
+
+// serverConfig renders what connecting to this server would run: the same
+// target the menu builds on Enter, so the preview carries the profile's routing.
+func (a *App) serverConfig(e *subscription.SubEntry) (string, error) {
+	entry := *e
+	entry.AllowInsecure = a.cfg.AllowInsecure
+	t := &target{profileName: a.nav.profileTitle(), entry: &entry}
+	t.attachOwner(a.nav.owningProfile(&entry))
+	return a.previewConfig(t)
+}
+
+// profileConfig renders what running the whole profile would launch — the only
+// way to see the config of a single-server profile, which never opens a server
+// screen.
+func (a *App) profileConfig(p subscription.Profile) (string, error) {
+	return a.previewConfig(&target{
+		profileName: p.Name,
+		profileRaw:  p.Raw,
+		profileSrvs: p.Entries,
+	})
 }
 
 // loadProfiles fetches between two full-screen menus, so it prints nothing: the

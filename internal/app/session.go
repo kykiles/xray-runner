@@ -4,6 +4,7 @@ package app
 // status screen, then tear everything down. Run repeats this per user action.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -259,6 +260,21 @@ func (a *App) rememberMode() {
 	if err := updateState(func(s *LastState) { s.Mode = a.mode }); err != nil {
 		slog.Warn("failed to save mode state", "error", err)
 	}
+}
+
+// previewConfig renders the config a session with this target would launch,
+// pretty-printed for the TUI viewer. It goes through the same builder as the
+// session, so dns, routing rules and outbounds on screen are the ones that run.
+func (a *App) previewConfig(t *target) (string, error) {
+	raw, _, err := a.buildSessionConfig(t)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "", "  "); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 type sessionPorts struct {

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -318,25 +319,53 @@ func TestConfigViewer_OpenScrollClose(t *testing.T) {
 		filter:  textinput.New(),
 		height:  10,
 		width:   80,
+		preview: func(e *subscription.SubEntry) (string, error) {
+			return fmt.Sprintf("{\n  \"routing\": {},\n  \"host\": %q,\n  \"dns\": {}\n}", e.Address), nil
+		},
 	}
 
 	next, _ := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
 	view := next.(serversModel)
-	if view.cfgLines == nil {
+	if !view.cfg.open() {
 		t.Fatalf("c did not open the config viewer; status: %q", view.status)
 	}
-	if out := view.View(); !strings.Contains(out, `"protocol": "vless"`) || !strings.Contains(out, "конфиг") {
-		t.Fatalf("config view missing server data:\n%s", out)
+	if out := view.View(); !strings.Contains(out, `"routing"`) || !strings.Contains(out, "конфиг") {
+		t.Fatalf("config view missing config data:\n%s", out)
 	}
 
 	next, _ = view.updateKey(tea.KeyMsg{Type: tea.KeyDown})
-	if got := next.(serversModel).cfgTop; got != 1 {
-		t.Fatalf("cfgTop after ↓ = %d, want 1", got)
+	if got := next.(serversModel).cfg.top; got != 1 {
+		t.Fatalf("cfg.top after ↓ = %d, want 1", got)
 	}
 
 	next, _ = next.(serversModel).updateKey(tea.KeyMsg{Type: tea.KeyLeft})
 	back := next.(serversModel)
-	if back.cfgLines != nil || back.action == ServerQuit && back.choice >= 0 {
-		t.Fatalf("← did not return to the list: cfgLines=%v", back.cfgLines)
+	if back.cfg.open() || back.action == ServerQuit && back.choice >= 0 {
+		t.Fatalf("← did not return to the list")
+	}
+}
+
+// The profile screen opens the same viewer, including on a single-server
+// profile — the row that has no server screen to open it from.
+func TestProfileConfigViewer_OpenClose(t *testing.T) {
+	m := profilesModel{
+		profiles: []subscription.Profile{{Name: "solo", Entries: []subscription.SubEntry{{Address: "de1.example.ru"}}}},
+		height:   10,
+		width:    80,
+		preview:  func(subscription.Profile) (string, error) { return "{\n  \"dns\": {},\n  \"routing\": {}\n}", nil },
+	}
+
+	next, _ := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	view := next.(profilesModel)
+	if !view.cfg.open() {
+		t.Fatalf("c did not open the config viewer; status: %q", view.status)
+	}
+	if out := view.View(); !strings.Contains(out, `"dns"`) || !strings.Contains(out, "solo · конфиг") {
+		t.Fatalf("profile config view missing data:\n%s", out)
+	}
+
+	next, _ = view.updateKey(tea.KeyMsg{Type: tea.KeyLeft})
+	if back := next.(profilesModel); back.cfg.open() || back.action == ProfileBack {
+		t.Fatalf("← closed the screen instead of the viewer (action=%v)", back.action)
 	}
 }

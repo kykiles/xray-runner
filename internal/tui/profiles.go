@@ -24,10 +24,16 @@ const (
 	ProfileQuit
 )
 
+// ProfileConfigFunc renders the full xray config running the profile would
+// produce: its outbounds, balancer, dns and routing rules.
+type ProfileConfigFunc func(p subscription.Profile) (string, error)
+
 type profilesModel struct {
 	ctx      context.Context
 	profiles []subscription.Profile
 	bench    ProfileBenchmarkFunc
+	preview  ProfileConfigFunc
+	cfg      cfgView
 	cursor   int
 	action   ProfileAction
 	choice   int
@@ -43,7 +49,7 @@ type profilesModel struct {
 
 // SelectProfile shows the profiles of a JSON subscription. It returns the chosen
 // profile index together with what the user wants done with it.
-func SelectProfile(ctx context.Context, profiles []subscription.Profile, bench ProfileBenchmarkFunc) (int, ProfileAction, error) {
+func SelectProfile(ctx context.Context, profiles []subscription.Profile, bench ProfileBenchmarkFunc, preview ProfileConfigFunc) (int, ProfileAction, error) {
 	// Leaving the screen ends its benchmark — see SelectServer.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -52,6 +58,7 @@ func SelectProfile(ctx context.Context, profiles []subscription.Profile, bench P
 		ctx:      ctx,
 		profiles: profiles,
 		bench:    bench,
+		preview:  preview,
 		action:   ProfileQuit,
 		choice:   -1,
 		results:  map[int]subscription.BenchmarkResult{},
@@ -94,6 +101,15 @@ func (m profilesModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
+	// The config viewer takes over the screen: it only scrolls and closes.
+	if m.cfg.open() {
+		if m.cfg.key(key.String(), m.height, m.width) {
+			m.action = ProfileQuit
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+
 	// Cyrillic twins mirror the Russian layout (task #7): q→й, b→и, j→о, k→л, l→д.
 	switch key.String() {
 	case "q", "й":
@@ -123,6 +139,8 @@ func (m profilesModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			bench(ctx, profiles, on)
 		})
 		return m, cmd
+	case "c", "с":
+		m.showConfig()
 	case "s", "ы":
 		// Peek inside a balancer: see, ping and pick its servers one by one. A
 		// single-server profile has nothing to unfold.
@@ -149,6 +167,26 @@ func (m profilesModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// showConfig opens the viewer on the full config the profile under the cursor
+// would launch — including the single-server profiles, which have no server
+// screen to open it from.
+func (m *profilesModel) showConfig() {
+	if len(m.profiles) == 0 || m.preview == nil {
+		return
+	}
+	p := m.profiles[m.cursor]
+	text, err := m.preview(p)
+	if err != nil {
+		m.status = errStyle.Render(fmt.Sprintf("Конфиг недоступен: %v", err))
+		return
+	}
+	name := p.Name
+	if name == "" {
+		name = "(без имени)"
+	}
+	m.cfg.show(name, text)
+}
+
 // face is the server a profile puts on display. Behind a balancer they are
 // interchangeable endpoints, so the first one stands in for the group.
 func face(p subscription.Profile) subscription.SubEntry {
@@ -165,6 +203,7 @@ func (m profilesModel) keys() string {
 	if m.cursor < len(m.profiles) && m.profiles[m.cursor].Balancer != nil {
 		keys += " · s серверы"
 	}
+	keys += " · c конфиг"
 	if m.bench != nil {
 		keys += " · b пинг"
 	}
@@ -172,6 +211,9 @@ func (m profilesModel) keys() string {
 }
 
 func (m profilesModel) View() string {
+	if m.cfg.open() {
+		return m.cfg.view(m.width, m.height)
+	}
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Серверы") + "\n\n")
 
