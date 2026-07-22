@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -401,7 +402,7 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 	slog.Info("system proxy enabled", "port", ports.http)
 
 	go func() {
-		testProxyConnection(ctx, ports.http)
+		a.testProxyConnection(ctx, ports.http)
 		a.verifySystemProxy(ports.http)
 	}()
 	return nil
@@ -453,7 +454,7 @@ func (a *App) bringUpTun(ctx context.Context, t *target) error {
 		}
 	}
 
-	go testConnectivity(ctx)
+	go reachCheck(ctx, &http.Client{Timeout: 10 * time.Second}, a.cfg.CheckURLs(), "connectivity check")
 	return nil
 }
 

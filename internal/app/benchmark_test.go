@@ -11,10 +11,21 @@ import (
 	"testing"
 	"time"
 
+	"xray-runner/internal/config"
 	"xray-runner/internal/subscription"
 	"xray-runner/internal/xray"
 	"xray-runner/internal/xraycfg"
 )
+
+// benchTestConfig is the benchmarker's config with everything but the timeout
+// pinned: one measurement at a time, so a test's timings stay its own.
+func benchTestConfig(timeout time.Duration) *config.Config {
+	return &config.Config{
+		BenchConcurrency: 1,
+		BenchTimeout:     timeout,
+		HealthCheckURLs:  []string{"https://www.google.com/generate_204"},
+	}
+}
 
 func TestFreePortPair(t *testing.T) {
 	p, err := freePortPair()
@@ -113,7 +124,7 @@ func TestProxyBenchmarkerMeasureOne(t *testing.T) {
 		Network:  "tcp",
 	}
 
-	pb := NewProxyBenchmarker(tc, xrayBin, 1, 8*time.Second, false)
+	pb := NewProxyBenchmarker(tc, xrayBin, benchTestConfig(8*time.Second))
 	result := pb.measureOne(context.Background(), entry, portPair{socks: 10850, http: 10860}, t.TempDir())
 
 	if result.Error != nil {

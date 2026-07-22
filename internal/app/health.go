@@ -36,17 +36,13 @@ func (a *App) awaitTUNInterface(ctx context.Context, name string, timeout time.D
 	return false
 }
 
-func testConnectivity(ctx context.Context) {
-	testURLs := []string{
-		"https://www.google.com/generate_204",
-		"https://connectivitycheck.gstatic.com/generate_204",
-		"https://www.cloudflare.com/cdn-cgi/trace",
-	}
-
-	client := &http.Client{Timeout: 10 * time.Second}
-
+// reachCheck walks the check URLs until one answers, retrying the whole list
+// three times with exponential backoff. The TUN and proxy paths differ only in
+// the client they hand in: one goes out directly, the other through xray's http
+// inbound. label names the check in the log.
+func reachCheck(ctx context.Context, client *http.Client, urls []string, label string, logArgs ...any) {
 	for attempt := 0; attempt < 3; attempt++ {
-		for _, testURL := range testURLs {
+		for _, testURL := range urls {
 			select {
 			case <-ctx.Done():
 				return
@@ -59,12 +55,12 @@ func testConnectivity(ctx context.Context) {
 			}
 			_ = resp.Body.Close()
 			if resp.StatusCode == 204 || resp.StatusCode == 200 {
-				slog.Info("connectivity check ok", "status", resp.StatusCode)
+				slog.Info(label+" ok", append(logArgs, "status", resp.StatusCode)...)
 				return
 			}
 		}
 		delay := time.Duration(1<<uint(attempt)) * time.Second
-		slog.Warn("connectivity check failed", "attempt", attempt+1, "retry_in", delay)
+		slog.Warn(label+" failed", "attempt", attempt+1, "retry_in", delay)
 		// P-1: honour Ctrl+C during the backoff instead of sleeping it out.
 		select {
 		case <-time.After(delay):
@@ -72,7 +68,7 @@ func testConnectivity(ctx context.Context) {
 			return
 		}
 	}
-	slog.Error("connectivity check failed after 3 attempts")
+	slog.Error(label + " failed after 3 attempts")
 }
 
 // dialPort reports whether something is listening on the local port right now.
@@ -122,51 +118,17 @@ func awaitPort(ctx context.Context, port int, label string, timeout time.Duratio
 	return false
 }
 
-func testProxyConnection(ctx context.Context, httpPort int) {
+func (a *App) testProxyConnection(ctx context.Context, httpPort int) {
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", httpPort)
-	testURLs := []string{
-		"https://www.google.com/generate_204",
-		"https://connectivitycheck.gstatic.com/generate_204",
-		"https://www.cloudflare.com/cdn-cgi/trace",
-	}
-
 	transport := &http.Transport{
 		Proxy: func(req *http.Request) (*url.URL, error) {
 			return url.Parse(proxyURL)
 		},
 	}
+	defer transport.CloseIdleConnections()
 
-	for attempt := 0; attempt < 3; attempt++ {
-		for _, testURL := range testURLs {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
-			req, _ := http.NewRequestWithContext(ctx, "GET", testURL, nil)
-			resp, err := client.Do(req)
-			if err != nil {
-				continue
-			}
-			_ = resp.Body.Close()
-
-			if resp.StatusCode == 204 || resp.StatusCode == 200 {
-				slog.Info("proxy test ok", "proxy", proxyURL, "status", resp.StatusCode)
-				return
-			}
-		}
-		delay := time.Duration(1<<uint(attempt)) * time.Second
-		slog.Warn("proxy test failed", "attempt", attempt+1, "retry_in", delay)
-		// P-1: honour Ctrl+C during the backoff instead of sleeping it out.
-		select {
-		case <-time.After(delay):
-		case <-ctx.Done():
-			return
-		}
-	}
-	slog.Error("proxy test failed after 3 attempts")
+	reachCheck(ctx, &http.Client{Transport: transport, Timeout: 10 * time.Second},
+		a.cfg.CheckURLs(), "proxy test", "proxy", proxyURL)
 }
 
 func (a *App) healthCheckLoopPorts(ctx context.Context, socksPort, httpPort int) {
@@ -219,9 +181,10 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
 
 	consecutiveFails := 0
 	client := &http.Client{Timeout: 10 * time.Second}
+	checkURL := a.cfg.CheckURLs()[0]
 	probe := func() (bool, time.Duration) {
 		start := time.Now()
-		req, _ := http.NewRequestWithContext(ctx, "GET", "https://www.google.com/generate_204", nil)
+		req, _ := http.NewRequestWithContext(ctx, "GET", checkURL, nil)
 		resp, err := client.Do(req)
 		if err != nil {
 			return false, time.Since(start)

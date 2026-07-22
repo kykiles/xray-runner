@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -23,6 +24,20 @@ type Config struct {
 	HWID            string
 	HWIDDeviceModel string
 	AllowInsecure   bool
+	// HealthCheckURLs are tried in order until one answers. Overridable because
+	// an unreachable default (google is blocked in places this tool is used for)
+	// reads as "connection lost" and restarts a perfectly healthy core.
+	HealthCheckURLs  []string
+	BenchConcurrency int
+	BenchTimeout     time.Duration
+}
+
+// defaultHealthCheckURLs are captive-portal probes: tiny, unauthenticated, and
+// answering 204 from several independent operators.
+var defaultHealthCheckURLs = []string{
+	"https://www.google.com/generate_204",
+	"https://connectivitycheck.gstatic.com/generate_204",
+	"https://www.cloudflare.com/cdn-cgi/trace",
 }
 
 func Load(filenames ...string) (*Config, error) {
@@ -40,6 +55,30 @@ func Load(filenames ...string) (*Config, error) {
 		}
 		return b
 	}
+	intOr := func(key string, def int) int {
+		v := os.Getenv(key)
+		if v == "" {
+			return def
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			errs = append(errs, fmt.Errorf("%s: ожидается положительное число, получено %q", key, v))
+			return def
+		}
+		return n
+	}
+	durationOr := func(key string, def time.Duration) time.Duration {
+		v := os.Getenv(key)
+		if v == "" {
+			return def
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			errs = append(errs, fmt.Errorf("%s: ожидается длительность вида 8s, получено %q", key, v))
+			return def
+		}
+		return d
+	}
 
 	cfg := &Config{
 		VlessURL:        os.Getenv("VLESS_URL"),
@@ -54,6 +93,12 @@ func Load(filenames ...string) (*Config, error) {
 		HWID:            os.Getenv("HWID"),
 		HWIDDeviceModel: envOr("HWID_DEVICE_MODEL", "xray-runner"),
 		AllowInsecure:   boolOr("ALLOW_INSECURE", false),
+		HealthCheckURLs: healthCheckURLs(),
+		// Three at a time keeps the measurement honest: each one runs its own xray
+		// instance, and a machine juggling more of them measures the CPU, not the
+		// servers.
+		BenchConcurrency: intOr("BENCH_CONCURRENCY", 3),
+		BenchTimeout:     durationOr("BENCH_TIMEOUT", 8*time.Second),
 	}
 
 	if cfg.Mode != "proxy" && cfg.Mode != "tun" {
@@ -64,6 +109,30 @@ func Load(filenames ...string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// CheckURLs is the probe list, never empty: a Config assembled by hand (tests,
+// or a future caller that skips Load) would otherwise index into nothing.
+func (c *Config) CheckURLs() []string {
+	if len(c.HealthCheckURLs) == 0 {
+		return defaultHealthCheckURLs
+	}
+	return c.HealthCheckURLs
+}
+
+// healthCheckURLs reads the comma-separated override, falling back to the
+// built-in list when it is unset or holds nothing usable.
+func healthCheckURLs() []string {
+	var out []string
+	for _, u := range strings.Split(os.Getenv("HEALTH_CHECK_URL"), ",") {
+		if u = strings.TrimSpace(u); u != "" {
+			out = append(out, u)
+		}
+	}
+	if len(out) == 0 {
+		return defaultHealthCheckURLs
+	}
+	return out
 }
 
 func envOr(key, def string) string {

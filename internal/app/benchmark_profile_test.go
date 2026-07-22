@@ -84,7 +84,7 @@ func TestBuildProfileBenchConfigKeepsBalancerAndRouting(t *testing.T) {
 // A profile that carries no panel config is one server; it must not be pushed
 // through the profile-merge path, which has no config to merge.
 func TestMeasureProfileWithoutRawRejectsEmptyProfile(t *testing.T) {
-	pb := NewProxyBenchmarker(nil, "", 1, 0, false)
+	pb := NewProxyBenchmarker(nil, "", benchTestConfig(0))
 	r := pb.measureProfile(t.Context(), subscription.Profile{}, portPair{}, t.TempDir())
 	if r.Error == nil {
 		t.Fatal("measureProfile() error = nil, want an error for a profile with no servers")
