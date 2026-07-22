@@ -178,21 +178,37 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 		Timeout:   5 * time.Second,
 	}
 
-	start := time.Now()
-	req, _ := http.NewRequestWithContext(ctx, "GET", "https://www.google.com/generate_204", nil)
-	resp, err := client.Do(req)
-	if err != nil {
-		return subscription.BenchmarkResult{Error: err}
-	}
-	_ = resp.Body.Close()
+	return probe(ctx, client, time.Now().Add(pb.timeout))
+}
 
-	if resp.StatusCode != 204 && resp.StatusCode != 200 {
-		return subscription.BenchmarkResult{
-			Error: fmt.Errorf("unexpected status %d", resp.StatusCode),
+// probe requests the check URL until it succeeds or the deadline passes. One
+// shot is not enough for a profile with an observatory-driven balancer: right
+// after start the observer has no measurement yet, so leastLoad matches nothing
+// and the request lands in the balancer's fallbackTag ("block" in panel
+// configs). A few seconds later the same profile answers — which is why it
+// connected fine while the benchmark reported a timeout.
+func probe(ctx context.Context, client *http.Client, deadline time.Time) subscription.BenchmarkResult {
+	var lastErr error
+	for {
+		req, _ := http.NewRequestWithContext(ctx, "GET", "https://www.google.com/generate_204", nil)
+		start := time.Now()
+		resp, err := client.Do(req)
+		switch {
+		case err != nil:
+			lastErr = err
+		case resp.StatusCode == 200 || resp.StatusCode == 204:
+			_ = resp.Body.Close()
+			return subscription.BenchmarkResult{Latency: time.Since(start)}
+		default:
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("unexpected status %d", resp.StatusCode)
 		}
-	}
 
-	return subscription.BenchmarkResult{Latency: time.Since(start)}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return subscription.BenchmarkResult{Error: lastErr}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
 }
 
 func (pb *ProxyBenchmarker) Run(ctx context.Context, entries []subscription.SubEntry, onResult func(subscription.BenchmarkResult)) []subscription.BenchmarkResult {
