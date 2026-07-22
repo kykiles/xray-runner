@@ -23,13 +23,14 @@ func (a *App) saveConfig(name, text string) (string, error) {
 		sub = a.nav.subs[a.nav.subIdx].Name
 	}
 	dir := filepath.Join(configsDir, safeName(sub))
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("создать %s: %w", dir, err)
 	}
-	// The config carries the server's UUID/password: 0600, and handed back to the
-	// user when the tool runs under sudo (TUN mode).
+	// Readable by the user's editor: the config carries the server's UUID/password,
+	// but it is a file the user asked for and wants to open. Ownership is handed
+	// back when the tool runs under sudo (TUN mode).
 	path := filepath.Join(dir, safeName(name)+".json")
-	if err := os.WriteFile(path, []byte(text+"\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(text+"\n"), 0644); err != nil {
 		return "", fmt.Errorf("записать %s: %w", path, err)
 	}
 	_ = system.RestoreSudoOwner(dir)
