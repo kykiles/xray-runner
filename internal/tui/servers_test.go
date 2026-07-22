@@ -306,3 +306,37 @@ func TestServers_PingKeepsOrderAndMarksBest(t *testing.T) {
 		t.Errorf("bestResult over failures only = %d, want -1", best)
 	}
 }
+
+// c opens the config viewer on the server under the cursor, ↓ scrolls it and ←
+// returns to the list without leaving the screen.
+func TestConfigViewer_OpenScrollClose(t *testing.T) {
+	m := serversModel{
+		entries: []subscription.SubEntry{
+			{Remarks: "de", Address: "de1.example.ru", Port: 443, Protocol: "vless", UUID: "u-1", Network: "ws"},
+		},
+		results: map[int]subscription.BenchmarkResult{},
+		filter:  textinput.New(),
+		height:  10,
+		width:   80,
+	}
+
+	next, _ := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	view := next.(serversModel)
+	if view.cfgLines == nil {
+		t.Fatalf("c did not open the config viewer; status: %q", view.status)
+	}
+	if out := view.View(); !strings.Contains(out, `"protocol": "vless"`) || !strings.Contains(out, "конфиг") {
+		t.Fatalf("config view missing server data:\n%s", out)
+	}
+
+	next, _ = view.updateKey(tea.KeyMsg{Type: tea.KeyDown})
+	if got := next.(serversModel).cfgTop; got != 1 {
+		t.Fatalf("cfgTop after ↓ = %d, want 1", got)
+	}
+
+	next, _ = next.(serversModel).updateKey(tea.KeyMsg{Type: tea.KeyLeft})
+	back := next.(serversModel)
+	if back.cfgLines != nil || back.action == ServerQuit && back.choice >= 0 {
+		t.Fatalf("← did not return to the list: cfgLines=%v", back.cfgLines)
+	}
+}
