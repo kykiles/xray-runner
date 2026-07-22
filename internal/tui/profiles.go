@@ -49,8 +49,9 @@ type profilesModel struct {
 }
 
 // SelectProfile shows the profiles of a JSON subscription. It returns the chosen
-// profile index together with what the user wants done with it.
-func SelectProfile(ctx context.Context, profiles []subscription.Profile, bench ProfileBenchmarkFunc, preview ProfileConfigFunc, save SaveConfigFunc) (int, ProfileAction, error) {
+// profile index together with what the user wants done with it. cursor is the
+// profile picked last time, so coming back lands on it instead of the top.
+func SelectProfile(ctx context.Context, profiles []subscription.Profile, cursor int, bench ProfileBenchmarkFunc, preview ProfileConfigFunc, save SaveConfigFunc) (int, ProfileAction, error) {
 	// Leaving the screen ends its benchmark — see SelectServer.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -64,6 +65,9 @@ func SelectProfile(ctx context.Context, profiles []subscription.Profile, bench P
 		action:   ProfileQuit,
 		choice:   -1,
 		results:  map[int]subscription.BenchmarkResult{},
+	}
+	if cursor > 0 && cursor < len(profiles) {
+		m.cursor = cursor
 	}
 
 	res, err := tea.NewProgram(m, tea.WithAltScreen()).Run()

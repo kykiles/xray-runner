@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -82,8 +83,9 @@ type serversModel struct {
 // action that ended the screen (back/quit). title names the profile the servers
 // came from; it may be empty. lastAddress/lastPort name the server connected to
 // last time, so returning to the list lands the cursor back on it; an empty
-// address or no match starts at the top.
-func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, lastAddress string, lastPort int, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc, preview ServerConfigFunc, save SaveConfigFunc) (*subscription.SubEntry, ServerAction, error) {
+// address or no match starts at the top. filter is the search the screen was
+// left with, restored on the way back in and handed out again on exit.
+func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, lastAddress string, lastPort int, filter string, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc, preview ServerConfigFunc, save SaveConfigFunc) (*subscription.SubEntry, ServerAction, string, error) {
 	// Leaving the screen ends its benchmark: the measurement runs in a goroutine
 	// nobody waits for, and its results land in a model that no longer exists.
 	ctx, cancel := context.WithCancel(ctx)
@@ -93,6 +95,7 @@ func SelectServer(ctx context.Context, title string, entries []subscription.SubE
 	fi.Placeholder = "поиск по всем столбцам"
 	fi.CharLimit = 64
 	fi.Width = 40
+	fi.SetValue(filter)
 
 	m := serversModel{
 		ctx:     ctx,
@@ -103,21 +106,21 @@ func SelectServer(ctx context.Context, title string, entries []subscription.SubE
 		preview: preview,
 		saveCfg: save,
 		results: map[int]subscription.BenchmarkResult{},
-		cursor:  indexOfServer(entries, lastAddress, lastPort),
 		filter:  fi,
 		action:  ServerQuit,
 		choice:  -1,
 	}
+	m.cursor = m.cursorAt(lastAddress, lastPort)
 
 	res, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if err != nil {
-		return nil, ServerQuit, err
+		return nil, ServerQuit, "", err
 	}
 	final := res.(serversModel)
 	if final.action == ServerSelected && final.choice >= 0 {
-		return &final.entries[final.choice], ServerSelected, nil
+		return &final.entries[final.choice], ServerSelected, final.filter.Value(), nil
 	}
-	return nil, final.action, nil
+	return nil, final.action, final.filter.Value(), nil
 }
 
 // indexOfServer finds the entry matching address:port, or 0 when there is no
@@ -133,6 +136,13 @@ func indexOfServer(entries []subscription.SubEntry, address string, port int) in
 		}
 	}
 	return 0
+}
+
+// cursorAt is where the cursor starts: the row of the last connected server.
+// The cursor counts visible rows, so with a filter restored the server has to be
+// looked up among those, not among all entries.
+func (m serversModel) cursorAt(address string, port int) int {
+	return max(0, slices.Index(m.visible(), indexOfServer(m.entries, address, port)))
 }
 
 func (m serversModel) Init() tea.Cmd { return nil }

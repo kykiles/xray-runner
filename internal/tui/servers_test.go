@@ -413,3 +413,19 @@ func TestProfileConfigViewer_OpenClose(t *testing.T) {
 		t.Fatalf("← closed the screen instead of the viewer (action=%v)", back.action)
 	}
 }
+
+// Coming back from a session restores the filter, and the cursor must land on
+// the connected server counted among the *visible* rows.
+func TestServers_CursorWithRestoredFilter(t *testing.T) {
+	fi := textinput.New()
+	fi.SetValue("ws")
+	m := serversModel{entries: filterFixture, filter: fi}
+	// "ws" leaves de1 (transport), ws-node (host) and nl1 (transport).
+	if got := m.cursorAt("nl1.example.ru", 0); got != 2 {
+		t.Errorf("cursor = %d, want 2", got)
+	}
+	// Filtered out: fall back to the top instead of pointing at another server.
+	if got := m.cursorAt("de2.example.ru", 0); got != 0 {
+		t.Errorf("cursor for a filtered-out server = %d, want 0", got)
+	}
+}

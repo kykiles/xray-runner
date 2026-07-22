@@ -118,6 +118,11 @@ type nav struct {
 	// time. `r` on the server screen forces a fresh fetch.
 	loadedURL string
 	loadedAt  time.Time
+	// filter is the server screen's search, kept across a session so that going
+	// back from a connection shows the list the user left. The screen itself
+	// clears it on ← (first press drops the filter, second one goes back), so
+	// walking up a level resets it without any help from here.
+	filter string
 }
 
 // subCacheTTL is how long a fetched subscription is reused before the menu goes
@@ -244,7 +249,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				continue
 			}
 			pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
-			idx, action, err := tui.SelectProfile(ctx, a.nav.profiles, pb.RunProfiles, a.profileConfig, a.saveConfig)
+			idx, action, err := tui.SelectProfile(ctx, a.nav.profiles, a.nav.profIdx, pb.RunProfiles, a.profileConfig, a.saveConfig)
 			if err != nil {
 				return nil, fmt.Errorf("TUI: %w", err)
 			}
@@ -307,10 +312,11 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 	}
 
 	pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
-	selected, action, err := tui.SelectServer(ctx, a.nav.profileTitle(), a.nav.entries(), lastAddress, lastPort, refresh, pb.Run, a.serverConfig, a.saveConfig)
+	selected, action, filter, err := tui.SelectServer(ctx, a.nav.profileTitle(), a.nav.entries(), lastAddress, lastPort, a.nav.filter, refresh, pb.Run, a.serverConfig, a.saveConfig)
 	if err != nil {
 		return nil, fmt.Errorf("TUI: %w", err)
 	}
+	a.nav.filter = filter
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
