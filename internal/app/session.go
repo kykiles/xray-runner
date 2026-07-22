@@ -4,7 +4,6 @@ package app
 // status screen, then tear everything down. Run repeats this per user action.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -264,17 +263,26 @@ func (a *App) rememberMode() {
 
 // previewConfig renders the config a session with this target would launch,
 // pretty-printed for the TUI viewer. It goes through the same builder as the
-// session, so dns, routing rules and outbounds on screen are the ones that run.
+// session, so dns, routing rules and outbounds on screen are the ones that run —
+// minus what this tool bolts on top: our inbounds (SOCKS/HTTP or the TUN
+// interface), our log level, and the direct-path binding TUN mode adds. None of
+// that comes from the panel, and showing it only obscures the real config.
 func (a *App) previewConfig(t *target) (string, error) {
-	raw, _, err := a.buildSessionConfig(t)
+	raw, _, err := a.buildModeConfig(t) // not buildSessionConfig: skips the TUN sendThrough binding
 	if err != nil {
 		return "", err
 	}
-	var buf bytes.Buffer
-	if err := json.Indent(&buf, raw, "", "  "); err != nil {
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return "", err
 	}
-	return buf.String(), nil
+	delete(cfg, "inbounds")
+	delete(cfg, "log")
+	pretty, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(pretty), nil
 }
 
 type sessionPorts struct {

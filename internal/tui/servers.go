@@ -27,6 +27,10 @@ type BenchmarkFunc func(ctx context.Context, entries []subscription.SubEntry, on
 // would run — the panel's dns and routing included, not just the outbound.
 type ServerConfigFunc func(e *subscription.SubEntry) (string, error)
 
+// SaveConfigFunc writes a shown config to disk under the given name and returns
+// the path it landed at.
+type SaveConfigFunc func(name, text string) (string, error)
+
 var supportedProtocols = map[string]bool{
 	"vless":     true,
 	"vmess":     true,
@@ -65,6 +69,7 @@ type serversModel struct {
 	// open it takes over the screen.
 	cfg     cfgView
 	preview ServerConfigFunc
+	saveCfg SaveConfigFunc
 
 	action ServerAction
 	choice int
@@ -77,7 +82,7 @@ type serversModel struct {
 // came from; it may be empty. lastAddress/lastPort name the server connected to
 // last time, so returning to the list lands the cursor back on it; an empty
 // address or no match starts at the top.
-func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, lastAddress string, lastPort int, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc, preview ServerConfigFunc) (*subscription.SubEntry, ServerAction, error) {
+func SelectServer(ctx context.Context, title string, entries []subscription.SubEntry, lastAddress string, lastPort int, refresh func() ([]subscription.SubEntry, error), bench BenchmarkFunc, preview ServerConfigFunc, save SaveConfigFunc) (*subscription.SubEntry, ServerAction, error) {
 	// Leaving the screen ends its benchmark: the measurement runs in a goroutine
 	// nobody waits for, and its results land in a model that no longer exists.
 	ctx, cancel := context.WithCancel(ctx)
@@ -95,6 +100,7 @@ func SelectServer(ctx context.Context, title string, entries []subscription.SubE
 		refresh: refresh,
 		bench:   bench,
 		preview: preview,
+		saveCfg: save,
 		results: map[int]subscription.BenchmarkResult{},
 		cursor:  indexOfServer(entries, lastAddress, lastPort),
 		filter:  fi,
@@ -322,7 +328,7 @@ func (m *serversModel) showConfig() {
 	if title == "-" {
 		title = e.Address
 	}
-	m.cfg.show(title, text)
+	m.cfg.show(title, text, saver(m.saveCfg, title, text))
 }
 
 func (m *serversModel) clampCursor() {

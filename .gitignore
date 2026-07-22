@@ -59,3 +59,6 @@ hwid.txt
 
 # dumped bare links (contain UUIDs/passwords)
 keys/
+
+# configs saved from the viewer (contain UUIDs/passwords)
+configs/

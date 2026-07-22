@@ -33,6 +33,7 @@ type profilesModel struct {
 	profiles []subscription.Profile
 	bench    ProfileBenchmarkFunc
 	preview  ProfileConfigFunc
+	saveCfg  SaveConfigFunc
 	cfg      cfgView
 	cursor   int
 	action   ProfileAction
@@ -49,7 +50,7 @@ type profilesModel struct {
 
 // SelectProfile shows the profiles of a JSON subscription. It returns the chosen
 // profile index together with what the user wants done with it.
-func SelectProfile(ctx context.Context, profiles []subscription.Profile, bench ProfileBenchmarkFunc, preview ProfileConfigFunc) (int, ProfileAction, error) {
+func SelectProfile(ctx context.Context, profiles []subscription.Profile, bench ProfileBenchmarkFunc, preview ProfileConfigFunc, save SaveConfigFunc) (int, ProfileAction, error) {
 	// Leaving the screen ends its benchmark — see SelectServer.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -59,6 +60,7 @@ func SelectProfile(ctx context.Context, profiles []subscription.Profile, bench P
 		profiles: profiles,
 		bench:    bench,
 		preview:  preview,
+		saveCfg:  save,
 		action:   ProfileQuit,
 		choice:   -1,
 		results:  map[int]subscription.BenchmarkResult{},
@@ -184,7 +186,7 @@ func (m *profilesModel) showConfig() {
 	if name == "" {
 		name = "(без имени)"
 	}
-	m.cfg.show(name, text)
+	m.cfg.show(name, text, saver(m.saveCfg, name, text))
 }
 
 // face is the server a profile puts on display. Behind a balancer they are

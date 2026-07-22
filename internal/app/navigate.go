@@ -244,7 +244,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				continue
 			}
 			pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
-			idx, action, err := tui.SelectProfile(ctx, a.nav.profiles, pb.RunProfiles, a.profileConfig)
+			idx, action, err := tui.SelectProfile(ctx, a.nav.profiles, pb.RunProfiles, a.profileConfig, a.saveConfig)
 			if err != nil {
 				return nil, fmt.Errorf("TUI: %w", err)
 			}
@@ -307,7 +307,7 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 	}
 
 	pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
-	selected, action, err := tui.SelectServer(ctx, a.nav.profileTitle(), a.nav.entries(), lastAddress, lastPort, refresh, pb.Run, a.serverConfig)
+	selected, action, err := tui.SelectServer(ctx, a.nav.profileTitle(), a.nav.entries(), lastAddress, lastPort, refresh, pb.Run, a.serverConfig, a.saveConfig)
 	if err != nil {
 		return nil, fmt.Errorf("TUI: %w", err)
 	}
