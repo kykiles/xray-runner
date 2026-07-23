@@ -51,7 +51,7 @@ type ProxyBenchmarker struct {
 	concurrency   int
 	timeout       time.Duration
 	allowInsecure bool
-	checkURL      string
+	checkURLs     []string
 }
 
 // NewProxyBenchmarker takes the whole config rather than the four knobs it
@@ -64,7 +64,7 @@ func NewProxyBenchmarker(template *xraycfg.XrayConfig, binary string, cfg *confi
 		concurrency:   cfg.BenchConcurrency,
 		timeout:       cfg.BenchTimeout,
 		allowInsecure: cfg.AllowInsecure,
-		checkURL:      cfg.CheckURLs()[0],
+		checkURLs:     cfg.CheckURLs(),
 	}
 }
 
@@ -189,10 +189,13 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 		Timeout:   5 * time.Second,
 	}
 
-	return probe(ctx, client, pb.checkURL, time.Now().Add(pb.timeout))
+	return probe(ctx, client, pb.checkURLs, time.Now().Add(pb.timeout))
 }
 
-// probe requests the check URL until it succeeds or the deadline passes. One
+// probe requests the check URLs until one succeeds or the deadline passes. The
+// whole list is tried on every round, not just the first entry: a server that
+// blocks google (or a provider that does) would otherwise read as "timeout"
+// while the link works fine. One
 // shot is not enough for a profile with an observatory-driven balancer: right
 // after start the observer has no measurement yet, so leastLoad matches nothing
 // and the request lands in the balancer's fallbackTag ("block" in panel
@@ -203,14 +206,16 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 // and both TLS handshakes on top of the round trip, so it reads far higher than
 // the link is. The number reported is the one after that, over the connection
 // already in the pool — see warmProbe.
-func probe(ctx context.Context, client *http.Client, checkURL string, deadline time.Time) subscription.BenchmarkResult {
+func probe(ctx context.Context, client *http.Client, checkURLs []string, deadline time.Time) subscription.BenchmarkResult {
 	var lastErr error
 	for {
-		latency, err := timeRequest(ctx, client, checkURL)
-		if err == nil {
-			return warmProbe(ctx, client, checkURL, latency)
+		for _, checkURL := range checkURLs {
+			latency, err := timeRequest(ctx, client, checkURL)
+			if err == nil {
+				return warmProbe(ctx, client, checkURL, latency)
+			}
+			lastErr = err
 		}
-		lastErr = err
 
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			return subscription.BenchmarkResult{Error: lastErr}

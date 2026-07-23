@@ -36,6 +36,49 @@ func WithHWID(hwid, deviceOS, deviceModel string) FetchOption {
 // for panels that only know the base64 link list.
 var userAgents = []string{"Happ/1.0", "v2rayNG/1.8.5"}
 
+// stubHeaders mark a 200 that carries a placeholder config (one outbound to
+// 0.0.0.0:1) instead of the subscription: the panel does not know this device,
+// or its device limit is used up. Parsed as-is it becomes a normal-looking
+// profile that times out on every ping, so fail with the panel's own wording.
+var stubHeaders = []string{"X-Hwid-Max-Devices-Reached", "X-Hwid-Not-Supported"}
+
+// stubAddress is the address panels park those placeholder outbounds on. The
+// headers alone are not enough — a panel may set them and still serve servers —
+// so the body has to show the stub too.
+const stubAddress = "0.0.0.0"
+
+// stubReason returns the message to show when the response is a placeholder,
+// or "" when it is a real subscription.
+func stubReason(header http.Header, body []byte) string {
+	if !strings.Contains(string(body), stubAddress) {
+		return ""
+	}
+	for _, name := range stubHeaders {
+		if strings.EqualFold(header.Get(name), "true") {
+			if a := announce(header); a != "" {
+				return a
+			}
+			return name
+		}
+	}
+	return ""
+}
+
+// announce decodes the panel's user-facing notice, which on a stub response
+// carries the reason ("лимит устройств исчерпан" and friends).
+func announce(header http.Header) string {
+	v := strings.TrimSpace(header.Get("Announce"))
+	rest, ok := strings.CutPrefix(v, "base64:")
+	if !ok {
+		return v
+	}
+	decoded, err := b64DecodeAnyPadding(rest)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(decoded))
+}
+
 // hwidHeaders are the device-identifying headers WithHWID sets. Go strips only
 // Authorization/Cookie/WWW-Authenticate across hosts, so these need dropping by
 // hand or a redirect hands the user's device id to a third party.
@@ -125,6 +168,9 @@ func fetchBody(rawURL string, opts ...FetchOption) ([]byte, error) {
 	}
 	if len(body) > maxSubscriptionBody {
 		return nil, fmt.Errorf("subscription too large: превышает лимит %d байт", maxSubscriptionBody)
+	}
+	if reason := stubReason(resp.Header, body); reason != "" {
+		return nil, fmt.Errorf("панель не отдала серверы: %s", reason)
 	}
 	return body, nil
 }

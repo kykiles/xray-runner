@@ -181,16 +181,17 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
 
 	consecutiveFails := 0
 	client := &http.Client{Timeout: 10 * time.Second}
-	checkURL := a.cfg.CheckURLs()[0]
+	// The whole list, not just the first URL: one blocked probe host would
+	// otherwise show the session as down while everything else works.
+	checkURLs := a.cfg.CheckURLs()
 	probe := func() (bool, time.Duration) {
-		start := time.Now()
-		req, _ := http.NewRequestWithContext(ctx, "GET", checkURL, nil)
-		resp, err := client.Do(req)
-		if err != nil {
-			return false, time.Since(start)
+		for _, checkURL := range checkURLs {
+			if latency, err := timeRequest(ctx, client, checkURL); err == nil {
+				return true, latency
+			}
 		}
-		_ = resp.Body.Close()
-		return true, time.Since(start)
+		// Latency on a failed check is never shown — see recordHealth.
+		return false, 0
 	}
 
 	// Probe once up front so the status screen shows a real result immediately.

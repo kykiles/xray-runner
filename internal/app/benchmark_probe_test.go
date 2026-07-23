@@ -36,7 +36,7 @@ func TestProbeRetriesUntilBalancerIsReady(t *testing.T) {
 	base, _ := url.Parse(srv.URL)
 	client := &http.Client{Transport: rewriteHost{base}, Timeout: 5 * time.Second}
 
-	got := probe(context.Background(), client, checkURL, time.Now().Add(5*time.Second))
+	got := probe(context.Background(), client, []string{checkURL}, time.Now().Add(5*time.Second))
 	if got.Error != nil {
 		t.Fatalf("probe: %v", got.Error)
 	}
@@ -48,7 +48,7 @@ func TestProbeRetriesUntilBalancerIsReady(t *testing.T) {
 
 	// A permanently dead endpoint still ends as a failure, not a hang.
 	srv.Close()
-	if dead := probe(context.Background(), client, checkURL, time.Now().Add(500*time.Millisecond)); dead.Error == nil {
+	if dead := probe(context.Background(), client, []string{checkURL}, time.Now().Add(500*time.Millisecond)); dead.Error == nil {
 		t.Errorf("want error for always-failing endpoint, got %v", dead.Latency)
 	}
 }
@@ -70,11 +70,33 @@ func TestProbeReportsWarmRequest(t *testing.T) {
 	base, _ := url.Parse(srv.URL)
 	client := &http.Client{Transport: rewriteHost{base}, Timeout: 5 * time.Second}
 
-	got := probe(context.Background(), client, "https://example.invalid/generate_204", time.Now().Add(5*time.Second))
+	got := probe(context.Background(), client, []string{"https://example.invalid/generate_204"}, time.Now().Add(5*time.Second))
 	if got.Error != nil {
 		t.Fatalf("probe: %v", got.Error)
 	}
 	if got.Latency >= 150*time.Millisecond {
 		t.Errorf("latency = %v, want the warm request, not the cold one", got.Latency)
+	}
+}
+
+// A blocked first check URL must not read as "timeout": the rest of the list is
+// what the session would have used anyway.
+func TestProbeFallsThroughToSecondURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/blocked" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	base, _ := url.Parse(srv.URL)
+	client := &http.Client{Transport: rewriteHost{base}, Timeout: 5 * time.Second}
+
+	urls := []string{"https://example.invalid/blocked", "https://example.invalid/generate_204"}
+	got := probe(context.Background(), client, urls, time.Now().Add(5*time.Second))
+	if got.Error != nil {
+		t.Fatalf("probe: %v", got.Error)
 	}
 }
