@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +91,33 @@ func TestProfilesView_PingColumnAligns(t *testing.T) {
 	}
 	if cols[0] != cols[1] {
 		t.Errorf("ping cells end at columns %d and %d, want the same", cols[0], cols[1])
+	}
+}
+
+// Coming back from a session restores the filter, and the cursor must land on
+// the profile connected to — counted among the visible rows, not among all
+// profiles.
+func TestProfiles_RestoredFilterCursor(t *testing.T) {
+	profiles := []subscription.Profile{
+		{Name: "auto", Entries: []subscription.SubEntry{{Address: "a.example", Port: 443}}},
+		{Name: "nl-1", Entries: []subscription.SubEntry{{Address: "b.example", Port: 443}}},
+		{Name: "de", Entries: []subscription.SubEntry{{Address: "c.example", Port: 443}}},
+		{Name: "nl-2", Entries: []subscription.SubEntry{{Address: "d.example", Port: 443}}},
+	}
+	fi := newFilter()
+	fi.input.SetValue("nl")
+	m := profilesModel{profiles: profiles, filter: fi}
+
+	if got := m.visible(); len(got) != 2 || got[0] != 1 || got[1] != 3 {
+		t.Fatalf("visible = %v, want [1 3]", got)
+	}
+	// Profile 3 is the second visible row.
+	if got := max(0, slices.Index(m.visible(), 3)); got != 1 {
+		t.Errorf("cursor for profile 3 = %d, want 1", got)
+	}
+	// A profile filtered out falls back to the top instead of pointing past the end.
+	if got := max(0, slices.Index(m.visible(), 2)); got != 0 {
+		t.Errorf("cursor for a filtered-out profile = %d, want 0", got)
 	}
 }
 

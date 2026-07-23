@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -53,8 +54,11 @@ type profilesModel struct {
 // profile picked last time, so coming back lands on it instead of the top.
 // pings carries the measurements across screens, exactly as on the server list:
 // the screen writes into it as results arrive, so connecting and coming back
-// shows the numbers instead of an empty column.
-func SelectProfile(ctx context.Context, profiles []subscription.Profile, cursor int, pings PingCache, bench ProfileBenchmarkFunc, preview ProfileConfigFunc, save SaveConfigFunc) (int, ProfileAction, error) {
+// shows the numbers instead of an empty column. filter does the same for the
+// search, restored on the way back in and handed out again on exit — a profile
+// holding one server connects straight from here, so this screen is where the
+// user comes back to.
+func SelectProfile(ctx context.Context, profiles []subscription.Profile, cursor int, filter string, pings PingCache, bench ProfileBenchmarkFunc, preview ProfileConfigFunc, save SaveConfigFunc) (int, ProfileAction, string, error) {
 	// Leaving the screen ends its benchmark — see SelectServer.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -62,6 +66,9 @@ func SelectProfile(ctx context.Context, profiles []subscription.Profile, cursor 
 	if pings == nil {
 		pings = PingCache{}
 	}
+
+	fi := newFilter()
+	fi.input.SetValue(filter)
 
 	m := profilesModel{
 		ctx:      ctx,
@@ -73,18 +80,20 @@ func SelectProfile(ctx context.Context, profiles []subscription.Profile, cursor 
 		choice:   -1,
 		results:  profilePings(profiles, pings),
 		pings:    pings,
-		filter:   newFilter(),
+		filter:   fi,
 	}
+	// The cursor counts visible rows, so with a filter restored the profile has
+	// to be looked up among those — see cursorAt on the server screen.
 	if cursor > 0 && cursor < len(profiles) {
-		m.cursor = cursor
+		m.cursor = max(0, slices.Index(m.visible(), cursor))
 	}
 
 	res, err := runScreen(m)
 	if err != nil {
-		return -1, ProfileQuit, err
+		return -1, ProfileQuit, "", err
 	}
 	final := res.(profilesModel)
-	return final.choice, final.action, nil
+	return final.choice, final.action, final.filter.value(), nil
 }
 
 func (m profilesModel) Init() tea.Cmd { return nil }

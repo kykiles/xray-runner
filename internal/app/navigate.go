@@ -124,8 +124,11 @@ type nav struct {
 	// filter is the server screen's search, kept across a session so that going
 	// back from a connection shows the list the user left. The screen itself
 	// clears it on ← (first press drops the filter, second one goes back), so
-	// walking up a level resets it without any help from here.
-	filter string
+	// walking up a level resets it without any help from here. profFilter is the
+	// same for the profile screen, which is where a single-server profile — and a
+	// whole balancer — is connected from, and therefore returned to.
+	filter     string
+	profFilter string
 	// pings keeps the last measurement of each server for the whole run, so
 	// coming back from a session shows the numbers instead of an empty column.
 	// profPings does the same for the profile screen, which measures whole
@@ -265,10 +268,11 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				a.nav.profPings = tui.PingCache{}
 			}
 			pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
-			idx, action, err := tui.SelectProfile(ctx, a.nav.profiles, a.nav.profIdx, a.nav.profPings, pb.RunProfiles, a.profileConfig, a.saveConfig)
+			idx, action, filter, err := tui.SelectProfile(ctx, a.nav.profiles, a.nav.profIdx, a.nav.profFilter, a.nav.profPings, pb.RunProfiles, a.profileConfig, a.saveConfig)
 			if err != nil {
 				return nil, fmt.Errorf("TUI: %w", err)
 			}
+			a.nav.profFilter = filter
 			switch action {
 			case tui.ProfileQuit:
 				return nil, ErrUserQuit
