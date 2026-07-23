@@ -32,6 +32,11 @@ func TestDropUnknownGeo(t *testing.T) {
 
 	raw := `{
 		"outbounds": [{"tag": "proxy", "protocol": "freedom"}],
+		"dns": {"servers": [
+			"https://8.8.8.8/dns-query",
+			{"address": "https://8.8.8.8/dns-query", "domains": ["geosite:twitch-ads", "geosite:google"]},
+			{"address": "https://77.88.8.8/dns-query", "domains": ["geosite:nosuchlist"]}
+		]},
 		"routing": {"rules": [
 			{"domain": ["geosite:torrent"], "outboundTag": "block"},
 			{"domain": ["geosite:google@ads", "geosite:nosuchlist", "example.com"], "outboundTag": "direct"},
@@ -49,9 +54,21 @@ func TestDropUnknownGeo(t *testing.T) {
 		Routing struct {
 			Rules []map[string]any `json:"rules"`
 		} `json:"routing"`
+		DNS struct {
+			Servers []any `json:"servers"`
+		} `json:"dns"`
 	}
 	if err := json.Unmarshal(merged, &got); err != nil {
 		t.Fatal(err)
+	}
+
+	// The plain address stays, the mixed server keeps its known list, and the
+	// server left without domains goes — it would have answered every query.
+	if len(got.DNS.Servers) != 2 {
+		t.Fatalf("dns servers = %d, want 2: %v", len(got.DNS.Servers), got.DNS.Servers)
+	}
+	if srv, ok := got.DNS.Servers[1].(map[string]any); !ok || !equalList(srv["domains"], "geosite:google") {
+		t.Errorf("dns server = %v", got.DNS.Servers[1])
 	}
 
 	// The torrent-only rule loses its last matcher and goes with it; a rule left

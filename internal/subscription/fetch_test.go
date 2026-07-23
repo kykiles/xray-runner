@@ -178,7 +178,7 @@ func TestFetchBody_DropsHWIDHeadersOnCrossHostRedirect(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	if _, err := fetchBody(origin.URL, WithHWID("dev-hwid", "linux", "pc")); err != nil {
+	if _, _, err := fetchBody(origin.URL, WithHWID("dev-hwid", "linux", "pc")); err != nil {
 		t.Fatalf("fetchBody: %v", err)
 	}
 	for _, h := range []string{"X-Hwid", "X-Device-Os", "X-Device-Model"} {
@@ -201,7 +201,7 @@ func TestFetchBody_KeepsHWIDHeadersOnSameHostRedirect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := fetchBody(srv.URL, WithHWID("dev-hwid", "linux", "pc")); err != nil {
+	if _, _, err := fetchBody(srv.URL, WithHWID("dev-hwid", "linux", "pc")); err != nil {
 		t.Fatalf("fetchBody: %v", err)
 	}
 	if got.Get("X-Hwid") != "dev-hwid" {

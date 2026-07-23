@@ -61,7 +61,7 @@ func TestParseBareLink_RejectsSubscriptionURL(t *testing.T) {
 // A bare link must never trigger an HTTP request: the test URL points at a host
 // that does not resolve, so a fetch attempt would fail the test.
 func TestFetchProfiles_BareLinkNoNetwork(t *testing.T) {
-	profiles, err := FetchProfiles("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@nonexistent.invalid:8080?type=ws#solo")
+	profiles, _, err := FetchProfiles("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@nonexistent.invalid:8080?type=ws#solo")
 	if err != nil {
 		t.Fatalf("FetchProfiles: %v", err)
 	}

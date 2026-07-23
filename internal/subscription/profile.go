@@ -36,10 +36,12 @@ func (p Profile) Mode() string {
 // FetchProfiles loads a subscription preserving its profile structure. Fetch
 // stays flat for callers that only need the server list (--dump-links, scripted
 // selection).
-func FetchProfiles(rawURL string, opts ...FetchOption) ([]Profile, error) {
+// It also reports the geo databases the panel wants its rules resolved against
+// — see GeoSources; a subscription that names none leaves it zero.
+func FetchProfiles(rawURL string, opts ...FetchOption) ([]Profile, GeoSources, error) {
 	rawURL, err := unwrapHapp(rawURL)
 	if err != nil {
-		return nil, err
+		return nil, GeoSources{}, err
 	}
 
 	// A bare link is one server and nothing to fetch. It becomes an unnamed
@@ -49,20 +51,21 @@ func FetchProfiles(rawURL string, opts ...FetchOption) ([]Profile, error) {
 	if IsBareLink(rawURL) {
 		e, err := ParseBareLink(rawURL)
 		if err != nil {
-			return nil, err
+			return nil, GeoSources{}, err
 		}
-		return []Profile{{Entries: []SubEntry{*e}}}, nil
+		return []Profile{{Entries: []SubEntry{*e}}}, GeoSources{}, nil
 	}
 
-	body, err := fetchBody(rawURL, opts...)
+	body, header, err := fetchBody(rawURL, opts...)
 	if err != nil {
-		return nil, err
+		return nil, GeoSources{}, err
 	}
-	return parseProfiles(body)
+	profiles, err := parseProfiles(body)
+	return profiles, geoSources(header), err
 }
 
 // FetchProfilesWithHWID mirrors FetchWithHWID for the profile-aware path.
-func FetchProfilesWithHWID(rawURL, hwid, deviceOS, deviceModel string) ([]Profile, error) {
+func FetchProfilesWithHWID(rawURL, hwid, deviceOS, deviceModel string) ([]Profile, GeoSources, error) {
 	return FetchProfiles(rawURL, WithHWID(hwid, deviceOS, deviceModel))
 }
 

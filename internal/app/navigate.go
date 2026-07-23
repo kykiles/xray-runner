@@ -425,10 +425,13 @@ func (a *App) profileConfig(p subscription.Profile) (string, error) {
 // next screen would overwrite a progress line anyway.
 func (a *App) loadProfiles(subURL string) ([]subscription.Profile, error) {
 	hwid := config.GetOrCreateHWID(a.cfg.HWID)
-	profiles, err := subscription.FetchProfilesWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
+	profiles, geo, err := subscription.FetchProfilesWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
 	if err != nil {
 		return nil, fmt.Errorf("загрузка подписки: %w", err)
 	}
+	// The panel's rules are written against the panel's geo databases, so switch
+	// to them before anything builds a config from this subscription.
+	a.useGeoAssets(subURL, geo)
 	slog.Info("subscription loaded", "profiles", len(profiles), "servers", len(subscription.Flatten(profiles)))
 	return profiles, nil
 }

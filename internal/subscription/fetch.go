@@ -118,7 +118,7 @@ func Fetch(rawURL string, opts ...FetchOption) ([]SubEntry, error) {
 		return []SubEntry{*e}, nil
 	}
 
-	body, err := fetchBody(rawURL, opts...)
+	body, _, err := fetchBody(rawURL, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -126,8 +126,9 @@ func Fetch(rawURL string, opts ...FetchOption) ([]SubEntry, error) {
 }
 
 // fetchBody performs the HTTP GET; parsing is left to the caller so that both
-// the flat and the profile-aware paths share one request.
-func fetchBody(rawURL string, opts ...FetchOption) ([]byte, error) {
+// the flat and the profile-aware paths share one request. The response headers
+// come back with the body — the panel names its geo databases there.
+func fetchBody(rawURL string, opts ...FetchOption) ([]byte, http.Header, error) {
 	// A plain-http subscription sends the token and the x-hwid headers in the
 	// clear. We still allow it (self-hosted panels exist) but warn loudly.
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rawURL)), "http://") {
@@ -140,7 +141,7 @@ func fetchBody(rawURL string, opts ...FetchOption) ([]byte, error) {
 	for i, ua := range userAgents {
 		req, err := http.NewRequest("GET", rawURL, nil)
 		if err != nil {
-			return nil, fmt.Errorf("subscription request: %w", err)
+			return nil, nil, fmt.Errorf("subscription request: %w", err)
 		}
 		req.Header.Set("User-Agent", ua)
 		for _, opt := range opts {
@@ -149,14 +150,14 @@ func fetchBody(rawURL string, opts ...FetchOption) ([]byte, error) {
 
 		resp, err = client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("subscription fetch: %w", err)
+			return nil, nil, fmt.Errorf("subscription fetch: %w", err)
 		}
 		if resp.StatusCode == http.StatusOK {
 			break
 		}
 		resp.Body.Close()
 		if i == len(userAgents)-1 {
-			return nil, fmt.Errorf("subscription fetch: HTTP %d", resp.StatusCode)
+			return nil, nil, fmt.Errorf("subscription fetch: HTTP %d", resp.StatusCode)
 		}
 		slog.Debug("подписка не ответила на User-Agent, пробуем следующий", "ua", ua, "status", resp.StatusCode)
 	}
@@ -164,15 +165,15 @@ func fetchBody(rawURL string, opts ...FetchOption) ([]byte, error) {
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSubscriptionBody+1))
 	if err != nil {
-		return nil, fmt.Errorf("subscription read: %w", err)
+		return nil, nil, fmt.Errorf("subscription read: %w", err)
 	}
 	if len(body) > maxSubscriptionBody {
-		return nil, fmt.Errorf("subscription too large: превышает лимит %d байт", maxSubscriptionBody)
+		return nil, nil, fmt.Errorf("subscription too large: превышает лимит %d байт", maxSubscriptionBody)
 	}
 	if reason := stubReason(resp.Header, body); reason != "" {
-		return nil, fmt.Errorf("панель не отдала серверы: %s", reason)
+		return nil, nil, fmt.Errorf("панель не отдала серверы: %s", reason)
 	}
-	return body, nil
+	return body, resp.Header, nil
 }
 
 // FetchWithHWID is a thin wrapper kept for existing callers.

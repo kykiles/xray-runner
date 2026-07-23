@@ -62,3 +62,6 @@ keys/
 
 # configs saved from the viewer (contain UUIDs/passwords)
 configs/
+
+# Geo databases installed per subscription
+geo/

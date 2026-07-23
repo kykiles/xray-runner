@@ -48,10 +48,11 @@ func (a *App) resolveScriptedTarget() (*target, error) {
 	// Fetched profile-aware so the chosen server can run under its profile's
 	// routing, exactly like the menu does. FlattenUnique reproduces the flat list
 	// the scripted path has always indexed, so --server N keeps its meaning.
-	profiles, err := subscription.FetchProfilesWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
+	profiles, geo, err := subscription.FetchProfilesWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
 	if err != nil {
 		return nil, fmt.Errorf("загрузка подписки: %w", err)
 	}
+	a.useGeoAssets(subURL, geo) // the scripted path runs the panel's routing too
 	entries := subscription.FlattenUnique(profiles)
 	slog.Info("subscription loaded", "servers", len(entries))
 

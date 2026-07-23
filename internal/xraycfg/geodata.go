@@ -117,13 +117,77 @@ func varint(b []byte, i int) (uint64, int) {
 var ruleMatchers = []string{"domain", "domains", "ip", "port", "sourcePort", "network", "source", "user", "inboundTag", "protocol", "attrs"}
 
 // dropUnknownGeo removes references to geo lists our databases do not carry from
-// the config's routing rules, returning how many rules it touched.
-//
-// ponytail: routing rules only — dns servers can name geosite lists too, but the
-// panels seen so far keep them out of dns. Extend here if one shows up.
+// the config's routing rules and dns servers, returning how many of each it
+// touched. It is the fallback for when the panel's own databases could not be
+// installed — with those in place there is normally nothing to drop.
 func dropUnknownGeo(cfg map[string]json.RawMessage) int {
 	known := knownGeoLists()
-	if len(known) == 0 || len(cfg["routing"]) == 0 {
+	if len(known) == 0 {
+		return 0
+	}
+	return dropUnknownGeoRules(cfg, known) + dropUnknownGeoDNS(cfg, known)
+}
+
+// dropUnknownGeoDNS does the same for the dns section: a server narrowed to a
+// list of domains is dropped along with its last one, since without "domains" it
+// would answer every query instead.
+func dropUnknownGeoDNS(cfg map[string]json.RawMessage, known map[string]bool) int {
+	if len(cfg["dns"]) == 0 {
+		return 0
+	}
+	var dns map[string]json.RawMessage
+	if err := json.Unmarshal(cfg["dns"], &dns); err != nil || len(dns["servers"]) == 0 {
+		return 0
+	}
+	var servers []json.RawMessage
+	if err := json.Unmarshal(dns["servers"], &servers); err != nil {
+		return 0
+	}
+
+	touched := 0
+	kept := make([]json.RawMessage, 0, len(servers))
+	for _, s := range servers {
+		var srv map[string]json.RawMessage
+		// A plain "https://8.8.8.8/dns-query" string names no lists.
+		if err := json.Unmarshal(s, &srv); err != nil {
+			kept = append(kept, s)
+			continue
+		}
+		if !stripUnknownGeo(srv, known) {
+			kept = append(kept, s)
+			continue
+		}
+		touched++
+		if len(srv["domains"]) == 0 {
+			continue
+		}
+		enc, err := json.Marshal(srv)
+		if err != nil {
+			return 0
+		}
+		kept = append(kept, enc)
+	}
+	if touched == 0 {
+		return 0
+	}
+
+	encServers, err := json.Marshal(kept)
+	if err != nil {
+		return 0
+	}
+	dns["servers"] = encServers
+	encDNS, err := json.Marshal(dns)
+	if err != nil {
+		return 0
+	}
+	cfg["dns"] = encDNS
+	return touched
+}
+
+// dropUnknownGeoRules strips the routing rules; a rule left with no matcher at
+// all would match everything, so it goes rather than stay behind as a catch-all.
+func dropUnknownGeoRules(cfg map[string]json.RawMessage, known map[string]bool) int {
+	if len(cfg["routing"]) == 0 {
 		return 0
 	}
 
