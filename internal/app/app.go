@@ -135,6 +135,10 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	a.binary = binary
 
+	// The geo databases sit next to the core, and the panel's routing may name
+	// lists they do not carry — see xraycfg.SetGeoAssets.
+	xraycfg.SetGeoAssets(filepath.Dir(binary))
+
 	// X-4: log the xray version; incompatibility is diagnosed here, not via retries.
 	if v, err := xray.Version(binary); err == nil {
 		slog.Info("xray version", "version", v)
