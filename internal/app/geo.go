@@ -46,7 +46,10 @@ func (a *App) useGeoAssets(subURL string, src subscription.GeoSources) {
 		return
 	}
 
-	panelDir := filepath.Join(filepath.Dir(a.binary), "geo", subKey(subURL))
+	root := filepath.Join(filepath.Dir(a.binary), "geo")
+	pruneGeoDirs(root, subURL)
+
+	panelDir := filepath.Join(root, subKey(subURL))
 	if geoFresh(panelDir) {
 		dir = panelDir
 		return
@@ -80,6 +83,37 @@ func geoFresh(dir string) bool {
 		}
 	}
 	return true
+}
+
+// pruneGeoDirs removes the database directories of subscriptions that are gone.
+// Deleting one costs nothing — it is re-downloaded on the next open — so the
+// saved list plus the subscription in hand (which may come from the env and
+// never reach that list) is the whole of what is worth keeping.
+func pruneGeoDirs(root, keepURL string) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return // nothing installed yet
+	}
+	subs, err := subscription.LoadSubscriptions()
+	if err != nil {
+		slog.Warn("список подписок не прочитан, старые гео-базы оставлены", "error", err)
+		return
+	}
+
+	keep := map[string]bool{subKey(keepURL): true}
+	for _, s := range subs {
+		keep[subKey(s.URL)] = true
+	}
+	for _, e := range entries {
+		if !e.IsDir() || keep[e.Name()] {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
+			slog.Warn("старые гео-базы не удалены", "dir", e.Name(), "error", err)
+			continue
+		}
+		slog.Info("stale geo databases removed", "dir", e.Name())
+	}
 }
 
 // subKey names a subscription's database directory without putting its token in
