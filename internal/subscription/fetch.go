@@ -55,6 +55,11 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 }
 
 func Fetch(rawURL string, opts ...FetchOption) ([]SubEntry, error) {
+	rawURL, err := unwrapHapp(rawURL)
+	if err != nil {
+		return nil, err
+	}
+
 	// A bare link carries the server inline — there is nothing to fetch, and the
 	// branch lives here so every caller (menu, scripted selection, --dump-links)
 	// gets it without repeating the check.

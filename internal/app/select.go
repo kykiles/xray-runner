@@ -180,6 +180,16 @@ func (a *App) rememberSelection(subURL string, e *subscription.SubEntry) {
 // addSubscription validates and stores a subscription URL; it runs inside the
 // TUI, so it must not print — problems come back as errors.
 func addSubscription(rawURL string) error {
+	// A happ://crypt… link is an encrypted wrapper around the real URL. Unwrap it
+	// on the way in so the stored list holds something readable and everything
+	// downstream (masking, fetching, naming) works unchanged.
+	if subscription.IsHappLink(rawURL) {
+		plain, err := subscription.DecryptHappLink(rawURL)
+		if err != nil {
+			return err
+		}
+		rawURL = plain
+	}
 	if err := validateSubscriptionInput(rawURL); err != nil {
 		return err
 	}
