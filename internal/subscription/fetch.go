@@ -30,7 +30,11 @@ func WithHWID(hwid, deviceOS, deviceModel string) FetchOption {
 // return an empty body (or a stub) unless the request carries a recognized
 // client User-Agent, so we send one by default; callers may override via a
 // FetchOption.
-const defaultUserAgent = "v2rayNG/1.8.5"
+// Panels template their response per client User-Agent and answer with 502/404
+// for a client they have no template for. Happ comes first because it yields
+// the Xray-config profiles this app is built around; v2rayNG is the fallback
+// for panels that only know the base64 link list.
+var userAgents = []string{"Happ/1.0", "v2rayNG/1.8.5"}
 
 // hwidHeaders are the device-identifying headers WithHWID sets. Go strips only
 // Authorization/Cookie/WWW-Authenticate across hosts, so these need dropping by
@@ -87,25 +91,33 @@ func fetchBody(rawURL string, opts ...FetchOption) ([]byte, error) {
 		slog.Warn("подписка запрашивается по незашифрованному http:// — токен и заголовки устройства идут открытым текстом", "url", rawURL)
 	}
 
-	req, err := http.NewRequest("GET", rawURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("subscription request: %w", err)
-	}
-	req.Header.Set("User-Agent", defaultUserAgent)
-	for _, opt := range opts {
-		opt(req)
-	}
-
 	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: checkRedirect}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("subscription fetch: %w", err)
+
+	var resp *http.Response
+	for i, ua := range userAgents {
+		req, err := http.NewRequest("GET", rawURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("subscription request: %w", err)
+		}
+		req.Header.Set("User-Agent", ua)
+		for _, opt := range opts {
+			opt(req)
+		}
+
+		resp, err = client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("subscription fetch: %w", err)
+		}
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+		resp.Body.Close()
+		if i == len(userAgents)-1 {
+			return nil, fmt.Errorf("subscription fetch: HTTP %d", resp.StatusCode)
+		}
+		slog.Debug("подписка не ответила на User-Agent, пробуем следующий", "ua", ua, "status", resp.StatusCode)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("subscription fetch: HTTP %d", resp.StatusCode)
-	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSubscriptionBody+1))
 	if err != nil {

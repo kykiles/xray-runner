@@ -49,6 +49,34 @@ func TestFetch_SetsClientUserAgent(t *testing.T) {
 	}
 }
 
+func TestFetch_RetriesWithNextUserAgent(t *testing.T) {
+	// A panel that has no template for the first UA answers 502 (real behaviour
+	// seen on a Remnawave sub) — the fetch must fall back to the next client.
+	encodedSub := "dmxlc3M6Ly91dWlkQGhvc3Q6NDQzP3R5cGU9dGNwJnNlY3VyaXR5PXJlbGl0eQ=="
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ua := r.Header.Get("User-Agent")
+		seen = append(seen, ua)
+		if ua == userAgents[0] {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Write([]byte(encodedSub))
+	}))
+	defer server.Close()
+
+	entries, err := Fetch(server.URL)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	if len(seen) != 2 || seen[1] != userAgents[1] {
+		t.Errorf("user agents tried = %v, want both", seen)
+	}
+}
+
 func TestFetchWithHWID_ParsesSubscription(t *testing.T) {
 	encodedSub := "dmxlc3M6Ly91dWlkQGhvc3Q6NDQzP3R5cGU9dGNwJnNlY3VyaXR5PXJlbGl0eQ=="
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
