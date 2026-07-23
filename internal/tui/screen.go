@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
+	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -18,11 +20,31 @@ const (
 
 var held bool
 
+// altKeeper is stdout with the leave-the-alternate-buffer sequence filtered out.
+// bubbletea prints it as a screen's program ends, and re-entering afterwards is
+// one frame too late: the shell shows through in between, which is the flicker
+// on every ←/→. Swallowing it holds the buffer up across the whole menu;
+// ReleaseScreen is what gives it back.
+type altKeeper struct{ *os.File }
+
+func (a altKeeper) Write(b []byte) (int, error) {
+	i := bytes.Index(b, []byte(altExit))
+	if i < 0 {
+		return a.File.Write(b)
+	}
+	if _, err := a.File.Write(append(bytes.Clone(b[:i]), b[i+len(altExit):]...)); err != nil {
+		return 0, err
+	}
+	return len(b), nil
+}
+
 // runScreen runs one full-screen program and keeps the alternate buffer after
 // it exits, so nothing flashes before the next screen opens.
 func runScreen(m tea.Model) (tea.Model, error) {
-	res, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	res, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithOutput(altKeeper{os.Stdout})).Run()
 	held = true
+	// Belt and braces: should the sequence ever arrive split across two writes,
+	// the filter misses it and this puts the buffer back — a no-op otherwise.
 	fmt.Print(altEnter)
 	return res, err
 }
