@@ -153,3 +153,36 @@ func TestProfiles_PingCache(t *testing.T) {
 		t.Error("an unmeasured profile got a result")
 	}
 }
+
+// `r` re-fetches the subscription and replaces the list, dropping the numbers
+// that belonged to the profiles it replaced.
+func TestProfilesRefresh(t *testing.T) {
+	fresh := []subscription.Profile{{Name: "new-a"}, {Name: "new-b"}}
+	m := profilesModel{
+		profiles: []subscription.Profile{{Name: "old"}},
+		refresh:  func() ([]subscription.Profile, error) { return fresh, nil },
+		results:  map[int]subscription.BenchmarkResult{0: {Index: 0}},
+		pings:    PingCache{"old": {}},
+		filter:   newFilter(),
+	}
+
+	updated, cmd := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd == nil {
+		t.Fatal("r produced no refresh")
+	}
+	if !updated.(profilesModel).refreshing {
+		t.Error("refreshing not set")
+	}
+
+	done, _ := updated.(profilesModel).Update(cmd())
+	got := done.(profilesModel)
+	if len(got.profiles) != 2 || got.profiles[0].Name != "new-a" {
+		t.Errorf("profiles = %v", got.profiles)
+	}
+	if len(got.results) != 0 || len(got.pings) != 0 {
+		t.Errorf("stale numbers kept: results=%v pings=%v", got.results, got.pings)
+	}
+	if got.refreshing {
+		t.Error("still refreshing")
+	}
+}

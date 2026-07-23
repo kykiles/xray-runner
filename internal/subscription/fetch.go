@@ -66,8 +66,12 @@ func stubReason(header http.Header, body []byte) string {
 
 // announce decodes the panel's user-facing notice, which on a stub response
 // carries the reason ("лимит устройств исчерпан" and friends).
-func announce(header http.Header) string {
-	v := strings.TrimSpace(header.Get("Announce"))
+func announce(header http.Header) string { return decodeHeader(header.Get("Announce")) }
+
+// decodeHeader reads a header panels send either plain or as "base64:<payload>"
+// — the encoding is how they get emoji and Cyrillic past the header charset.
+func decodeHeader(v string) string {
+	v = strings.TrimSpace(v)
 	rest, ok := strings.CutPrefix(v, "base64:")
 	if !ok {
 		return v

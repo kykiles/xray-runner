@@ -30,7 +30,7 @@ const panelGeoTTL = 24 * time.Hour
 // at any) and makes both xray and the routing filter read from wherever the
 // active ones are. A failure here is never fatal: the core's own databases stay
 // in use and the rules naming lists they lack are dropped instead.
-func (a *App) useGeoAssets(subURL string, src subscription.GeoSources) {
+func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
 	dir := filepath.Dir(a.binary)
 	defer func() {
 		// XRAY_LOCATION_ASSET is inherited by every xray we spawn — the session,
@@ -42,7 +42,7 @@ func (a *App) useGeoAssets(subURL string, src subscription.GeoSources) {
 		slog.Info("geo databases in use", "dir", dir)
 	}()
 
-	if src.Empty() {
+	if src.GeoEmpty() {
 		return
 	}
 

@@ -138,7 +138,7 @@ type nav struct {
 	// geo is what the loaded subscription wants its rules resolved against. It
 	// is kept because the cache below can hand the subscription back without a
 	// fetch, and the databases in use must still follow the subscription.
-	geo subscription.GeoSources
+	geo subscription.PanelInfo
 }
 
 // subCacheTTL is how long a fetched subscription is reused before the menu goes
@@ -146,7 +146,7 @@ type nav struct {
 const subCacheTTL = 10 * time.Minute
 
 // setProfiles stores a freshly fetched subscription and stamps the cache.
-func (n *nav) setProfiles(subURL string, profiles []subscription.Profile, geo subscription.GeoSources) {
+func (n *nav) setProfiles(subURL string, profiles []subscription.Profile, geo subscription.PanelInfo) {
 	// A fresh fetch is a new list: the old numbers belong to profiles that may no
 	// longer be there, and `r` is how the user asks to measure again.
 	clear(n.profPings)
@@ -277,7 +277,18 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				a.nav.profPings = tui.PingCache{}
 			}
 			pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
-			idx, action, filter, err := tui.SelectProfile(ctx, a.nav.profiles, a.nav.profIdx, a.nav.profFilter, a.nav.profPings, pb.RunProfiles, a.profileConfig, a.saveConfig)
+			// `r` re-fetches past the cache, like it does on the server screen; the
+			// menu keeps the new list so walking on does not fetch it again.
+			refresh := func() ([]subscription.Profile, error) {
+				profiles, info, err := a.loadProfiles(a.nav.subs[a.nav.subIdx].URL)
+				if err != nil {
+					return nil, err
+				}
+				a.nav.setProfiles(a.nav.subs[a.nav.subIdx].URL, profiles, info)
+				a.nav.profIdx = 0
+				return profiles, nil
+			}
+			idx, action, filter, err := tui.SelectProfile(ctx, a.nav.profiles, a.nav.profIdx, a.nav.profFilter, a.nav.profPings, refresh, pb.RunProfiles, a.profileConfig, a.saveConfig)
 			if err != nil {
 				return nil, fmt.Errorf("TUI: %w", err)
 			}
@@ -432,15 +443,34 @@ func (a *App) profileConfig(p subscription.Profile) (string, error) {
 
 // loadProfiles fetches between two full-screen menus, so it prints nothing: the
 // next screen would overwrite a progress line anyway.
-func (a *App) loadProfiles(subURL string) ([]subscription.Profile, subscription.GeoSources, error) {
+func (a *App) loadProfiles(subURL string) ([]subscription.Profile, subscription.PanelInfo, error) {
 	hwid := config.GetOrCreateHWID(a.cfg.HWID)
-	profiles, geo, err := subscription.FetchProfilesWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
+	profiles, info, err := subscription.FetchProfilesWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
 	if err != nil {
-		return nil, geo, fmt.Errorf("загрузка подписки: %w", err)
+		return nil, info, fmt.Errorf("загрузка подписки: %w", err)
 	}
 	// The panel's rules are written against the panel's geo databases, so switch
 	// to them before anything builds a config from this subscription.
-	a.useGeoAssets(subURL, geo)
+	a.useGeoAssets(subURL, info)
+	a.adoptPanelTitle(subURL, info.Title)
 	slog.Info("subscription loaded", "profiles", len(profiles), "servers", len(subscription.Flatten(profiles)))
-	return profiles, geo, nil
+	return profiles, info, nil
+}
+
+// adoptPanelTitle names the subscription the way the panel does, so the list
+// shows "🤝 alohavpnbot" instead of the host the URL happens to have. A name the
+// user gave it stays theirs — NameSubscription only fills in a missing one.
+func (a *App) adoptPanelTitle(subURL, title string) {
+	if title == "" {
+		return
+	}
+	if err := subscription.NameSubscription(subURL, title); err != nil {
+		slog.Warn("название подписки не сохранено", "error", err)
+		return
+	}
+	// The menu holds its own copy of the list; re-read it so the new name shows
+	// on the way back instead of after a restart.
+	if subs, err := subscription.LoadSubscriptions(); err == nil {
+		a.nav.subs = subs
+	}
 }

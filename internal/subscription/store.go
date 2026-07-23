@@ -137,6 +137,43 @@ func writeFileAtomic(path string, data []byte) error {
 	return os.Rename(tmpName, path)
 }
 
+// NameSubscription writes name as the comment above rawURL, which is where
+// LoadSubscriptions reads a subscription's name from. A subscription that
+// already carries a comment is left alone: that name was typed by the user (or
+// written here earlier) and is theirs to keep. Doing nothing is a success.
+func NameSubscription(rawURL, name string) error {
+	name = strings.TrimSpace(strings.ReplaceAll(name, "\n", " "))
+	if name == "" {
+		return nil
+	}
+
+	data, err := os.ReadFile(subscriptionsFile)
+	if err != nil {
+		return fmt.Errorf("read subscriptions: %w", err)
+	}
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+
+	named := false
+	out := make([]string, 0, len(lines)+1)
+	commented := false // the previous kept line is this one's comment
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if !commented && trimmed == rawURL {
+			out = append(out, "# "+name)
+			named = true
+		}
+		out = append(out, line)
+		commented = strings.HasPrefix(trimmed, "#")
+	}
+	if !named {
+		return nil
+	}
+	return writeFileAtomic(subscriptionsFile, []byte(strings.Join(out, "\n")+"\n"))
+}
+
 func SaveSubscription(rawURL string) error {
 	f, err := os.OpenFile(subscriptionsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {

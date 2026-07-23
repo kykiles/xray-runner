@@ -25,6 +25,16 @@ const (
 	ProfileQuit
 )
 
+// profilesRefreshDoneMsg carries the re-fetched subscription back to the screen.
+type profilesRefreshDoneMsg struct {
+	profiles []subscription.Profile
+	err      error
+}
+
+// ProfileRefreshFunc re-fetches the subscription past the menu's cache, exactly
+// as `r` does on the server screen.
+type ProfileRefreshFunc func() ([]subscription.Profile, error)
+
 // ProfileConfigFunc renders the full xray config running the profile would
 // produce: its outbounds, balancer, dns and routing rules.
 type ProfileConfigFunc func(p subscription.Profile) (string, error)
@@ -32,6 +42,7 @@ type ProfileConfigFunc func(p subscription.Profile) (string, error)
 type profilesModel struct {
 	ctx      context.Context
 	profiles []subscription.Profile
+	refresh  ProfileRefreshFunc
 	bench    ProfileBenchmarkFunc
 	preview  ProfileConfigFunc
 	saveCfg  SaveConfigFunc
@@ -40,13 +51,14 @@ type profilesModel struct {
 	action   ProfileAction
 	choice   int
 
-	results map[int]subscription.BenchmarkResult // key: profile index
-	pings   PingCache                            // the same results, kept across screens
-	filter  filterState
-	run     benchState
-	status  string
-	width   int // terminal width; 0 until the first WindowSizeMsg
-	height  int // terminal height; 0 until the first WindowSizeMsg
+	results    map[int]subscription.BenchmarkResult // key: profile index
+	pings      PingCache                            // the same results, kept across screens
+	filter     filterState
+	run        benchState
+	refreshing bool
+	status     string
+	width      int // terminal width; 0 until the first WindowSizeMsg
+	height     int // terminal height; 0 until the first WindowSizeMsg
 }
 
 // SelectProfile shows the profiles of a JSON subscription. It returns the chosen
@@ -58,7 +70,7 @@ type profilesModel struct {
 // search, restored on the way back in and handed out again on exit — a profile
 // holding one server connects straight from here, so this screen is where the
 // user comes back to.
-func SelectProfile(ctx context.Context, profiles []subscription.Profile, cursor int, filter string, pings PingCache, bench ProfileBenchmarkFunc, preview ProfileConfigFunc, save SaveConfigFunc) (int, ProfileAction, string, error) {
+func SelectProfile(ctx context.Context, profiles []subscription.Profile, cursor int, filter string, pings PingCache, refresh ProfileRefreshFunc, bench ProfileBenchmarkFunc, preview ProfileConfigFunc, save SaveConfigFunc) (int, ProfileAction, string, error) {
 	// Leaving the screen ends its benchmark — see SelectServer.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -73,6 +85,7 @@ func SelectProfile(ctx context.Context, profiles []subscription.Profile, cursor 
 	m := profilesModel{
 		ctx:      ctx,
 		profiles: profiles,
+		refresh:  refresh,
 		bench:    bench,
 		preview:  preview,
 		saveCfg:  save,
@@ -120,6 +133,18 @@ func (m profilesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.run.stop()
 		m.status = okStyle.Render("Пинг завершён")
+		return m, nil
+	case profilesRefreshDoneMsg:
+		m.refreshing = false
+		if msg.err != nil {
+			m.status = errStyle.Render(fmt.Sprintf("Ошибка обновления: %v", msg.err))
+			return m, nil
+		}
+		m.profiles = msg.profiles
+		m.results = map[int]subscription.BenchmarkResult{}
+		clear(m.pings) // the list is new; keeping old numbers would outlive their profiles
+		m.cursor = 0
+		m.status = okStyle.Render(fmt.Sprintf("Подписка обновлена: %d профилей", len(m.profiles)))
 		return m, nil
 	case tea.KeyMsg:
 		return m.updateKey(msg)
@@ -195,6 +220,19 @@ func (m profilesModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				on(r)
 			})
 		})
+	case "r", "к":
+		// Refreshing mid-benchmark would swap the list out from under the running
+		// measurement — same guard as the server screen (H-1).
+		if m.refresh == nil || m.refreshing || m.run.running {
+			return m, nil
+		}
+		m.refreshing = true
+		m.status = ""
+		refresh := m.refresh
+		return m, func() tea.Msg {
+			profiles, err := refresh()
+			return profilesRefreshDoneMsg{profiles: profiles, err: err}
+		}
 	case "c", "с":
 		m.showConfig()
 	case "s", "ы":
@@ -304,6 +342,9 @@ func (m profilesModel) keys() string {
 	keys += " · c конфиг"
 	if m.bench != nil {
 		keys += " · b пинг"
+	}
+	if m.refresh != nil {
+		keys += " · r обновить"
 	}
 	return keys + " · / фильтр · ← назад · q выход"
 }
