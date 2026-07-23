@@ -135,6 +135,10 @@ type nav struct {
 	// balancers and therefore keeps its own numbers.
 	pings     tui.PingCache
 	profPings tui.PingCache
+	// geo is what the loaded subscription wants its rules resolved against. It
+	// is kept because the cache below can hand the subscription back without a
+	// fetch, and the databases in use must still follow the subscription.
+	geo subscription.GeoSources
 }
 
 // subCacheTTL is how long a fetched subscription is reused before the menu goes
@@ -142,11 +146,12 @@ type nav struct {
 const subCacheTTL = 10 * time.Minute
 
 // setProfiles stores a freshly fetched subscription and stamps the cache.
-func (n *nav) setProfiles(subURL string, profiles []subscription.Profile) {
+func (n *nav) setProfiles(subURL string, profiles []subscription.Profile, geo subscription.GeoSources) {
 	// A fresh fetch is a new list: the old numbers belong to profiles that may no
 	// longer be there, and `r` is how the user asks to measure again.
 	clear(n.profPings)
 	n.profiles = profiles
+	n.geo = geo
 	n.flat = subscription.AllSingle(profiles)
 	n.loadedURL = subURL
 	n.loadedAt = time.Now()
@@ -212,13 +217,17 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 		// fetch (task #3). Results are stashed in a.nav for the next level.
 		Load: func(rawURL string) error {
 			if a.nav.fresh(rawURL) {
+				// Cached profiles skip the fetch, but the databases in use are
+				// global: another subscription opened in between has left its own
+				// in place.
+				a.useGeoAssets(rawURL, a.nav.geo)
 				return nil
 			}
-			profiles, err := a.loadProfiles(rawURL)
+			profiles, geo, err := a.loadProfiles(rawURL)
 			if err != nil {
 				return err
 			}
-			a.nav.setProfiles(rawURL, profiles)
+			a.nav.setProfiles(rawURL, profiles, geo)
 			a.nav.profIdx = 0
 			return nil
 		},
@@ -337,11 +346,11 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 	// A-4: refresh re-fetches with the same HWID headers as the initial load,
 	// and keeps the profile structure so the same profile is shown again.
 	refresh := func() ([]subscription.SubEntry, error) {
-		profiles, err := a.loadProfiles(subURL)
+		profiles, geo, err := a.loadProfiles(subURL)
 		if err != nil {
 			return nil, err
 		}
-		a.nav.setProfiles(subURL, profiles)
+		a.nav.setProfiles(subURL, profiles, geo)
 		if a.nav.profIdx >= len(profiles) {
 			a.nav.profIdx = 0
 		}
@@ -423,15 +432,15 @@ func (a *App) profileConfig(p subscription.Profile) (string, error) {
 
 // loadProfiles fetches between two full-screen menus, so it prints nothing: the
 // next screen would overwrite a progress line anyway.
-func (a *App) loadProfiles(subURL string) ([]subscription.Profile, error) {
+func (a *App) loadProfiles(subURL string) ([]subscription.Profile, subscription.GeoSources, error) {
 	hwid := config.GetOrCreateHWID(a.cfg.HWID)
 	profiles, geo, err := subscription.FetchProfilesWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
 	if err != nil {
-		return nil, fmt.Errorf("загрузка подписки: %w", err)
+		return nil, geo, fmt.Errorf("загрузка подписки: %w", err)
 	}
 	// The panel's rules are written against the panel's geo databases, so switch
 	// to them before anything builds a config from this subscription.
 	a.useGeoAssets(subURL, geo)
 	slog.Info("subscription loaded", "profiles", len(profiles), "servers", len(subscription.Flatten(profiles)))
-	return profiles, nil
+	return profiles, geo, nil
 }
