@@ -62,17 +62,22 @@ type subsModel struct {
 	height int // terminal height; 0 until the first WindowSizeMsg
 }
 
+// newSubsInput builds the add-subscription field. No CharLimit: a happ://crypt5
+// link runs well past 800 characters, and a truncated one fails to decrypt.
+func newSubsInput() textinput.Model {
+	ti := textinput.New()
+	ti.Placeholder = "https://... или vless://..."
+	ti.Width = 60
+	return ti
+}
+
 // SelectSubscription shows the subscription list. On SubsSelected the returned
 // index points into the (possibly reloaded) list, which is also returned.
 // cursor is where the highlight starts: coming back from a subscription lands
 // on the one just used, so the last-used one is visible at a glance. An index
 // past the end (the list shrank) falls back to the top.
 func SelectSubscription(subs []subscription.NamedSubscription, cursor int, cb SubsCallbacks) ([]subscription.NamedSubscription, int, SubsAction, error) {
-	ti := textinput.New()
-	ti.Placeholder = "https://... или vless://..."
-	ti.CharLimit = 512
-	ti.Width = 60
-
+	ti := newSubsInput()
 	if cursor < 0 || cursor >= len(subs) {
 		cursor = 0
 	}

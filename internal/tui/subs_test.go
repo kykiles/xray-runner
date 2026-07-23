@@ -104,3 +104,14 @@ func TestSubs_ReloadFailureIsReported(t *testing.T) {
 		}
 	})
 }
+
+// A happ://crypt5 link is ~840 characters; a CharLimit would truncate it on
+// paste and the decrypt at add time would fail with a confusing error.
+func TestSubsInputTakesLongHappLink(t *testing.T) {
+	link := "happ://crypt5/" + strings.Repeat("A", 900)
+	ti := newSubsInput()
+	ti.SetValue(link)
+	if ti.Value() != link {
+		t.Fatalf("ссылка обрезана: %d из %d символов", len(ti.Value()), len(link))
+	}
+}
