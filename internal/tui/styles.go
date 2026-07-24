@@ -10,17 +10,18 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Diablo II palette: the app name in set-item green, ordinary text in coffee,
-// balancers in the item-gold they already wore, and menu/legend/cursor in the
-// grey of socketed items (task #6). Hex defaults degrade to 256-color on
-// terminals without truecolor; COLOR_* env vars override any of them.
+// Grey ramp (docs/colors.jpg): a monochrome scale where prominence is lightness,
+// brightest for titles and the selected/best rows, mid-grey for body text, dim
+// grey for menu chrome. Hex defaults degrade to 256-color on terminals without
+// truecolor; COLOR_* env vars override any of them. Status colors (err/ok/warn)
+// stay outside the ramp so failures and successes remain distinguishable.
 const (
-	colorSet     = "#4ade80" // set-item green — the wordmark / titles
-	colorCoffee  = "#c8a165" // ordinary text — servers, descriptions
-	colorGold    = "220"     // balancers — unchanged
-	colorSocket  = "#8a8a8a" // socketed grey — menu, legend, cursor
-	colorBest    = "10"      // fastest ping
-	colorSelBest = "#e8c8a0" // selected row: a brighter coffee, still in family
+	colorSet     = "#f2f2f2" // brightest — the wordmark / titles
+	colorCoffee  = "#a5a5a5" // ordinary text — servers, descriptions
+	colorGold    = "#cccccc" // balancers — a notch above body text
+	colorSocket  = "#7f7f7f" // menu, legend, cursor chrome
+	colorBest    = "#f2f2f2" // fastest ping (bold)
+	colorSelBest = "#f2f2f2" // selected row (bold)
 )
 
 var (
@@ -188,10 +189,7 @@ func window(total, cursor, height int) (start, end, above, below int) {
 	if height <= 0 || total <= height {
 		return 0, total, 0, 0
 	}
-	start = cursor - height/2
-	if start < 0 {
-		start = 0
-	}
+	start = max(cursor-height/2, 0)
 	if start+height > total {
 		start = total - height
 	}
