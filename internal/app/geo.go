@@ -54,7 +54,7 @@ func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
 		dir = panelDir
 		return
 	}
-	if err := os.MkdirAll(panelDir, 0o755); err != nil {
+	if err := os.MkdirAll(panelDir, 0o750); err != nil {
 		slog.Warn("гео-базы подписки не установлены", "error", err)
 		return
 	}

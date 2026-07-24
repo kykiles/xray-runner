@@ -80,13 +80,13 @@ func (m connectingModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m connectingModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Подключение") + "\n\n")
+	b.WriteString(titleStyle.Render("  Подключение") + "\n\n")
 	if m.canceling {
 		b.WriteString("  " + m.spinner.View() + " " + warnStyle.Render("Отмена, откатываю настройки…") + "\n")
 		b.WriteString(legend(0, "  подождите…"))
 		return b.String()
 	}
-	b.WriteString("  " + m.spinner.View() + " Подключение к «" + m.title + "»…\n")
+	b.WriteString("  " + m.spinner.View() + " " + textStyle.Render("Подключение к «"+m.title+"»…") + "\n")
 	b.WriteString(legend(0, "  запуск ядра и настройка маршрутизации · ctrl+c отменить"))
 	return b.String()
 }

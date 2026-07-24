@@ -137,7 +137,7 @@ func (m statusModel) View() string {
 	b.WriteString(titleStyle.Render("  Подключено") + "\n\n")
 
 	row := func(label, value string) {
-		b.WriteString("  " + dimStyle.Render(pad(label, 10)) + value + "\n")
+		b.WriteString("  " + dimStyle.Render(pad(label, 10)) + textStyle.Render(value) + "\n")
 	}
 
 	row("Сервер", m.info.Title)
@@ -146,7 +146,8 @@ func (m statusModel) View() string {
 	}
 	row("Протокол", m.info.Protocol)
 	row("Режим", m.info.Mode)
-	row("Статус", m.health())
+	// The status row carries its own health colors, so it is written raw.
+	b.WriteString("  " + dimStyle.Render(pad("Статус", 10)) + m.health() + "\n")
 
 	if m.note != "" {
 		style := warnStyle

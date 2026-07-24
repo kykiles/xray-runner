@@ -159,7 +159,7 @@ func fetchBody(rawURL string, opts ...FetchOption) ([]byte, http.Header, error) 
 		if resp.StatusCode == http.StatusOK {
 			break
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if i == len(userAgents)-1 {
 			return nil, nil, fmt.Errorf("subscription fetch: HTTP %d", resp.StatusCode)
 		}

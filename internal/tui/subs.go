@@ -24,7 +24,6 @@ type SubsCallbacks struct {
 	Add    func(rawURL string) error                        // validate + save
 	Delete func(index int) error                            // remove by index
 	Reload func() ([]subscription.NamedSubscription, error) // re-read the list
-	Mask   func(rawURL string) string                       // S-3 masking
 	// Load fetches the chosen subscription's servers and stashes them for the
 	// next screen. Running it here, still inside the alt-screen, keeps the shell
 	// from flashing between menus during the network fetch (task #3). It takes the
@@ -257,8 +256,8 @@ func (m subsModel) View() string {
 	b.WriteString(renderLogo(m.width, m.height) + "\n\n")
 
 	if m.mode == subsAdding {
-		b.WriteString("  Вставьте URL подписки (http/https) или ссылку на сервер\n")
-		b.WriteString("  (vless/vmess/ss/hysteria2):\n")
+		b.WriteString("  " + textStyle.Render("Вставьте URL подписки (http/https) или ссылку на сервер") + "\n")
+		b.WriteString("  " + textStyle.Render("(vless/vmess/ss/hysteria2):") + "\n")
 		b.WriteString("  " + m.input.View() + "\n")
 		if m.status != "" {
 			b.WriteString("\n  " + m.status + "\n")
@@ -272,18 +271,19 @@ func (m subsModel) View() string {
 	}
 	for i, s := range m.subs {
 		cursor := "  "
-		line := fmt.Sprintf("%-28s %s", s.Name, dimStyle.Render(m.cb.Mask(s.URL)))
+		// Task #1: the list shows only the panel name, never the URL — the token
+		// stays off screen until asked for with s. pad is display-width aware, so a
+		// flag emoji in the name does not push the revealed URL out of line (task #2).
+		name := pad(s.Name, 28)
+		line := textStyle.Render(name)
 		if i == m.cursor {
 			cursor = cursorStyle.Render("▸ ")
-			line = selectedStyle.Render(fmt.Sprintf("%-28s ", s.Name)) + dimStyle.Render(m.cb.Mask(s.URL))
+			line = selectedStyle.Render(name)
 		}
-		// The revealed URL replaces the masked preview in place — same row, running
-		// off to the right untruncated so it stays a working link — instead of
-		// dropping to a new line, which made the list jump vertically.
+		// s reveals the full URL in place — same row, running off to the right
+		// untruncated so it stays a working link.
 		if m.reveal && i == m.cursor {
-			line = selectedStyle.Render(fmt.Sprintf("%-28s ", s.Name)) + urlStyle.Render(s.URL)
-			b.WriteString("  " + cursor + line + "\n")
-			continue
+			line = selectedStyle.Render(name) + " " + urlStyle.Render(s.URL)
 		}
 		b.WriteString("  " + cursor + line + "\n")
 	}

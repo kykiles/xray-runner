@@ -68,19 +68,6 @@ func (f *filterState) key(key tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 	return true, cmd
 }
 
-// visible returns the indices of the n rows matching the filter, in the list's
-// own order; hay yields the searchable text of a row.
-func (f filterState) visible(n int, hay func(int) string) []int {
-	terms := strings.Fields(strings.ToLower(strings.TrimSpace(f.value())))
-	out := make([]int, 0, n)
-	for i := range n {
-		if matchTerms(hay(i), terms) {
-			out = append(out, i)
-		}
-	}
-	return out
-}
-
 // matchTerms reports whether every term appears in hay. Terms narrow the list
 // (AND); each is a plain substring, so "vless" finds the protocol column, "ws"
 // the transport, part of a name the name column.

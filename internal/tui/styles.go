@@ -10,40 +10,60 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Diablo II palette: the app name in set-item green, ordinary text in coffee,
+// balancers in the item-gold they already wore, and menu/legend/cursor in the
+// grey of socketed items (task #6). Hex defaults degrade to 256-color on
+// terminals without truecolor; COLOR_* env vars override any of them.
+const (
+	colorSet     = "#4ade80" // set-item green — the wordmark / titles
+	colorCoffee  = "#c8a165" // ordinary text — servers, descriptions
+	colorGold    = "220"     // balancers — unchanged
+	colorSocket  = "#8a8a8a" // socketed grey — menu, legend, cursor
+	colorBest    = "10"      // fastest ping
+	colorSelBest = "#e8c8a0" // selected row: a brighter coffee, still in family
+)
+
 var (
-	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	cursorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
-	dimStyle      = lipgloss.NewStyle().Faint(true)
-	errStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	okStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	warnStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(colorSet))
+	// cursorStyle is a menu element (the ▸ marker), so it wears the socket grey.
+	cursorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorSocket)).Bold(true)
+	dimStyle    = lipgloss.NewStyle().Faint(true)
+	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	warnStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	// textStyle is the ordinary interface text: coffee, per task #6.
+	textStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorCoffee))
+	// selectedStyle marks the highlighted row — brighter coffee so it stands out
+	// against the plain coffee rows without leaving the palette.
+	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorSelBest)).Bold(true)
 	// goldStyle marks a row that hides more behind it: a profile with a balancer,
 	// the only kind that unfolds into a server list.
-	goldStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	goldStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorGold))
 	// bestStyle marks the fastest measured ping. The list is no longer sorted by
 	// latency, so the winner has to stand out where it stands.
-	bestStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
+	bestStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorBest)).Bold(true)
 	// urlStyle renders a revealed subscription URL: underlined and unfaded so the
 	// terminal shows it as a link and the whole token can be copied.
 	urlStyle = lipgloss.NewStyle().Underline(true)
-	// legendStyle renders the uniform key legend at the bottom of every
-	// screen (U-1).
-	legendStyle = lipgloss.NewStyle().Faint(true).MarginTop(1)
+	// legendStyle renders the uniform key legend at the bottom of every screen
+	// (U-1) in the socket grey of menu chrome.
+	legendStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorSocket)).MarginTop(1)
 )
 
 // InitStyles overrides the default palette from the environment so colors can be
 // tuned in .env without recompiling. It runs after config.Load has populated the
-// environment; env values are ANSI codes (0-255) or lipgloss color names.
+// environment; env values are ANSI codes (0-255), hex (#rrggbb) or color names.
 func InitStyles() {
-	titleStyle = titleStyle.Foreground(envColor("COLOR_TITLE", "6"))
-	cursorStyle = cursorStyle.Foreground(envColor("COLOR_CURSOR", "6"))
+	titleStyle = titleStyle.Foreground(envColor("COLOR_TITLE", colorSet))
+	cursorStyle = cursorStyle.Foreground(envColor("COLOR_CURSOR", colorSocket))
 	errStyle = errStyle.Foreground(envColor("COLOR_ERR", "1"))
 	okStyle = okStyle.Foreground(envColor("COLOR_OK", "2"))
 	warnStyle = warnStyle.Foreground(envColor("COLOR_WARN", "3"))
-	selectedStyle = selectedStyle.Foreground(envColor("COLOR_SELECTED", "6"))
-	goldStyle = goldStyle.Foreground(envColor("COLOR_BALANCER", "220"))
-	bestStyle = bestStyle.Foreground(envColor("COLOR_BEST", "10"))
+	textStyle = textStyle.Foreground(envColor("COLOR_TEXT", colorCoffee))
+	selectedStyle = selectedStyle.Foreground(envColor("COLOR_SELECTED", colorSelBest))
+	goldStyle = goldStyle.Foreground(envColor("COLOR_BALANCER", colorGold))
+	bestStyle = bestStyle.Foreground(envColor("COLOR_BEST", colorBest))
+	legendStyle = legendStyle.Foreground(envColor("COLOR_MENU", colorSocket))
 }
 
 func envColor(key, def string) lipgloss.Color {

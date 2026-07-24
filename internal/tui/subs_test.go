@@ -24,7 +24,6 @@ func TestSubs_LoadUsesLiveListAfterAdd(t *testing.T) {
 		Reload: func() ([]subscription.NamedSubscription, error) {
 			return append([]subscription.NamedSubscription(nil), stored...), nil
 		},
-		Mask: func(s string) string { return s },
 		Load: func(rawURL string) error { loadedURL = rawURL; return nil },
 	}
 
@@ -79,7 +78,6 @@ func TestSubs_ReloadFailureIsReported(t *testing.T) {
 		Reload: func() ([]subscription.NamedSubscription, error) {
 			return nil, errors.New("подписки не читаются")
 		},
-		Mask: func(s string) string { return s },
 	}
 
 	t.Run("after_delete", func(t *testing.T) {

@@ -11,10 +11,14 @@ linters-settings:
     #   G304 — file paths come from local config or our own directories, never
     #          from remote/web input.
     #   G302 — the xray core and its assets must be executable/readable.
+    #   G115 — the only sites are the geo-database walk (geodata.go), where every
+    #          int↔uint64 conversion is guarded by a preceding length check
+    #          (size > uint64(len(data)-n)), so it cannot overflow.
     excludes:
       - G204
       - G302
       - G304
+      - G115
   staticcheck:
     checks:
       - all

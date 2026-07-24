@@ -63,22 +63,6 @@ func tableRow(name string, e subscription.SubEntry, showPing bool) string {
 		host)
 }
 
-// bestResult is the index of the lowest successful latency, or -1 when nothing
-// has been measured yet. Rows keep the subscription's own order, so the fastest
-// one is called out by color instead of by position.
-func bestResult(results map[int]subscription.BenchmarkResult) int {
-	best := -1
-	for idx, r := range results {
-		if r.Error != nil {
-			continue
-		}
-		if best < 0 || r.Latency < results[best].Latency {
-			best = idx
-		}
-	}
-	return best
-}
-
 // pingCell is the row's PING cell: the measured result, or a placeholder while
 // the benchmark is still working through the list. Empty when neither applies.
 func pingCell(r subscription.BenchmarkResult, measured, benching, best bool) string {

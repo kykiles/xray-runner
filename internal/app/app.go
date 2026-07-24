@@ -243,7 +243,7 @@ func (a *App) menuLoop(ctx context.Context) error {
 				// exits instead of being wiped by the next screen.
 				tui.ReleaseScreen()
 				ui.Error(err.Error())
-				a.nav.level = backLevel(t)
+				a.nav.level = levelList
 				break
 			}
 
@@ -252,7 +252,7 @@ func (a *App) menuLoop(ctx context.Context) error {
 				return ErrUserQuit
 			case tui.StatusBack:
 				// Resume at the screen the target was picked on.
-				a.nav.level = backLevel(t)
+				a.nav.level = levelList
 			case tui.StatusSwitchMode, tui.StatusRestart:
 				continue
 			}

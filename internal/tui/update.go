@@ -308,7 +308,7 @@ func releaseNote(i, stableIdx int, r updater.Release) string {
 
 func (m updateModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Обновление") + "\n")
+	b.WriteString(titleStyle.Render("  Обновление") + "\n")
 	cur := m.installed
 	if cur == "" {
 		cur = "неизвестно"
@@ -317,14 +317,14 @@ func (m updateModel) View() string {
 	if geo == "" {
 		geo = "неизвестно"
 	}
-	b.WriteString("  " + dimStyle.Render("Текущее ядро: ") + cur + "\n")
-	b.WriteString("  " + dimStyle.Render("Гео-базы: ") + geo + "\n\n")
+	b.WriteString("  " + dimStyle.Render("Текущее ядро: ") + textStyle.Render(cur) + "\n")
+	b.WriteString("  " + dimStyle.Render("Гео-базы: ") + textStyle.Render(geo) + "\n\n")
 
 	switch m.stage {
 	case updMenu:
 		for i, item := range updateMenu {
 			cursor := "  "
-			line := item
+			line := textStyle.Render(item)
 			if i == m.cursor {
 				cursor = cursorStyle.Render("▸ ")
 				line = selectedStyle.Render(item)
@@ -359,7 +359,7 @@ func (m updateModel) View() string {
 		for i := start; i < end; i++ {
 			r := m.releases[i]
 			cursor := "  "
-			tag := r.Tag
+			tag := textStyle.Render(r.Tag)
 			if i == m.cursor {
 				cursor = cursorStyle.Render("▸ ")
 				tag = selectedStyle.Render(r.Tag)

@@ -6,43 +6,6 @@ import (
 	"xray-runner/internal/subscription"
 )
 
-// A balancer profile is chosen on the profile screen, so "back" must return
-// there — not into the server list the user never opened.
-func TestBackLevel(t *testing.T) {
-	tests := []struct {
-		name string
-		tgt  target
-		want navLevel
-	}{
-		{
-			name: "profile returns to the profile screen",
-			tgt:  target{profileName: "Balanced", profileRaw: []byte(`{}`)},
-			want: levelProfiles,
-		},
-		{
-			name: "single server returns to the server list",
-			tgt:  target{entry: &subscription.SubEntry{Address: "example.com", Port: 443}},
-			want: levelServers,
-		},
-		{
-			name: "single-server profile returns to the profile screen",
-			tgt: target{
-				entry:        &subscription.SubEntry{Address: "example.com", Port: 443},
-				fromProfiles: true,
-			},
-			want: levelProfiles,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := backLevel(&tc.tgt); got != tc.want {
-				t.Errorf("backLevel() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 // A single server running under its profile's routing may be sent to a sibling
 // outbound by the panel's rules, so every server of the profile has to stay on
 // the physical path.
@@ -73,10 +36,10 @@ func TestServerHosts_BareEntry(t *testing.T) {
 
 // A panel commonly publishes an autoselect profile alongside per-location ones,
 // so the same server appears in several profiles under different outbound tags.
-// The server screen was opened from a known profile, and that profile — not the
-// first one holding a matching endpoint — is the one whose routing must run:
+// The list hands back the exact profile a row came from, and that profile — not
+// the first one holding a matching endpoint — is the one whose routing must run:
 // pinning the tag against the wrong profile silently connects elsewhere.
-func TestOwningProfile_UsesTheOpenedProfileNotFirstMatch(t *testing.T) {
+func TestProfileOwner_UsesTheGivenProfileNotFirstMatch(t *testing.T) {
 	serverB := subscription.SubEntry{
 		Protocol: "vless", Address: "b.example.com", Port: 443,
 		UUID: "11111111-2222-3333-4444-555555555555",
@@ -97,25 +60,25 @@ func TestOwningProfile_UsesTheOpenedProfileNotFirstMatch(t *testing.T) {
 	}
 	profiles := []subscription.Profile{autoselect, germany}
 
-	t.Run("expanded profile wins over first match", func(t *testing.T) {
-		n := &nav{profiles: profiles, profIdx: 1}
-		got := n.owningProfile(&serverB)
+	t.Run("the given profile wins over first match", func(t *testing.T) {
+		n := &nav{profiles: profiles}
+		got := n.profileOwner(1, &serverB)
 		if got == nil {
-			t.Fatal("owningProfile returned nil")
+			t.Fatal("profileOwner returned nil")
 		}
 		if got.Name != "Germany" {
-			t.Errorf("owningProfile = %q, want %q", got.Name, "Germany")
+			t.Errorf("profileOwner = %q, want %q", got.Name, "Germany")
 		}
 	})
 
-	t.Run("flat list falls back to endpoint match", func(t *testing.T) {
-		n := &nav{profiles: profiles, flat: true}
-		got := n.owningProfile(&serverB)
+	t.Run("a flat server (-1) falls back to endpoint match", func(t *testing.T) {
+		n := &nav{profiles: profiles}
+		got := n.profileOwner(-1, &serverB)
 		if got == nil {
-			t.Fatal("owningProfile returned nil")
+			t.Fatal("profileOwner returned nil")
 		}
 		if got.Name != "Автовыбор" {
-			t.Errorf("owningProfile = %q, want %q", got.Name, "Автовыбор")
+			t.Errorf("profileOwner = %q, want %q", got.Name, "Автовыбор")
 		}
 	})
 }

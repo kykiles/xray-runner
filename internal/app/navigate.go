@@ -1,8 +1,9 @@
 package app
 
-// Menu navigation: subscriptions → profiles → servers, with esc walking back up
-// one level at a time. The state lives across sessions so that "back" from a
-// running VPN returns to the server list without re-fetching the subscription.
+// Menu navigation: subscriptions → the unified server/balancer list, with esc
+// walking back up one level at a time. The state lives across sessions so that
+// "back" from a running VPN returns to the list without re-fetching the
+// subscription.
 
 import (
 	"context"
@@ -26,9 +27,6 @@ type target struct {
 	entry       *subscription.SubEntry  // nil for a balancer profile
 	profileRaw  json.RawMessage         // nil for a single server
 	profileSrvs []subscription.SubEntry // servers behind the profile's balancer
-	// fromProfiles marks a server connected straight from the profile screen,
-	// so "back" returns there instead of a one-row server list.
-	fromProfiles bool
 }
 
 func (t target) isProfile() bool { return t.entry == nil }
@@ -91,48 +89,30 @@ type navLevel int
 
 const (
 	levelSubs navLevel = iota
-	levelProfiles
-	levelServers
+	levelList          // the unified server/balancer list — one screen for every shape
 )
-
-// backLevel is where "back" from a running session lands. A profile was picked
-// on the profile screen, so its server list is not a level the user ever passed
-// through — returning there would show servers they never chose from.
-func backLevel(t *target) navLevel {
-	if t.isProfile() || t.fromProfiles {
-		return levelProfiles
-	}
-	return levelServers
-}
 
 // nav holds the menu position between sessions.
 type nav struct {
 	subs     []subscription.NamedSubscription
 	subIdx   int
 	profiles []subscription.Profile
-	profIdx  int
+	profIdx  int // profile behind the current balancer target, for the status screen
 	level    navLevel
-	// flat marks a subscription whose profiles balance nothing: a URL list, or
-	// a panel publishing one config per location. Its profile screen would be a
-	// server list in disguise, so the menu shows the servers directly.
-	flat bool
 	// loadedURL/loadedAt back the fetch cache: walking back to the subscription
 	// list and into the same subscription again used to re-download it every
 	// time. `r` on the server screen forces a fresh fetch.
 	loadedURL string
 	loadedAt  time.Time
-	// filter is the server screen's search, kept across a session so that going
+	// filter is the list screen's search, kept across a session so that going
 	// back from a connection shows the list the user left. The screen itself
 	// clears it on ← (first press drops the filter, second one goes back), so
-	// walking up a level resets it without any help from here. profFilter is the
-	// same for the profile screen, which is where a single-server profile — and a
-	// whole balancer — is connected from, and therefore returned to.
-	filter     string
-	profFilter string
-	// pings keeps the last measurement of each server for the whole run, so
-	// coming back from a session shows the numbers instead of an empty column.
-	// profPings does the same for the profile screen, which measures whole
-	// balancers and therefore keeps its own numbers.
+	// walking up a level resets it without any help from here.
+	filter string
+	// pings keeps the last per-server measurement for the whole run, so coming
+	// back from a session shows the numbers instead of an empty column. profPings
+	// does the same for whole balancers, which are measured as a group and keep
+	// their own numbers.
 	pings     tui.PingCache
 	profPings tui.PingCache
 	// geo is what the loaded subscription wants its rules resolved against. It
@@ -152,7 +132,6 @@ func (n *nav) setProfiles(subURL string, profiles []subscription.Profile, geo su
 	clear(n.profPings)
 	n.profiles = profiles
 	n.geo = geo
-	n.flat = subscription.AllSingle(profiles)
 	n.loadedURL = subURL
 	n.loadedAt = time.Now()
 }
@@ -162,37 +141,17 @@ func (n *nav) fresh(subURL string) bool {
 	return n.loadedURL == subURL && len(n.profiles) > 0 && time.Since(n.loadedAt) < subCacheTTL
 }
 
-// entries lists the servers the server screen shows: every server of the
-// subscription when flat, otherwise the ones inside the chosen profile.
-func (n *nav) entries() []subscription.SubEntry {
-	if n.flat {
-		return subscription.FlattenNamed(n.profiles)
-	}
-	return n.profiles[n.profIdx].Entries
-}
-
-// owningProfile returns the profile whose routing a picked server must run
-// under. Outside flat mode the server screen was opened from one specific
-// profile, and that is the answer — a panel that publishes an autoselect
-// profile next to per-location ones lists the same endpoint several times under
-// different outbound tags, so matching by endpoint would pin the tag against a
-// profile the user never chose and silently connect to another server. Only the
-// flat screen, which mixes every profile's servers, has no opened profile to
-// go by and falls back to the endpoint match.
-func (n *nav) owningProfile(e *subscription.SubEntry) *subscription.Profile {
-	if !n.flat && n.profIdx < len(n.profiles) {
-		return &n.profiles[n.profIdx]
+// profileOwner returns the profile whose routing a picked server must run
+// under. The list screen knows exactly which profile a row came from and hands
+// its index back, so there is no endpoint guessing — a panel that lists the same
+// endpoint under several profiles no longer risks pinning it to the wrong one.
+// A flat server (profIdx < 0) has no owning profile in the tree and falls back
+// to the endpoint match.
+func (n *nav) profileOwner(profIdx int, e *subscription.SubEntry) *subscription.Profile {
+	if profIdx >= 0 && profIdx < len(n.profiles) {
+		return &n.profiles[profIdx]
 	}
 	return subscription.ProfileFor(n.profiles, e)
-}
-
-// profileTitle names the profile the servers came from; a flat subscription has
-// no profile to name.
-func (n *nav) profileTitle() string {
-	if n.flat {
-		return ""
-	}
-	return n.profiles[n.profIdx].Name
 }
 
 // chooseTarget runs the menu until the user picks something to connect to.
@@ -211,7 +170,6 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 		Add:    addSubscription,
 		Delete: subscription.RemoveSubscription,
 		Reload: subscription.LoadSubscriptions,
-		Mask:   func(raw string) string { return maskURL(raw, a.cfg.MaskCreds) },
 		// Load fetches the chosen subscription's profiles from inside the
 		// subscription screen, so the shell does not flash during the network
 		// fetch (task #3). Results are stashed in a.nav for the next level.
@@ -263,62 +221,10 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 			// choice indexes the reloaded list we just stored, so subIdx stays
 			// valid even after an add/delete changed the list under us.
 			a.nav.subIdx = choice
-			a.nav.level = levelProfiles
+			a.nav.level = levelList
 
-		case levelProfiles:
-			// Nothing to choose when no profile balances anything — the screen is
-			// skipped in both directions.
-			if a.nav.flat {
-				a.nav.profIdx = 0
-				a.nav.level = levelServers
-				continue
-			}
-			if a.nav.profPings == nil {
-				a.nav.profPings = tui.PingCache{}
-			}
-			pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
-			// `r` re-fetches past the cache, like it does on the server screen; the
-			// menu keeps the new list so walking on does not fetch it again.
-			refresh := func() ([]subscription.Profile, error) {
-				profiles, info, err := a.loadProfiles(a.nav.subs[a.nav.subIdx].URL)
-				if err != nil {
-					return nil, err
-				}
-				a.nav.setProfiles(a.nav.subs[a.nav.subIdx].URL, profiles, info)
-				a.nav.profIdx = 0
-				return profiles, nil
-			}
-			idx, action, filter, err := tui.SelectProfile(ctx, a.nav.profiles, a.nav.profIdx, a.nav.profFilter, a.nav.profPings, refresh, pb.RunProfiles, a.profileConfig, a.saveConfig)
-			if err != nil {
-				return nil, fmt.Errorf("TUI: %w", err)
-			}
-			a.nav.profFilter = filter
-			switch action {
-			case tui.ProfileQuit:
-				return nil, ErrUserQuit
-			case tui.ProfileBack:
-				a.nav.level = levelSubs
-			case tui.ProfileExpand:
-				a.nav.profIdx = idx
-				// A profile holding one server has nothing to pick from: connect to
-				// it instead of showing a one-row list. Only balancers unfold.
-				if p := a.nav.profiles[idx]; p.Balancer == nil && len(p.Entries) == 1 {
-					return a.singleServerTarget(p)
-				}
-				a.nav.level = levelServers
-			case tui.ProfileRun:
-				p := a.nav.profiles[idx]
-				a.nav.profIdx = idx
-				return &target{
-					subURL:      a.nav.subs[a.nav.subIdx].URL,
-					profileName: p.Name,
-					profileRaw:  p.Raw,
-					profileSrvs: p.Entries,
-				}, nil
-			}
-
-		case levelServers:
-			t, err := a.selectServerInProfile(ctx)
+		case levelList:
+			t, err := a.selectFromList(ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -330,42 +236,30 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 	}
 }
 
-// singleServerTarget connects to the only server of a profile, under that
-// profile's routing and dns — the same target the server screen would build.
-func (a *App) singleServerTarget(p subscription.Profile) (*target, error) {
-	subURL := a.nav.subs[a.nav.subIdx].URL
-	entry := p.Entries[0]
-	if err := entry.Validate(); err != nil {
-		return nil, fmt.Errorf("выбранный сервер невалиден: %w", err)
-	}
-	entry.AllowInsecure = a.cfg.AllowInsecure
-	a.rememberSelection(subURL, &entry)
-
-	t := &target{
-		subURL:       subURL,
-		profileName:  p.Name,
-		entry:        &entry,
-		fromProfiles: true,
-	}
-	t.attachOwner(&p)
-	return t, nil
-}
-
-func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
+// selectFromList runs the unified list screen: a flat server list, or the
+// balancer tree, whichever the subscription is. It returns the target to connect
+// (a server or a whole balancer), or nil when the user walked back to the
+// subscription list.
+func (a *App) selectFromList(ctx context.Context) (*target, error) {
 	subURL := a.nav.subs[a.nav.subIdx].URL
 
-	// A-4: refresh re-fetches with the same HWID headers as the initial load,
-	// and keeps the profile structure so the same profile is shown again.
-	refresh := func() ([]subscription.SubEntry, error) {
-		profiles, geo, err := a.loadProfiles(subURL)
+	if a.nav.pings == nil {
+		a.nav.pings = tui.PingCache{}
+	}
+	if a.nav.profPings == nil {
+		a.nav.profPings = tui.PingCache{}
+	}
+
+	// A-4: `r` re-fetches with the same HWID headers as the initial load, keeping
+	// the profile structure so the same list is shown again.
+	refresh := func() ([]subscription.Profile, error) {
+		profiles, info, err := a.loadProfiles(subURL)
 		if err != nil {
 			return nil, err
 		}
-		a.nav.setProfiles(subURL, profiles, geo)
-		if a.nav.profIdx >= len(profiles) {
-			a.nav.profIdx = 0
-		}
-		return a.nav.entries(), nil
+		a.nav.setProfiles(subURL, profiles, info)
+		a.nav.profIdx = 0
+		return profiles, nil
 	}
 
 	// Start the cursor on the server connected to last time, so returning to the
@@ -377,12 +271,12 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 		lastAddress, lastPort = state.ServerAddress, state.ServerPort
 	}
 
-	if a.nav.pings == nil {
-		a.nav.pings = tui.PingCache{}
-	}
-
 	pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
-	selected, action, filter, err := tui.SelectServer(ctx, a.nav.profileTitle(), a.nav.entries(), lastAddress, lastPort, a.nav.filter, a.nav.pings, refresh, pb.Run, a.serverConfig, a.saveConfig)
+	action, profIdx, entry, filter, err := tui.SelectList(
+		ctx, a.nav.profiles, lastAddress, lastPort, a.nav.profIdx, a.nav.filter,
+		a.nav.pings, a.nav.profPings, refresh, pb.Run, pb.RunProfiles,
+		a.serverConfig, a.profileConfig, a.saveConfig,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("TUI: %w", err)
 	}
@@ -392,41 +286,52 @@ func (a *App) selectServerInProfile(ctx context.Context) (*target, error) {
 	}
 
 	switch action {
-	case tui.ServerQuit:
+	case tui.ListQuit:
 		// U-1: q/Ctrl+C exits the whole app, not just the screen.
 		return nil, ErrUserQuit
-	case tui.ServerBack:
-		// Nothing to go back to when the profile screen was skipped.
-		if a.nav.flat {
-			a.nav.level = levelSubs
-		} else {
-			a.nav.level = levelProfiles
-		}
+	case tui.ListBack:
+		a.nav.level = levelSubs
 		return nil, nil
+	case tui.ListRunBalancer:
+		p := a.nav.profiles[profIdx]
+		a.nav.profIdx = profIdx
+		return &target{
+			subURL:      subURL,
+			profileName: p.Name,
+			profileRaw:  p.Raw,
+			profileSrvs: p.Entries,
+		}, nil
 	}
 
-	if err := selected.Validate(); err != nil {
+	// ListConnect: a single server, under its owning profile's routing.
+	if err := entry.Validate(); err != nil {
 		return nil, fmt.Errorf("выбранный сервер невалиден: %w", err)
 	}
-	selected.AllowInsecure = a.cfg.AllowInsecure
-	a.rememberSelection(subURL, selected)
+	entry.AllowInsecure = a.cfg.AllowInsecure
+	a.rememberSelection(subURL, entry)
 
-	t := &target{
-		subURL:      subURL,
-		profileName: a.nav.profileTitle(),
-		entry:       selected,
+	owner := a.nav.profileOwner(profIdx, entry)
+	t := &target{subURL: subURL, entry: entry}
+	if owner != nil {
+		t.profileName = owner.Name
 	}
-	t.attachOwner(a.nav.owningProfile(selected))
+	t.attachOwner(owner)
 	return t, nil
 }
 
 // serverConfig renders what connecting to this server would run: the same
 // target the menu builds on Enter, so the preview carries the profile's routing.
-func (a *App) serverConfig(e *subscription.SubEntry) (string, error) {
+// profIdx names the profile the row came from (-1 for a flat server), so the
+// preview runs under the same owner the connection would.
+func (a *App) serverConfig(e *subscription.SubEntry, profIdx int) (string, error) {
 	entry := *e
 	entry.AllowInsecure = a.cfg.AllowInsecure
-	t := &target{profileName: a.nav.profileTitle(), entry: &entry}
-	t.attachOwner(a.nav.owningProfile(&entry))
+	owner := a.nav.profileOwner(profIdx, &entry)
+	t := &target{entry: &entry}
+	if owner != nil {
+		t.profileName = owner.Name
+	}
+	t.attachOwner(owner)
 	return a.previewConfig(t)
 }
 

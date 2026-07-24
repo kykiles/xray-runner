@@ -80,7 +80,7 @@ func (v cfgView) budget(height, width int) int {
 
 func (v cfgView) view(width, height int) string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render(v.title+" · конфиг") + "\n\n")
+	b.WriteString(titleStyle.Render("  "+v.title+" · конфиг") + "\n\n")
 
 	end := min(v.top+v.budget(height, width), len(v.lines))
 	b.WriteString(moreUp(v.top))
