@@ -58,7 +58,7 @@ func Init(cfg *config.Config) func() {
 // maxLogBytes bounds a single run. Truncating at startup is not enough on its
 // own: a TUN session left up for days, or one stuck in a routing loop, never
 // restarts the tool and would grow the file without limit.
-const maxLogBytes = 50 << 20 // 50 MiB
+const maxLogBytes = 5 << 20 // 5 MiB
 
 const truncationNotice = "log truncated: hit the size cap, older lines dropped"
 
