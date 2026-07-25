@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -83,10 +84,11 @@ type listModel struct {
 	// benchTargets is parallel to the current run's global result indices.
 	benchTargets []benchTarget
 
-	refreshing bool
-	status     string
-	width      int
-	height     int
+	refreshing  bool
+	lastRefresh time.Time // when `r` last brought a list back — see refreshCooldown
+	status      string
+	width       int
+	height      int
 
 	action ListAction
 	choice int // profile index for ListRunBalancer, -1 otherwise
@@ -276,6 +278,7 @@ func (m listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case listRefreshDoneMsg:
 		m.refreshing = false
+		m.lastRefresh = time.Now()
 		if msg.err != nil {
 			m.status = errStyle.Render(fmt.Sprintf("Ошибка обновления: %v", msg.err))
 			return m, nil
@@ -430,20 +433,35 @@ func (m listModel) startBench() (tea.Model, tea.Cmd) {
 	var srvEntries []subscription.SubEntry
 	var profs []subscription.Profile
 	var targets []benchTarget
+	seen := map[string]bool{}
+	addSrv := func(e subscription.SubEntry) {
+		key := pingKey(e)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		srvEntries = append(srvEntries, e)
+		targets = append(targets, benchTarget{key: key})
+	}
 	for _, r := range vis {
-		switch r.kind {
-		case rowServer:
-			srvEntries = append(srvEntries, r.entry)
-			targets = append(targets, benchTarget{key: pingKey(r.entry)})
-		case rowBalancer:
-			p := m.profiles[r.profIdx]
-			profs = append(profs, p)
-			// Appended after all servers below, so record profile keys separately.
+		if r.kind == rowServer {
+			addSrv(r.entry)
+			continue
+		}
+		// Task #2: the servers behind a balancer are measured whether they are
+		// unfolded or not, so opening one after a run shows numbers instead of
+		// holes. An unfolded child is a visible row of its own — the dedup by
+		// endpoint keeps it from being measured twice.
+		// ponytail: a balancer of N servers now costs N+1 measurements instead of
+		// 1. Skip the children of folded balancers if that gets slow.
+		for _, e := range m.profiles[r.profIdx].Entries {
+			addSrv(e)
 		}
 	}
 	// Balancer targets follow the server ones, matching the run order below.
 	for _, r := range vis {
 		if r.kind == rowBalancer {
+			profs = append(profs, m.profiles[r.profIdx])
 			targets = append(targets, benchTarget{key: profileKey(m.profiles[r.profIdx]), isProfile: true})
 		}
 	}
@@ -473,10 +491,19 @@ func (m listModel) startBench() (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// refreshCooldown is the shortest gap between two forced re-fetches. `r` is the
+// one button that must always hit the panel, so it is rate-limited rather than
+// cached (task #5): held down, it would otherwise fire a request per keypress.
+const refreshCooldown = 5 * time.Second
+
 func (m listModel) startRefresh() (tea.Model, tea.Cmd) {
 	// Refreshing mid-benchmark would swap the list out from under the running
 	// measurement (H-1).
 	if m.refresh == nil || m.refreshing || m.run.running {
+		return m, nil
+	}
+	if wait := refreshCooldown - time.Since(m.lastRefresh); wait > 0 && !m.lastRefresh.IsZero() {
+		m.status = warnStyle.Render(fmt.Sprintf("Только что обновлялось — подождите %ds", int(wait.Seconds())+1))
 		return m, nil
 	}
 	m.refreshing = true
@@ -587,6 +614,14 @@ func (m listModel) View() string {
 		if pos == m.cursor {
 			cursor = cursorStyle.Render("▸ ")
 		}
+		// Task #1: a star beside the cursor says the row it points at is a
+		// balancer — the gold alone is a small difference to catch. It goes in the
+		// left margin every row already carries, so no column moves when it shows
+		// up and the table keeps its full width on a narrow terminal.
+		margin := "  "
+		if pos == m.cursor && r.kind == rowBalancer {
+			margin = goldStyle.Render("★ ")
+		}
 
 		line := tableRow(r.name, r.entry, showPing)
 		switch r.kind {
@@ -612,25 +647,29 @@ func (m listModel) View() string {
 			} else if r.entry.Validate() != nil {
 				line += "  " + warnStyle.Render("⚠ invalid")
 			}
-		} else {
+		} else if r.kind == rowBalancer && !m.expanded[r.profIdx] {
+			// Task #2: unfolded, the servers below carry the numbers and the balancer
+			// row gives its cell up; folded, its own measurement is back. A group has
+			// no balancer and so no number of its own — only its servers do.
 			key := profileKey(m.profiles[r.profIdx])
 			pr, measured := m.profPings[key]
 			line += pingCell(pr, measured, m.run.running, measured && key == bestProf)
 		}
 
 		indent := strings.Repeat("  ", r.depth)
-		b.WriteString("  " + cursor + indent + clip(line, m.width-4-2*r.depth) + "\n")
+		b.WriteString(margin + cursor + indent + clip(line, m.width-4-2*r.depth) + "\n")
 	}
 	b.WriteString(moreDown(below))
 
-	// The block always occupies its two lines, empty or not — see the budget.
+	// The notice keeps its one line, empty or not — see the budget. Task #3: it
+	// used to be two, and the blank one only pushed the whole screen down.
 	switch {
 	case m.run.running:
-		b.WriteString("\n  " + benchLine(m.run) + "\n")
+		b.WriteString("  " + benchLine(m.run) + "\n")
 	case m.refreshing:
-		b.WriteString("\n  " + dimStyle.Render("⏳ Обновление подписки...") + "\n")
+		b.WriteString("  " + dimStyle.Render("⏳ Обновление подписки...") + "\n")
 	default:
-		b.WriteString("\n  " + m.status + "\n")
+		b.WriteString("  " + m.status + "\n")
 	}
 
 	b.WriteString(legend(m.width, keys))

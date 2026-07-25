@@ -176,8 +176,9 @@ func drainBench(m listModel, cmd tea.Cmd) listModel {
 	return m
 }
 
-// Variant A: b measures the visible balancers as whole profiles and the visible
-// servers one by one, in one run, routing each result to the right cache.
+// Variant A: b measures the visible balancers as whole profiles and every server
+// one by one — the ones behind a folded balancer included (task #2) — in one run,
+// routing each result to the right cache.
 func TestList_BenchmarkVariantA(t *testing.T) {
 	var srvSeen, profSeen []string
 	m := newList(balancerFixture())
@@ -199,9 +200,10 @@ func TestList_BenchmarkVariantA(t *testing.T) {
 	next, cmd := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
 	m = drainBench(next.(listModel), cmd)
 
-	// Top level: the single-server profile is a server, the two balancers whole.
-	if strings.Join(srvSeen, ",") != "us1.example.com" {
-		t.Errorf("server bench saw %v, want [us1.example.com]", srvSeen)
+	// Every server is measured on its own, folded balancers included, and each
+	// balancer additionally as a whole.
+	if want := "de1.example.ru,de2.example.ru,us1.example.com,nl1.example.ru"; strings.Join(srvSeen, ",") != want {
+		t.Errorf("server bench saw %v, want %v", srvSeen, want)
 	}
 	if strings.Join(profSeen, ",") != "Германия,Нидерланды" {
 		t.Errorf("profile bench saw %v, want [Германия Нидерланды]", profSeen)
@@ -215,6 +217,57 @@ func TestList_BenchmarkVariantA(t *testing.T) {
 	if m.run.running {
 		t.Error("run still marked running after completion")
 	}
+}
+
+// Task #2: the balancer's own number sits on its row while it is folded and
+// gives the cell up once it is unfolded, where the servers behind it carry their
+// own — and folding it back brings it again instead of leaving a hole.
+func TestList_BalancerPingMovesToChildren(t *testing.T) {
+	m := newList(balancerFixture())
+	m.pings[pingKey(m.profiles[0].Entries[0])] = subscription.BenchmarkResult{Latency: 11 * time.Millisecond}
+	m.pings[pingKey(m.profiles[0].Entries[1])] = subscription.BenchmarkResult{Latency: 22 * time.Millisecond}
+	m.profPings[profileKey(m.profiles[0])] = subscription.BenchmarkResult{Latency: 33 * time.Millisecond}
+
+	folded := m.View()
+	if !strings.Contains(folded, "33ms") || strings.Contains(folded, "11ms") {
+		t.Errorf("folded balancer must show its own ping and nothing else:\n%s", folded)
+	}
+
+	m = press(m, "s")
+	open := m.View()
+	if strings.Contains(open, "33ms") {
+		t.Errorf("unfolded balancer must give its ping cell up:\n%s", open)
+	}
+	if !strings.Contains(open, "11ms") || !strings.Contains(open, "22ms") {
+		t.Errorf("unfolded servers must carry their own pings:\n%s", open)
+	}
+
+	m = press(m, "s")
+	if back := m.View(); !strings.Contains(back, "33ms") {
+		t.Errorf("folding back must restore the balancer's ping:\n%s", back)
+	}
+}
+
+// Task #1: a star beside the cursor marks a balancer, and only there.
+func TestList_StarMarksBalancerUnderCursor(t *testing.T) {
+	m := newList(balancerFixture())
+	if line := cursorLine(m.View()); !strings.Contains(line, "★") {
+		t.Errorf("cursor on a balancer, want a star:\n%q", line)
+	}
+	m.cursor = 1 // the США server row
+	if line := cursorLine(m.View()); strings.Contains(line, "★") {
+		t.Errorf("cursor on a server, want no star:\n%q", line)
+	}
+}
+
+// cursorLine is the rendered line the cursor marker sits on.
+func cursorLine(view string) string {
+	for _, l := range strings.Split(view, "\n") {
+		if strings.Contains(l, "▸") {
+			return l
+		}
+	}
+	return ""
 }
 
 // Pressing b again restarts on what is on screen now; the cancelled run's late
@@ -355,6 +408,29 @@ func TestList_RefreshReplacesAndDropsCaches(t *testing.T) {
 	}
 	if len(got.pings) != 0 || len(got.profPings) != 0 {
 		t.Errorf("stale numbers kept: pings=%v profPings=%v", got.pings, got.profPings)
+	}
+}
+
+// Task #5: r is the one button that always hits the panel, so holding it down
+// must not turn into a request per keypress.
+func TestList_RefreshCooldown(t *testing.T) {
+	m := newList(flatFixture())
+	m.refresh = func() ([]subscription.Profile, error) { return flatFixture(), nil }
+
+	r := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}
+	next, cmd := m.updateKey(r)
+	if cmd == nil {
+		t.Fatal("the first r did not refresh")
+	}
+	done, _ := next.(listModel).Update(cmd())
+	m = done.(listModel)
+
+	if _, cmd := m.updateKey(r); cmd != nil {
+		t.Error("r inside the cooldown fetched again")
+	}
+	m.lastRefresh = time.Now().Add(-refreshCooldown)
+	if _, cmd := m.updateKey(r); cmd == nil {
+		t.Error("r after the cooldown must fetch again")
 	}
 }
 

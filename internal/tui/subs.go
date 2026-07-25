@@ -288,15 +288,17 @@ func (m subsModel) View() string {
 		b.WriteString("  " + cursor + line + "\n")
 	}
 
+	// Task #3: the notice sits right under the list — the blank line above it only
+	// pushed the legend further down.
 	if m.mode == subsLoading {
-		b.WriteString("\n  " + dimStyle.Render("⏳ Загрузка серверов…") + "\n")
+		b.WriteString("  " + dimStyle.Render("⏳ Загрузка серверов…") + "\n")
 		return b.String()
 	}
 
 	if m.mode == subsConfirmDelete {
-		b.WriteString("\n  " + warnStyle.Render(fmt.Sprintf("Удалить «%s»? (y/n)", m.subs[m.cursor].Name)) + "\n")
+		b.WriteString("  " + warnStyle.Render(fmt.Sprintf("Удалить «%s»? (y/n)", m.subs[m.cursor].Name)) + "\n")
 	} else if m.status != "" {
-		b.WriteString("\n  " + m.status + "\n")
+		b.WriteString("  " + m.status + "\n")
 	}
 
 	keys := "  ↑/↓ выбор · → открыть · s показать URL · + добавить · d удалить · u обновить · q выход"

@@ -12,27 +12,31 @@ import (
 // own: color comes from titleStyle at render time, so the logo follows
 // COLOR_TITLE like the rest of the TUI and degrades on terminals without
 // truecolor.
-const logoFull = `
-██╗  ██╗██████╗  █████╗ ██╗   ██╗     ██████╗ ██╗   ██╗███╗   ██╗███╗   ██╗███████╗██████╗
+const logoFull = `██╗  ██╗██████╗  █████╗ ██╗   ██╗     ██████╗ ██╗   ██╗███╗   ██╗███╗   ██╗███████╗██████╗
 ╚██╗██╔╝██╔══██╗██╔══██╗╚██╗ ██╔╝     ██╔══██╗██║   ██║████╗  ██║████╗  ██║██╔════╝██╔══██╗
  ╚███╔╝ ██████╔╝███████║ ╚████╔╝█████╗██████╔╝██║   ██║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝
  ██╔██╗ ██╔══██╗██╔══██║  ╚██╔╝ ╚════╝██╔══██╗██║   ██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗
 ██╔╝ ██╗██║  ██║██║  ██║   ██║        ██║  ██║╚██████╔╝██║ ╚████║██║ ╚████║███████╗██║  ██║
 ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝        ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝`
 
-// logoCompact is the same wordmark in a narrower face, for terminals too small
-// for logoFull.
-const logoCompact = `
-█  █ ███   ██  █  █      ███  █  █ ██ █ ██ █ ████ ███
- ██  ██   ████  ██  ████ ██   █  █ █ ██ █ ██ ███  ██
-█  █ █  █ █  █   █       █  █ ████ █  █ █  █ ████ █  █`
+// logoMark is the XR monogram for a narrow window (task #6): the same typeface
+// as logoFull, cut down to the two initials, so a folded-up layout gets a badge
+// instead of a wordmark squeezed into a face of its own. 16 columns wide — no
+// terminal narrow enough to wrap it is wide enough to run the table anyway.
+const logoMark = `██╗  ██╗██████╗
+╚██╗██╔╝██╔══██╗
+ ╚███╔╝ ██████╔╝
+ ██╔██╗ ██╔══██╗
+██╔╝ ██╗██║  ██║
+╚═╝  ╚═╝╚═╝  ╚═╝`
 
 // minLogoHeight is the terminal height below which the six-row logo would crowd
 // the subscription list off the screen.
 const minLogoHeight = 16
 
-// renderLogo picks the widest wordmark that fits, falling back to a plain title
-// when the terminal is too short and to plain text when it is too narrow.
+// renderLogo picks the widest wordmark that fits — the full one, else the XR
+// monogram — falling back to a plain title when the terminal is too short and to
+// plain text when it is too narrow.
 // width and height are 0 until the first WindowSizeMsg. Every variant carries
 // the same two-column indent as the list and the legend below it, so the whole
 // screen lines up on one left edge (task #8).
@@ -40,7 +44,7 @@ func renderLogo(width, height int) string {
 	if height > 0 && height < minLogoHeight {
 		return titleStyle.Render("  Мои подписки")
 	}
-	for _, art := range []string{logoFull, logoCompact} {
+	for _, art := range []string{logoFull, logoMark} {
 		if width >= artWidth(art)+2 {
 			return titleStyle.Render(indent(art))
 		}

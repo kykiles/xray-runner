@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"xray-runner/internal/system"
@@ -88,18 +89,72 @@ func SameVersion(tag, installed string) bool {
 	return norm(tag) == norm(installed)
 }
 
+// Task #4: walking in and out of the update screen used to re-query the GitHub
+// API on every entry and re-download the same geo databases on every →. The
+// answers live here for cacheTTL instead, and a geo release installed once in
+// this run is not installed again.
+const cacheTTL = 10 * time.Minute
+
+var cache struct {
+	// ponytail: the mutex is held across the fetch, so two concurrent lookups
+	// queue instead of racing. One screen asks at a time; per-slot locking if
+	// that ever stops being true.
+	mu       sync.Mutex
+	releases []Release
+	relAt    time.Time
+	geo      Release
+	geoAt    time.Time
+	geoTag   string // geo release already installed in this run
+}
+
+// cached returns the memoized value while it is younger than cacheTTL, and
+// fetches (and stores) it otherwise. A failed fetch is not cached.
+func cached[T any](slot *T, at *time.Time, fetch func() (T, error)) (T, error) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if !at.IsZero() && time.Since(*at) < cacheTTL {
+		return *slot, nil
+	}
+	v, err := fetch()
+	if err != nil {
+		return v, err
+	}
+	*slot, *at = v, time.Now()
+	return v, nil
+}
+
+// GeoInstalled reports whether this geo release was already installed in this
+// run — pressing → on "Обновить гео-базы" again would re-download tens of
+// megabytes for nothing.
+func GeoInstalled(tag string) bool {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return tag != "" && cache.geoTag == tag
+}
+
+// MarkGeoInstalled records a geo release as installed. Called after the install
+// succeeds, so a failed one can be retried.
+func MarkGeoInstalled(tag string) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.geoTag = tag
+}
+
 // FetchReleases lists the most recent core releases (newest first, up to limit)
-// from the official xray-core repo.
+// from the official xray-core repo. The answer is cached for cacheTTL; the
+// cached list ignores limit, which every caller leaves at the same value.
 func FetchReleases(ctx context.Context, limit int) ([]Release, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=%d", CoreRepo, limit)
-	var releases []Release
-	if err := getJSON(ctx, url, &releases); err != nil {
-		return nil, err
-	}
-	return releases, nil
+	return cached(&cache.releases, &cache.relAt, func() ([]Release, error) {
+		url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=%d", CoreRepo, limit)
+		var releases []Release
+		if err := getJSON(ctx, url, &releases); err != nil {
+			return nil, err
+		}
+		return releases, nil
+	})
 }
 
 // TrimToLatestStable returns the prefix of rels running from the newest release
@@ -118,12 +173,14 @@ func TrimToLatestStable(rels []Release) []Release {
 // FetchLatestGeoRelease returns the newest release of the geo-data repo, which
 // carries geoip.dat and geosite.dat.
 func FetchLatestGeoRelease(ctx context.Context) (Release, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", GeoRepo)
-	var r Release
-	if err := getJSON(ctx, url, &r); err != nil {
-		return Release{}, err
-	}
-	return r, nil
+	return cached(&cache.geo, &cache.geoAt, func() (Release, error) {
+		url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", GeoRepo)
+		var r Release
+		if err := getJSON(ctx, url, &r); err != nil {
+			return Release{}, err
+		}
+		return r, nil
+	})
 }
 
 func getJSON(ctx context.Context, url string, dst any) error {

@@ -54,6 +54,7 @@ type updateModel struct {
 	kind       updateKind
 	cursor     int
 	pendingTag string            // core release tag being installed, for the header refresh
+	geoTag     string            // geo release tag being installed, remembered once it lands
 	releases   []updater.Release // core releases carrying an asset for this platform
 	status     string
 	err        error
@@ -104,6 +105,7 @@ func (m updateModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case installedMsg:
 		m.stage = updDone
 		m.err = msg.err
+		m.status = ""
 		if msg.err == nil {
 			// Refresh the header so it reflects what we just installed instead of
 			// the values captured when the screen opened — otherwise the old core
@@ -113,6 +115,7 @@ func (m updateModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.installed = strings.TrimPrefix(strings.ToLower(m.pendingTag), "v")
 			case kindGeo:
 				m.geoDate = geoDate(m.dir)
+				updater.MarkGeoInstalled(m.geoTag)
 			}
 		}
 		return m, nil
@@ -160,6 +163,14 @@ func (m updateModel) onGeoRelease(msg geoReleaseMsg) (tea.Model, tea.Cmd) {
 		m.err = fmt.Errorf("в последнем релизе нет geoip.dat/geosite.dat")
 		return m, nil
 	}
+	// Task #4: the same release is already on disk — re-entering the screen and
+	// hitting → again must not re-download it.
+	if updater.GeoInstalled(msg.release.Tag) {
+		m.stage = updDone
+		m.status = "Гео-базы уже актуальны"
+		return m, nil
+	}
+	m.geoTag = msg.release.Tag
 	m.stage = updWorking
 	m.status = "Скачивание гео-баз…"
 	return m, m.installGeo(ip, site)
@@ -239,6 +250,13 @@ func (m updateModel) keyReleases(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter", "right":
 		r := m.releases[m.cursor]
+		// Task #4: this version is already running — downloading it again would
+		// swap the binary for a copy of itself.
+		if updater.SameVersion(r.Tag, m.installed) {
+			m.stage = updDone
+			m.status = "Это ядро уже установлено"
+			return m, nil
+		}
 		a, _ := updater.CoreAsset(r)
 		m.pendingTag = r.Tag
 		m.stage = updWorking
@@ -378,9 +396,13 @@ func (m updateModel) View() string {
 		b.WriteString(legend(m.width, "  подождите…"))
 
 	case updDone:
-		if m.err != nil {
+		switch {
+		case m.err != nil:
 			b.WriteString("  " + errStyle.Render("✖ "+m.err.Error()) + "\n")
-		} else {
+		case m.status != "":
+			// Nothing was downloaded — say why instead of claiming an install.
+			b.WriteString("  " + okStyle.Render("✔ "+m.status) + "\n")
+		default:
 			b.WriteString("  " + okStyle.Render("✔ Готово") + "\n")
 		}
 		b.WriteString(legend(m.width, "  любая клавиша назад в меню · q выход"))

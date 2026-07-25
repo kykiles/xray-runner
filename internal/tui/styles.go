@@ -199,7 +199,7 @@ func window(total, cursor, height int) (start, end, above, below int) {
 
 // rowBudget is how many list rows fit on screen once the fixed chrome is
 // reserved (task #3): title(2) + header(1) + legend + two scroll indicators +
-// the status block. The status block is reserved even while empty, so starting
+// the one-line notice. The notice line is reserved even while empty, so starting
 // a ping does not shrink the list out from under the cursor (task #4). extra
 // counts screen-specific lines, like the filter row. Both list screens share
 // this so the two never drift apart. height<=0 (size unknown) shows everything.
@@ -207,7 +207,7 @@ func rowBudget(height, width int, keys string, total, extra int) int {
 	if height <= 0 {
 		return total
 	}
-	return max(1, height-(2+1+legendHeight(width, keys)+2+2+extra))
+	return max(1, height-(2+1+legendHeight(width, keys)+2+1+extra))
 }
 
 // legendHeight is how many terminal lines legend(width, keys) occupies, counted
