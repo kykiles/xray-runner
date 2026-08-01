@@ -128,6 +128,11 @@ func (a *App) startHealth(ctx context.Context, ports sessionPorts) func() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		a.splitRescanLoop(hctx)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 		switch {
 		case a.healthLoop != nil:
 			a.healthLoop(hctx, ports)
@@ -461,7 +466,7 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 // it leaves a working proxy rather than no connection. What went wrong lands on
 // the status screen instead.
 //
-// The list is re-scanned on every health tick (refreshSplit), so an app started
+// The list is re-scanned every second (splitRescanLoop), so an app started
 // after connecting joins the tunnel on its own.
 func (a *App) bringUpSplit() {
 	if len(a.splitApps) == 0 {
@@ -496,6 +501,27 @@ func (a *App) setSplitMatched(on bool, matched []string) {
 	a.statusMu.Lock()
 	defer a.statusMu.Unlock()
 	a.splitOn, a.splitMatched = on, matched
+}
+
+// splitRescanLoop catches processes that start mid-session. It runs on its own
+// short tick rather than the health one: a CLI like claude fires its first API
+// request within a second of exec, and a request that leaves before the process
+// joins the cgroup goes out untunnelled — which is the whole failure, since the
+// server answers it with a hard error instead of a retry.
+//
+// ponytail: полный /proc-скан раз в секунду; окно остаётся ~1с. Если и его
+// мало — netlink proc connector (PROC_EVENT_EXEC) даёт событие на exec.
+func (a *App) splitRescanLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.refreshSplit()
+		}
+	}
 }
 
 // refreshSplit moves processes that started after the session did into the
