@@ -188,8 +188,8 @@ func installSplitRules(tcpPort, dnsPort int) error {
 	// The socket expression is the cgroup v2 match; meta cgroup is the v1
 	// net_cls classid and does not see this hierarchy.
 	match := []string{"socket", "cgroupv2", "level", strconv.Itoa(splitLevel()), `"` + filepath.Base(splitCgroup) + `"`}
-	rule := func(tail ...string) []string {
-		return append(append([]string{"add", "rule", "ip", splitTable, "output"}, match...), tail...)
+	rule := func(chain string, tail ...string) []string {
+		return append(append([]string{"add", "rule", "ip", splitTable, chain}, match...), tail...)
 	}
 
 	cmds := [][]string{
@@ -198,9 +198,20 @@ func installSplitRules(tcpPort, dnsPort int) error {
 		// DNS goes first, before the bypass: the host's resolver usually *is* a
 		// bypassed address (127.0.0.53 for systemd-resolved, the router on a LAN
 		// address), so a later rule would never see the query.
-		rule("udp", "dport", "53", "redirect", "to", ":"+strconv.Itoa(dnsPort)),
-		rule("ip", "daddr", splitDirectNets, "return"),
-		rule("meta", "l4proto", "tcp", "redirect", "to", ":"+strconv.Itoa(tcpPort)),
+		rule("output", "udp", "dport", "53", "redirect", "to", ":"+strconv.Itoa(dnsPort)),
+		rule("output", "ip", "daddr", splitDirectNets, "return"),
+		rule("output", "meta", "l4proto", "tcp", "redirect", "to", ":"+strconv.Itoa(tcpPort)),
+
+		// QUIC leaves over UDP, and only TCP is redirected above — a browser or
+		// Telegram speaking HTTP/3 would walk straight past the tunnel. Blocking
+		// it makes them fall back to TCP 443, which is redirected.
+		//
+		// A filter chain, not the nat one: nat only sees the first packet of a
+		// flow, so a drop there is a side effect of conntrack rather than a rule
+		// that plainly holds. Reject over drop for the same reason of clarity —
+		// the fallback is immediate instead of waiting out a timeout.
+		{"add", "chain", "ip", splitTable, "block", "{ type filter hook output priority 0; policy accept; }"},
+		rule("block", "udp", "dport", "443", "reject", "with", "icmp", "type", "port-unreachable"),
 	}
 	for _, args := range cmds {
 		if out, err := nftCmd.run("nft", args...); err != nil {

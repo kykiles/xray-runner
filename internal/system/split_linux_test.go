@@ -142,10 +142,17 @@ func TestEnableSplitRuleOrder(t *testing.T) {
 			rules = append(rules, line)
 		}
 	}
-	if len(rules) != 3 {
-		t.Fatalf("got %d rules, want 3: %v", len(rules), rules)
+	if len(rules) != 4 {
+		t.Fatalf("got %d rules, want 4: %v", len(rules), rules)
 	}
-	for i, want := range []string{"udp dport 53 redirect to :10853", "daddr", "l4proto tcp redirect to :10810"} {
+	// The QUIC block comes last and lives in the filter chain, so it does not
+	// disturb the nat ordering above.
+	for i, want := range []string{
+		"udp dport 53 redirect to :10853",
+		"daddr",
+		"l4proto tcp redirect to :10810",
+		"udp dport 443 reject",
+	} {
 		if !strings.Contains(rules[i], want) {
 			t.Errorf("rule[%d] = %q, want it to contain %q", i, rules[i], want)
 		}
