@@ -31,6 +31,25 @@ tasks:
     generates:
       - "xray_linux/{{.BINARY}}"
 
+  build:linux:onefile:
+    desc: Build a single self-contained xray-runner (core + geo inside)
+    cmds:
+      - rm -rf internal/bundle/assets && mkdir -p internal/bundle/assets
+      - gzip -c xray_linux/xray > internal/bundle/assets/xray.gz
+      - gzip -c geoip.dat > internal/bundle/assets/geoip.dat.gz
+      - gzip -c geosite.dat > internal/bundle/assets/geosite.dat.gz
+      - go build -tags bundle -ldflags "-X main.Version={{.GIT_COMMIT}}" -o '{{.BINARY}}' {{.CMD}}
+      - rm -rf internal/bundle/assets
+    env:
+      GOOS: linux
+      GOARCH: '{{.TARGET_ARCH}}'
+    sources:
+      - xray_linux/xray
+      - geoip.dat
+      - geosite.dat
+    generates:
+      - "{{.BINARY}}"
+
   build:windows:
     desc: Build a single self-contained xray-runner.exe (core + geo + wintun inside)
     cmds:
