@@ -317,7 +317,7 @@ func (a *App) announceRestart() {
 func (a *App) verifySystemProxy(httpPort int) {
 	s := system.ReadProxyState()
 	if !s.Enabled {
-		slog.Warn("system proxy not confirmed")
+		slog.Warn("system proxy not confirmed", "mode", s.Mode, "server", s.Server, "expected", fmt.Sprintf("127.0.0.1:%d", httpPort))
 		a.publishStatus(tui.StatusUpdate{Note: "⚠ Системный прокси не подтверждён системой", Err: true})
 		return
 	}

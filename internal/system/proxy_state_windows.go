@@ -4,6 +4,7 @@ package system
 
 import (
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 )
@@ -14,6 +15,7 @@ func ReadProxyState() ProxyState {
 	var s ProxyState
 	out, err := exec.Command("reg", "query", regKey, "/v", "ProxyEnable").Output()
 	if err != nil {
+		slog.Warn("не удалось прочитать ProxyEnable из реестра", "key", regKey, "error", err)
 		return s
 	}
 	s.Enabled = strings.Contains(string(out), "0x1")

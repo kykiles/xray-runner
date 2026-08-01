@@ -4,6 +4,7 @@ package system
 
 import (
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 )
@@ -27,6 +28,7 @@ func ReadProxyState() ProxyState {
 	if state, ok := readKDE(); ok {
 		return state
 	}
+	slog.Warn("состояние прокси не прочитано: ни gsettings, ни kreadconfig5 не ответили")
 	return ProxyState{}
 }
 
