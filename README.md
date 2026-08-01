@@ -17,11 +17,12 @@ VPN (TUN). При выходе программа сама всё за собо�
 |---|---|
 | `xray-runner` (или `xray-runner.exe`) | сама программа |
 | `xray` (или `xray.exe`) | ядро Xray-core — движок соединения |
-| `template.json` | шаблон настроек (менять не нужно) |
+| `template.json` | шаблон настроек — необязателен, копия зашита внутрь программы |
 | `geoip.dat`, `geosite.dat` | базы для маршрутизации по странам/сайтам |
 | `.env` | файл настроек (можно не трогать) |
 
-На Windows для режима VPN дополнительно нужен `wintun.dll`.
+На Windows для режима VPN дополнительно нужен `wintun.dll` — в сборке одним exe
+он уже внутри программы.
 
 ---
 
@@ -183,13 +184,17 @@ dns, routing-правила и outbound-ы вашей панели — видн�
 # под текущую ОС
 task build
 
-# под Linux (в папку xray_linux/) и Windows (в папку xray_windows/)
+# под Linux (в папку xray_linux/)
 task build:linux
+
+# под Windows — один самодостаточный xray-runner.exe:
+# ядро, geoip/geosite и wintun.dll лежат внутри него
 task build:windows
 ```
 
-Задачи `build:linux` / `build:windows` кладут рядом с бинарником свежую копию этого
-README.
+Задача `build:linux` кладёт рядом с бинарником свежую копию этого README.
+`build:windows` собирает файлы из корня репозитория (`xray.exe`, `geoip.dat`,
+`geosite.dat`, `wintun.dll`) внутрь exe — они должны быть на месте.
 
 ### Настройки `.env`
 

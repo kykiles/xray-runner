@@ -38,8 +38,13 @@ func BuildRedirectInbounds() []Inbound {
 			Listen:   "127.0.0.1",
 			Protocol: "dokodemo-door",
 			Settings: tcp,
+			// routeOnly, like every other inbound: the sniffed domain is for the
+			// routing rules only. Without it xray replaces the destination the
+			// kernel handed us with the domain, and the exit node resolves it
+			// again — the app ends up on a different host than the one it dialled.
 			Sniffing: &SniffingConfig{
 				Enabled:      true,
+				RouteOnly:    true,
 				DestOverride: []string{"http", "tls"},
 			},
 		},

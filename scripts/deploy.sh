@@ -49,7 +49,7 @@ fi
 [ ! -f "$DEPLOY_DIR/geoip.dat" ] && [ -f geoip.dat ] && cp geoip.dat "$DEPLOY_DIR/"
 [ ! -f "$DEPLOY_DIR/geosite.dat" ] && [ -f geosite.dat ] && cp geosite.dat "$DEPLOY_DIR/"
 [ "$GOOS" = "windows" ] && [ ! -f "$DEPLOY_DIR/wintun.dll" ] && [ -f wintun.dll ] && cp wintun.dll "$DEPLOY_DIR/"
-cp template.json "$DEPLOY_DIR/"
+# template.json is embedded in the binary; a copy next to the app is optional.
 
 # Ship the config from the tracked template, never the working .env — the local
 # .env / subscriptions.txt hold real tokens and must not leak into a bundle.
