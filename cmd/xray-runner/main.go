@@ -33,6 +33,11 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Before anything is read: an earlier sudo run may have left the files
+	// unreadable for this user, and config.Load is the first thing to trip on it.
+	reclaimFiles()
+	defer reclaimFiles()
+
 	cfg, err := config.Load(*flagConfig)
 	if err != nil {
 		log.Fatalf("❌ %v", err)
