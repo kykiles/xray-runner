@@ -26,9 +26,39 @@ const splitTable = "xray_split"
 var (
 	procRoot              = "/proc"
 	cgroupRoot            = "/sys/fs/cgroup"
-	splitCgroup           = "/sys/fs/cgroup/xray-split"
+	splitCgroup           = splitCgroupPath()
 	nftCmd      commander = execCommander{}
 )
+
+// splitCgroupPath picks where the cgroup lives. Root owns the hierarchy root and
+// creates the directory there; an unprivileged run — the binary carrying
+// CAP_NET_ADMIN via setcap, which grants nft but no file ownership — can only
+// write inside the cgroup systemd delegated to the user session.
+func splitCgroupPath() string {
+	if os.Getuid() == 0 {
+		return filepath.Join(cgroupRoot, "xray-split")
+	}
+	uid := strconv.Itoa(os.Getuid())
+	delegated := filepath.Join(cgroupRoot, "user.slice", "user-"+uid+".slice", "user@"+uid+".service")
+	if fileExists(delegated) {
+		return filepath.Join(delegated, "xray-split")
+	}
+	// No systemd user manager: the root path is the only candidate left, and
+	// failing at MkdirAll with a clear error beats guessing at another layout.
+	return filepath.Join(cgroupRoot, "xray-split")
+}
+
+// splitLevel is the cgroup's depth below the hierarchy root, which is what nft's
+// "socket cgroupv2 level N" compares against: the name alone is not enough, the
+// expression has to know which path component to look at. Delegated cgroups sit
+// four levels down, the root one at level 1.
+func splitLevel() int {
+	rel, err := filepath.Rel(cgroupRoot, splitCgroup)
+	if err != nil {
+		return 1
+	}
+	return len(strings.Split(filepath.Clean(rel), string(filepath.Separator)))
+}
 
 // Destinations that must never be redirected. Loopback and LAN traffic belongs
 // to the host — a dev server on 127.0.0.1 or a printer on 192.168.x.x has no
@@ -157,7 +187,7 @@ func installSplitRules(tcpPort, dnsPort int) error {
 
 	// The socket expression is the cgroup v2 match; meta cgroup is the v1
 	// net_cls classid and does not see this hierarchy.
-	match := []string{"socket", "cgroupv2", "level", "1", `"` + filepath.Base(splitCgroup) + `"`}
+	match := []string{"socket", "cgroupv2", "level", strconv.Itoa(splitLevel()), `"` + filepath.Base(splitCgroup) + `"`}
 	rule := func(tail ...string) []string {
 		return append(append([]string{"add", "rule", "ip", splitTable, "output"}, match...), tail...)
 	}

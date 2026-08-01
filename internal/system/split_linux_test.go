@@ -157,6 +157,28 @@ func TestEnableSplitRuleOrder(t *testing.T) {
 	}
 }
 
+// An unprivileged run puts the cgroup under the delegated user@<uid>.service,
+// four levels down. The nft match has to follow it: "level 1" there names
+// user.slice and would capture the whole session instead of the listed apps.
+func TestEnableSplitMatchesDelegatedCgroupLevel(t *testing.T) {
+	stub := withFakes(t, map[string]string{"42": "code"})
+	splitCgroup = filepath.Join(cgroupRoot, "user.slice", "user-1000.slice", "user@1000.service", "xray-split")
+
+	if _, err := EnableSplit([]string{"code"}, 10810, 10853); err != nil {
+		t.Fatalf("EnableSplit: %v", err)
+	}
+
+	for _, c := range stub.calls {
+		line := strings.Join(c, " ")
+		if !strings.Contains(line, "add rule") {
+			continue
+		}
+		if !strings.Contains(line, `socket cgroupv2 level 4 "xray-split"`) {
+			t.Errorf("rule = %q, want level 4 for the delegated cgroup", line)
+		}
+	}
+}
+
 // A failed ruleset must not leave the cgroup behind: processes inside it with no
 // rules would be reported as tunnelled while routing nowhere.
 func TestEnableSplitRollsBackOnRuleFailure(t *testing.T) {
