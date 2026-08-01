@@ -16,4 +16,6 @@ func EnableSplit(names []string, tcpPort, dnsPort int) ([]string, error) {
 	return nil, ErrSplitUnsupported
 }
 
+func RefreshSplit(names []string) ([]string, error) { return nil, nil }
+
 func DisableSplit() error { return nil }

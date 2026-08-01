@@ -150,6 +150,11 @@ func (a *App) healthCheckLoopPorts(ctx context.Context, socksPort, httpPort int)
 		}
 		first = false
 
+		// Same tick as the health probe: the split tunnel's list is a standing
+		// preference, and an app launched mid-session should join without a
+		// reconnect.
+		a.refreshSplit()
+
 		socksOK := dialPort(ctx, socksPort, 2*time.Second)
 		httpOK := dialPort(ctx, httpPort, 2*time.Second)
 		// No latency: this probe dials our own local ports, so its timing says

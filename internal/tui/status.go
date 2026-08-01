@@ -28,27 +28,29 @@ type StatusInfo struct {
 	// Apps is the split-tunnel line: which of the listed processes were actually
 	// captured. Empty when apps.txt is empty; the "nothing running" case arrives
 	// as a note instead, because it needs saying only once.
-	Apps string
+	Apps []string
 }
 
 // StatusUpdate is one health-check result pushed by the app.
 type StatusUpdate struct {
 	OK      bool
 	Latency time.Duration
-	Note    string // transient message, e.g. why a mode switch was refused
-	Err     bool   // render Note as an error
+	Note    string   // transient message, e.g. why a mode switch was refused
+	Err     bool     // render Note as an error
+	Apps    []string // split-tunnel rescan result; nil in a plain health update
 }
 
 type statusModel struct {
 	info    StatusInfo
 	updates <-chan StatusUpdate
 
-	started time.Time
-	last    *StatusUpdate
-	note    string
-	noteErr bool
-	action  StatusAction
-	width   int // terminal width; 0 until the first WindowSizeMsg
+	started  time.Time
+	last     *StatusUpdate
+	note     string
+	noteErr  bool
+	appsOpen bool // the split-tunnel list is expanded to one process per line
+	action   StatusAction
+	width    int // terminal width; 0 until the first WindowSizeMsg
 }
 
 type statusTickMsg time.Time
@@ -102,9 +104,12 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.action = StatusQuit
 		return m, tea.Quit
 	case StatusUpdate:
-		if msg.Note != "" {
+		switch {
+		case msg.Apps != nil:
+			m.info.Apps = msg.Apps
+		case msg.Note != "":
 			m.note, m.noteErr = msg.Note, msg.Err
-		} else {
+		default:
 			u := msg
 			m.last = &u
 		}
@@ -129,6 +134,9 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r", "к":
 			m.action = StatusRestart
 			return m, tea.Quit
+		case "p", "з":
+			m.appsOpen = !m.appsOpen
+			return m, nil
 		}
 	}
 	return m, nil
@@ -150,8 +158,8 @@ func (m statusModel) View() string {
 	}
 	row("Протокол", m.info.Protocol)
 	row("Режим", m.info.Mode)
-	if m.info.Apps != "" {
-		row("Процессы", m.info.Apps)
+	if len(m.info.Apps) > 0 {
+		row("Процессы", m.appsLine())
 	}
 	// The status row carries its own health colors, so it is written raw.
 	b.WriteString("  " + dimStyle.Render(pad("Статус", 10)) + m.health() + "\n")
@@ -165,8 +173,31 @@ func (m statusModel) View() string {
 	}
 
 	keys := fmt.Sprintf("  ← назад к серверам · m режим %s · r перезапуск · q выход", m.info.NextMode)
+	if len(m.info.Apps) > appsPreview {
+		keys = fmt.Sprintf("  ← назад · m режим %s · p процессы · r перезапуск · q выход", m.info.NextMode)
+	}
 	b.WriteString(legend(m.width, keys))
 	return b.String()
+}
+
+// appsPreview is how many process names the collapsed line shows before it
+// gives up and counts the rest: enough to recognise the list at a glance,
+// few enough that a screenful of apps cannot push the status row off screen.
+const appsPreview = 3
+
+// appsLine renders the split-tunnel processes. Collapsed by default — a long
+// list is a wall of names nobody reads — and expanded to one name per line by
+// the p key, which is when it is actually being checked.
+func (m statusModel) appsLine() string {
+	if m.appsOpen {
+		// The extra rows line up under the first name, past the label column.
+		return strings.Join(m.info.Apps, "\n  "+strings.Repeat(" ", 10))
+	}
+	if len(m.info.Apps) <= appsPreview {
+		return strings.Join(m.info.Apps, ", ")
+	}
+	rest := len(m.info.Apps) - appsPreview
+	return fmt.Sprintf("%s … +%d (p)", strings.Join(m.info.Apps[:appsPreview], ", "), rest)
 }
 
 func (m statusModel) health() string {

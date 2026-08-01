@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -460,8 +461,8 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 // it leaves a working proxy rather than no connection. What went wrong lands on
 // the status screen instead.
 //
-// ponytail: the process list is matched once, at connect. An app started later
-// is not picked up until reconnect — add a rescan ticker if that grates.
+// The list is re-scanned on every health tick (refreshSplit), so an app started
+// after connecting joins the tunnel on its own.
 func (a *App) bringUpSplit() {
 	if len(a.splitApps) == 0 {
 		return
@@ -473,8 +474,7 @@ func (a *App) bringUpSplit() {
 		a.pendingNote = "Маршрутизация по процессам не включена: " + err.Error()
 		return
 	}
-	a.splitOn = true
-	a.splitMatched = matched
+	a.setSplitMatched(true, matched)
 
 	if len(matched) == 0 {
 		slog.Info("split tunnel: no listed process is running", "listed", len(a.splitApps))
@@ -482,6 +482,44 @@ func (a *App) bringUpSplit() {
 		return
 	}
 	slog.Info("split tunnel enabled", "processes", matched)
+}
+
+// splitState / setSplitMatched guard the split fields: the health loop rescans
+// from its own goroutine while teardown clears them from the session's.
+func (a *App) splitState() bool {
+	a.statusMu.Lock()
+	defer a.statusMu.Unlock()
+	return a.splitOn
+}
+
+func (a *App) setSplitMatched(on bool, matched []string) {
+	a.statusMu.Lock()
+	defer a.statusMu.Unlock()
+	a.splitOn, a.splitMatched = on, matched
+}
+
+// refreshSplit moves processes that started after the session did into the
+// cgroup. The nft rules match the cgroup rather than a PID, so joining it is all
+// a late app needs — no reconnect, no rule rebuild.
+func (a *App) refreshSplit() {
+	if !a.splitState() {
+		return
+	}
+	matched, err := system.RefreshSplit(a.splitApps)
+	if err != nil {
+		slog.Debug("split tunnel rescan failed", "error", err)
+		return
+	}
+
+	a.statusMu.Lock()
+	changed := !slices.Equal(matched, a.splitMatched)
+	a.splitMatched = matched
+	a.statusMu.Unlock()
+	if !changed {
+		return
+	}
+	slog.Info("split tunnel rescanned", "processes", matched)
+	a.publishStatus(tui.StatusUpdate{Apps: matched})
 }
 
 func (a *App) bringUpTun(ctx context.Context, t *target) error {
@@ -585,12 +623,11 @@ func (a *App) releaseSession() {
 		}
 		a.proxyTouched = false
 	}
-	if a.splitOn {
+	if a.splitState() {
 		if err := a.disableSplit(); err != nil {
 			slog.Warn("failed to disable split tunnel", "error", err)
 		}
-		a.splitOn = false
-		a.splitMatched = nil
+		a.setSplitMatched(false, nil)
 	}
 	if a.runner != nil {
 		_ = a.runner.Stop()
@@ -644,7 +681,7 @@ func (a *App) statusInfo(t *target, ports sessionPorts) tui.StatusInfo {
 			info.Mode += " · системный прокси выключен"
 		}
 		info.NextMode = "TUN"
-		info.Apps = strings.Join(a.splitMatched, ", ")
+		info.Apps = a.splitMatched
 	}
 	return info
 }

@@ -105,6 +105,67 @@ func TestListProcessesSkipsKernelThreads(t *testing.T) {
 	}
 }
 
+// A self-updating tool installs each release under its own name (claude lives at
+// .../versions/2.1.220), so the exe basename is a version string that goes stale
+// on the next update. comm holds the real name and must win — but only when it is
+// not just the 15-character truncation of a longer exe name.
+func TestProcNameFallsBackToComm(t *testing.T) {
+	withFakes(t, map[string]string{"10": "2.1.220", "11": "telegram-desktop"})
+	for pid, comm := range map[string]string{"10": "claude", "11": "telegram-deskto"} {
+		if err := os.WriteFile(filepath.Join(procRoot, pid, "comm"), []byte(comm+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := ListProcesses()
+	if err != nil {
+		t.Fatalf("ListProcesses: %v", err)
+	}
+	want := []Process{{Name: "claude", PIDs: 1}, {Name: "telegram-desktop", PIDs: 1}}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// RefreshSplit is what makes an app started after connecting join the tunnel: it
+// moves the newcomer in and leaves the earlier PID's original cgroup recorded,
+// so teardown still puts it back where it came from.
+func TestRefreshSplitPicksUpLateProcesses(t *testing.T) {
+	withFakes(t, map[string]string{"10": "code"})
+	if _, err := EnableSplit([]string{"code"}, 10810, 10853); err != nil {
+		t.Fatalf("EnableSplit: %v", err)
+	}
+	home := splitHome["10"]
+
+	// The second process shows up only now, mid-session. The first one already
+	// reports the split cgroup as its own — that is what the rescan must not
+	// record as its home.
+	procRoot = fakeProc(t, map[string]string{"10": "code", "11": "code"})
+	if err := os.WriteFile(filepath.Join(procRoot, "10", "cgroup"), []byte("0::"+splitRel()+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	matched, err := RefreshSplit([]string{"code"})
+	if err != nil {
+		t.Fatalf("RefreshSplit: %v", err)
+	}
+	if len(matched) != 1 || matched[0] != "code" {
+		t.Errorf("matched = %v, want [code]", matched)
+	}
+	procs, err := os.ReadFile(filepath.Join(splitCgroup, "cgroup.procs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(procs), "11") {
+		t.Errorf("cgroup.procs = %q, want the late pid 11 in it", procs)
+	}
+	if splitHome["10"] != home {
+		t.Errorf("splitHome[10] = %q, want the pre-move cgroup %q", splitHome["10"], home)
+	}
+}
+
 // A name in the list that is not running is skipped, not an error: the file is
 // a standing preference, and the task explicitly asks for silence here.
 func TestEnableSplitSkipsMissingProcesses(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Split tunnelling: the selected processes are moved into a cgroup v2, and an
@@ -60,14 +61,29 @@ func splitLevel() int {
 	return len(strings.Split(filepath.Clean(rel), string(filepath.Separator)))
 }
 
+// splitRel is the cgroup as /proc/<pid>/cgroup spells it: rooted at the
+// hierarchy, e.g. "/xray-split".
+func splitRel() string {
+	rel, err := filepath.Rel(cgroupRoot, splitCgroup)
+	if err != nil {
+		return ""
+	}
+	return "/" + filepath.Clean(rel)
+}
+
 // Destinations that must never be redirected. Loopback and LAN traffic belongs
 // to the host — a dev server on 127.0.0.1 or a printer on 192.168.x.x has no
 // business crossing the tunnel, and sending it there breaks it outright.
 var splitDirectNets = "{ 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 }"
 
 // splitHome remembers each moved PID's original cgroup so teardown can put it
-// back, mirroring how route_linux.go remembers what it added.
-var splitHome = map[string]string{}
+// back, mirroring how route_linux.go remembers what it added. The mutex is for
+// the rescan: it runs on the health-check goroutine while teardown may be
+// emptying the map from the session's.
+var (
+	splitMu   sync.Mutex
+	splitHome = map[string]string{}
+)
 
 // currentCgroup reads a PID's cgroup v2 path, e.g. "/user.slice/…/app.scope"
 // from the "0::" line of /proc/<pid>/cgroup. Empty means v1-only or unreadable.
@@ -134,18 +150,32 @@ func ListProcesses() ([]Process, error) {
 }
 
 // procName is the process name for a pid, or "" for a kernel thread. The exe
-// link is what tells them apart, and its basename is also the better name of
+// link is what tells them apart, and its basename is usually the better name of
 // the two: /proc/<pid>/comm is truncated at 15 characters.
+//
+// Usually, not always. Self-updating tools install each release under its own
+// name — claude's binary is …/versions/2.1.220 — so the exe basename is a
+// version string that changes under the user's feet and silently stops matching
+// apps.txt. comm is "claude" there and stays that way, so it wins whenever it
+// is not simply a truncation of the exe basename ("telegram-deskto" is, and
+// loses to the full "telegram-desktop").
 func procName(pid string) string {
 	exe, err := os.Readlink(filepath.Join(procRoot, pid, "exe"))
 	if err != nil {
 		return ""
 	}
-	if name := filepath.Base(exe); name != "" && name != "." && name != "/" {
-		// A replaced binary leaves " (deleted)" on the link.
-		return strings.TrimSuffix(name, " (deleted)")
+	name := filepath.Base(exe)
+	if name == "" || name == "." || name == "/" {
+		return ""
 	}
-	return ""
+	// A replaced binary leaves " (deleted)" on the link.
+	name = strings.TrimSuffix(name, " (deleted)")
+
+	comm, err := os.ReadFile(filepath.Join(procRoot, pid, "comm"))
+	if c := strings.TrimSpace(string(comm)); err == nil && c != "" && !strings.HasPrefix(name, c) {
+		return c
+	}
+	return name
 }
 
 // EnableSplit installs the redirect for the named processes and returns the
@@ -221,8 +251,24 @@ func installSplitRules(tcpPort, dnsPort int) error {
 	return nil
 }
 
+// RefreshSplit re-scans for processes from the list that are not in the cgroup
+// yet and moves them in, returning everything the mode now covers. The nft rules
+// match the cgroup, not a PID, so a late-starting app needs nothing else — this
+// is what makes "start the app after connecting" work without a reconnect.
+//
+// It is a no-op when the split tunnel is not up: no cgroup, nothing to join.
+func RefreshSplit(names []string) ([]string, error) {
+	if len(names) == 0 || !fileExists(splitCgroup) {
+		return nil, nil
+	}
+	return moveIntoSplit(names)
+}
+
 // moveIntoSplit puts every PID whose name is in the list into the split cgroup.
 func moveIntoSplit(names []string) ([]string, error) {
+	splitMu.Lock()
+	defer splitMu.Unlock()
+
 	want := map[string]bool{}
 	for _, n := range names {
 		want[strings.ToLower(n)] = true
@@ -253,7 +299,9 @@ func moveIntoSplit(names []string) ([]string, error) {
 			slog.Debug("split: pid not moved", "pid", e.Name(), "name", name, "error", err)
 			continue
 		}
-		if home != "" {
+		// A rescan re-reads processes it moved itself, whose "home" now *is* the
+		// split cgroup: recording that would send them nowhere on teardown.
+		if home != "" && home != splitRel() {
 			splitHome[e.Name()] = home
 		}
 		found[name] = true
@@ -270,6 +318,9 @@ func moveIntoSplit(names []string) ([]string, error) {
 // DisableSplit removes the ruleset and empties the cgroup. It is safe to call
 // when nothing was ever enabled, which is what every teardown path does.
 func DisableSplit() error {
+	splitMu.Lock()
+	defer splitMu.Unlock()
+
 	// A missing table is the expected case on a clean run, not an error.
 	_, _ = nftCmd.run("nft", "delete", "table", "ip", splitTable)
 
