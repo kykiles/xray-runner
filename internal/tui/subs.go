@@ -16,6 +16,7 @@ type SubsAction int
 const (
 	SubsSelected SubsAction = iota
 	SubsUpdate              // open the core/geo update screen
+	SubsApps                // open the split-tunnel process picker
 	SubsQuit
 )
 
@@ -182,6 +183,9 @@ func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "u", "г":
 		m.action = SubsUpdate
 		return m, tea.Quit
+	case "p", "з":
+		m.action = SubsApps
+		return m, tea.Quit
 	}
 	return m, nil
 }
@@ -301,9 +305,9 @@ func (m subsModel) View() string {
 		b.WriteString("  " + m.status + "\n")
 	}
 
-	keys := "  ↑/↓ выбор · → открыть · s показать URL · + добавить · d удалить · u обновить · q выход"
+	keys := "  ↑/↓ выбор · → открыть · s показать URL · + добавить · d удалить · p процессы · u обновить · q выход"
 	if m.reveal {
-		keys = "  ↑/↓ выбор · → открыть · s скрыть URL · + добавить · d удалить · u обновить · q выход"
+		keys = "  ↑/↓ выбор · → открыть · s скрыть URL · + добавить · d удалить · p процессы · u обновить · q выход"
 	}
 	b.WriteString(legend(m.width, keys))
 	return b.String()

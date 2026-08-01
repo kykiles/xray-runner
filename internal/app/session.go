@@ -25,6 +25,15 @@ import (
 // runSession connects and blocks on the status screen until the user acts or
 // the core dies. It always leaves the system as it found it before returning.
 func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, error) {
+	// Re-read per session, not once at startup: editing apps.txt (or picking
+	// processes on the screen) then reconnecting is how the list is changed.
+	// A broken file is not worth refusing a connection over.
+	apps, err := system.LoadApps(system.AppsFile)
+	if err != nil {
+		slog.Warn("apps list not read", "file", system.AppsFile, "error", err)
+	}
+	a.splitApps = apps
+
 	cfgJSON, ports, err := a.buildSessionConfig(t)
 	if err != nil {
 		return tui.StatusQuit, err
@@ -316,6 +325,11 @@ func (a *App) buildModeConfig(t *target) (json.RawMessage, sessionPorts, error) 
 	inbounds := a.template.Inbounds
 	if a.mode == "tun" {
 		inbounds = []xraycfg.Inbound{xraycfg.BuildTUNInbound()}
+	} else if len(a.splitApps) > 0 {
+		// The listeners the split-tunnel nft rules redirect into. They are added,
+		// not substituted: the SOCKS/HTTP pair still serves the system proxy, and
+		// PROXY_SYSTEM decides whether anything is pointed at it.
+		inbounds = append(append([]xraycfg.Inbound{}, inbounds...), xraycfg.BuildRedirectInbounds()...)
 	}
 
 	if t.isProfile() {
@@ -417,6 +431,15 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 		return fmt.Errorf("HTTP порт не открылся за 5с")
 	}
 
+	a.bringUpSplit()
+
+	// PROXY_SYSTEM=false is the "only the listed apps" case: the system proxy
+	// stays untouched, so the browser and everything else keep going direct.
+	if !a.cfg.ProxySystem {
+		slog.Info("system proxy left alone", "reason", "PROXY_SYSTEM=false")
+		return nil
+	}
+
 	a.originalProxy = system.ReadProxyState()
 	if err := a.proxy.Enable(ports.http); err != nil {
 		slog.Warn("failed to enable system proxy", "error", err)
@@ -430,6 +453,35 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 		a.verifySystemProxy(ports.http)
 	}()
 	return nil
+}
+
+// bringUpSplit routes the processes from apps.txt through the proxy. It never
+// fails the session: split tunnelling is an addition to proxy mode, and losing
+// it leaves a working proxy rather than no connection. What went wrong lands on
+// the status screen instead.
+//
+// ponytail: the process list is matched once, at connect. An app started later
+// is not picked up until reconnect — add a rescan ticker if that grates.
+func (a *App) bringUpSplit() {
+	if len(a.splitApps) == 0 {
+		return
+	}
+
+	matched, err := system.EnableSplit(a.splitApps, xraycfg.RedirectPort, xraycfg.RedirectDNS)
+	if err != nil {
+		slog.Warn("split tunnel not enabled", "error", err)
+		a.pendingNote = "Маршрутизация по процессам не включена: " + err.Error()
+		return
+	}
+	a.splitOn = true
+	a.splitMatched = matched
+
+	if len(matched) == 0 {
+		slog.Info("split tunnel: no listed process is running", "listed", len(a.splitApps))
+		a.pendingNote = "Сейчас нет запущенных процессов из " + system.AppsFile
+		return
+	}
+	slog.Info("split tunnel enabled", "processes", matched)
 }
 
 func (a *App) bringUpTun(ctx context.Context, t *target) error {
@@ -533,6 +585,13 @@ func (a *App) releaseSession() {
 		}
 		a.proxyTouched = false
 	}
+	if a.splitOn {
+		if err := a.disableSplit(); err != nil {
+			slog.Warn("failed to disable split tunnel", "error", err)
+		}
+		a.splitOn = false
+		a.splitMatched = nil
+	}
 	if a.runner != nil {
 		_ = a.runner.Stop()
 		a.runner = nil
@@ -579,7 +638,13 @@ func (a *App) statusInfo(t *target, ports sessionPorts) tui.StatusInfo {
 		info.NextMode = "PROXY"
 	} else {
 		info.Mode = "PROXY (127.0.0.1:" + strconv.Itoa(ports.http) + ")"
+		// proxyTouched, not cfg.ProxySystem: it reports what actually happened,
+		// so a system proxy that failed to apply reads the same as one turned off.
+		if !a.proxyTouched {
+			info.Mode += " · системный прокси выключен"
+		}
 		info.NextMode = "TUN"
+		info.Apps = strings.Join(a.splitMatched, ", ")
 	}
 	return info
 }

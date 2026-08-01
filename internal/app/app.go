@@ -65,12 +65,18 @@ type App struct {
 	proxyTouched  bool
 	tunRouted     bool // tun routes installed; teardown must remove them
 	killSwitchOn  bool // kill switch enabled; teardown must take it down
-	interfaces    func() ([]net.Interface, error)
+	// Split tunnelling (proxy mode): the names read from apps.txt, the ones that
+	// were actually running, and whether teardown has anything to undo.
+	splitApps    []string
+	splitMatched []string
+	splitOn      bool
+	interfaces   func() ([]net.Interface, error)
 	// disableKillSwitch / restoreProxy are the teardown side of the two system
 	// changes a session makes; fields so tests can observe them without touching
 	// the machine's firewall or proxy settings.
 	disableKillSwitch func() error
 	restoreProxy      func(system.ProxyState) error
+	disableSplit      func() error
 	// checkPrivileges reports whether tun mode may be used; a field so tests can
 	// exercise both outcomes without being root.
 	checkPrivileges func() error
@@ -109,6 +115,7 @@ func New(cfg *config.Config, opts Options) *App {
 		noTTY:             !term.IsTerminal(int(os.Stdin.Fd())),
 		disableKillSwitch: system.DisableKillSwitch,
 		restoreProxy:      proxy.Restore,
+		disableSplit:      system.DisableSplit,
 		showStatus:        tui.ShowStatus,
 		connectScreen:     tui.ShowConnecting,
 	}

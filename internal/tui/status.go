@@ -25,6 +25,10 @@ type StatusInfo struct {
 	Protocol string // "vless / tcp / reality" or "balancer/leastLoad · 33 сервера"
 	Mode     string // "PROXY (127.0.0.1:10809)"
 	NextMode string // mode offered by the m key, e.g. "TUN"
+	// Apps is the split-tunnel line: which of the listed processes were actually
+	// captured. Empty when apps.txt is empty; the "nothing running" case arrives
+	// as a note instead, because it needs saying only once.
+	Apps string
 }
 
 // StatusUpdate is one health-check result pushed by the app.
@@ -146,6 +150,9 @@ func (m statusModel) View() string {
 	}
 	row("Протокол", m.info.Protocol)
 	row("Режим", m.info.Mode)
+	if m.info.Apps != "" {
+		row("Процессы", m.info.Apps)
+	}
 	// The status row carries its own health colors, so it is written raw.
 	b.WriteString("  " + dimStyle.Render(pad("Статус", 10)) + m.health() + "\n")
 

@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"slices"
 	"time"
 
 	"xray-runner/internal/config"
 	"xray-runner/internal/subscription"
+	"xray-runner/internal/system"
 	"xray-runner/internal/tui"
 	"xray-runner/internal/ui"
 )
@@ -209,6 +211,13 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				// ErrUserQuit propagates up to main for a single clean exit (R-4).
 				return nil, ErrUserQuit
 			}
+			if action == tui.SubsApps {
+				if err := a.pickApps(); err != nil {
+					tui.ReleaseScreen() // readable on the normal buffer, see menuLoop
+					ui.Error(err.Error())
+				}
+				continue
+			}
 			if action == tui.SubsUpdate {
 				// Update core/geo, then return to the subscription list.
 				if err := tui.RunUpdate(ctx, a.binary, coreVersion(a.binary)); err != nil {
@@ -234,6 +243,35 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 			return t, nil
 		}
 	}
+}
+
+// pickApps runs the split-tunnel process picker and saves the result. The list
+// is read fresh every time: the point of the screen is to tick what is running
+// right now, and a cached one would offer processes that have since exited.
+func (a *App) pickApps() error {
+	procs, err := system.ListProcesses()
+	if err != nil {
+		return fmt.Errorf("список процессов: %w", err)
+	}
+	saved, err := system.LoadApps(system.AppsFile)
+	if err != nil {
+		return fmt.Errorf("%s: %w", system.AppsFile, err)
+	}
+
+	chosen, save, err := tui.SelectApps(procs, saved)
+	if err != nil {
+		return fmt.Errorf("TUI: %w", err)
+	}
+	if !save || slices.Equal(chosen, saved) {
+		return nil
+	}
+	if err := system.SaveApps(system.AppsFile, chosen); err != nil {
+		return fmt.Errorf("сохранить %s: %w", system.AppsFile, err)
+	}
+	// The running session, if any, keeps its own rules: they were installed at
+	// connect and are torn down with it. The new list applies on the next one.
+	a.splitApps = chosen
+	return nil
 }
 
 // selectFromList runs the unified list screen: a flat server list, or the

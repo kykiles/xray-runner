@@ -24,6 +24,10 @@ type Config struct {
 	HWID            string
 	HWIDDeviceModel string
 	AllowInsecure   bool
+	// ProxySystem sets the system-wide proxy in proxy mode — the setting the
+	// browser follows. Turning it off leaves proxy mode routing nothing but the
+	// processes listed in apps.txt, which is the "VPN for Telegram only" case.
+	ProxySystem bool
 	// HealthCheckURLs are tried in order until one answers. Overridable because
 	// an unreachable default (google is blocked in places this tool is used for)
 	// reads as "connection lost" and restarts a perfectly healthy core.
@@ -93,6 +97,7 @@ func Load(filenames ...string) (*Config, error) {
 		HWID:            os.Getenv("HWID"),
 		HWIDDeviceModel: envOr("HWID_DEVICE_MODEL", "xray-runner"),
 		AllowInsecure:   boolOr("ALLOW_INSECURE", false),
+		ProxySystem:     boolOr("PROXY_SYSTEM", true),
 		HealthCheckURLs: healthCheckURLs(),
 		// Three at a time keeps the measurement honest: each one runs its own xray
 		// instance, and a machine juggling more of them measures the CPU, not the

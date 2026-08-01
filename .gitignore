@@ -57,6 +57,9 @@ subscriptions.txt
 # Per-machine device identifier (generated on first run)
 hwid.txt
 
+# Per-machine split-tunnel process list
+apps.txt
+
 # dumped bare links (contain UUIDs/passwords)
 keys/
 
