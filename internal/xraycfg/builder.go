@@ -1,14 +1,26 @@
 package xraycfg
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 )
 
+// defaultTemplate is the template shipped inside the binary, so a release can be
+// a single executable. A template.json next to the app still wins over it.
+//
+//go:embed template.json
+var defaultTemplate []byte
+
+// LoadTemplate reads the template at path, falling back to the embedded one when
+// the file is absent.
 func LoadTemplate(path string) (*XrayConfig, error) {
 	data, err := os.ReadFile(filepath.Clean(path))
+	if os.IsNotExist(err) {
+		data, err = defaultTemplate, nil
+	}
 	if err != nil {
 		return nil, err
 	}
