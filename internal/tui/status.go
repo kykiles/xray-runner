@@ -25,9 +25,12 @@ type StatusInfo struct {
 	Protocol string // "vless / tcp / reality" or "balancer/leastLoad · 33 сервера"
 	Mode     string // "PROXY (127.0.0.1:10809)"
 	NextMode string // mode offered by the m key, e.g. "TUN"
+	// Split says apps.txt has entries, so the process row is drawn even while
+	// Apps is empty — the empty case is a live state (nothing listed is running
+	// *yet*), not a one-off note that would outlive the truth.
+	Split bool
 	// Apps is the split-tunnel line: which of the listed processes were actually
-	// captured. Empty when apps.txt is empty; the "nothing running" case arrives
-	// as a note instead, because it needs saying only once.
+	// captured.
 	Apps []string
 }
 
@@ -158,7 +161,7 @@ func (m statusModel) View() string {
 	}
 	row("Протокол", m.info.Protocol)
 	row("Режим", m.info.Mode)
-	if len(m.info.Apps) > 0 {
+	if m.info.Split {
 		row("Процессы", m.appsLine())
 	}
 	// The status row carries its own health colors, so it is written raw.
@@ -189,6 +192,9 @@ const appsPreview = 3
 // list is a wall of names nobody reads — and expanded to one name per line by
 // the p key, which is when it is actually being checked.
 func (m statusModel) appsLine() string {
+	if len(m.info.Apps) == 0 {
+		return dimStyle.Render("нет запущенных из apps.txt")
+	}
 	if m.appsOpen {
 		// The extra rows line up under the first name, past the label column.
 		return strings.Join(m.info.Apps, "\n  "+strings.Repeat(" ", 10))

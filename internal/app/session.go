@@ -483,8 +483,9 @@ func (a *App) bringUpSplit() {
 	a.setSplitMatched(true, matched)
 
 	if len(matched) == 0 {
+		// Not a note: the rescan loop picks up apps started later, and a sticky
+		// note would still claim "nothing running" after they joined.
 		slog.Info("split tunnel: no listed process is running", "listed", len(a.splitApps))
-		a.pendingNote = "Сейчас нет запущенных процессов из " + system.AppsFile
 		return
 	}
 	slog.Info("split tunnel enabled", "processes", matched)
@@ -536,6 +537,11 @@ func (a *App) refreshSplit() {
 	if err != nil {
 		slog.Debug("split tunnel rescan failed", "error", err)
 		return
+	}
+	// Non-nil even when empty: the screen reads a nil Apps as "no rescan in this
+	// update", so a list that emptied out would keep showing the old names.
+	if matched == nil {
+		matched = []string{}
 	}
 
 	a.statusMu.Lock()
@@ -708,6 +714,7 @@ func (a *App) statusInfo(t *target, ports sessionPorts) tui.StatusInfo {
 			info.Mode += " · системный прокси выключен"
 		}
 		info.NextMode = "TUN"
+		info.Split = len(a.splitApps) > 0
 		info.Apps = a.splitMatched
 	}
 	return info

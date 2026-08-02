@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -47,5 +48,27 @@ func TestStatus_CyrillicHotkeys(t *testing.T) {
 				t.Errorf("key %q → action %v, want %v", c.key, act, c.want)
 			}
 		})
+	}
+}
+
+// The empty split list used to arrive as a sticky note, so a process started
+// mid-session joined the tunnel while the screen still said nothing was running.
+// Now the row is live: it follows the rescan updates in both directions.
+func TestStatus_ProcessRowFollowsRescan(t *testing.T) {
+	m := statusModel{info: StatusInfo{Split: true}, updates: make(chan StatusUpdate, 1)}
+
+	if !strings.Contains(m.View(), "нет запущенных") {
+		t.Fatal("empty split list should say nothing is running")
+	}
+
+	got, _ := m.Update(StatusUpdate{Apps: []string{"claude"}})
+	m = got.(statusModel)
+	if view := m.View(); strings.Contains(view, "нет запущенных") || !strings.Contains(view, "claude") {
+		t.Fatalf("after rescan the row should list claude, got:\n%s", view)
+	}
+
+	got, _ = m.Update(StatusUpdate{Apps: []string{}})
+	if view := got.(statusModel).View(); !strings.Contains(view, "нет запущенных") {
+		t.Fatalf("an emptied list should go back to the empty text, got:\n%s", view)
 	}
 }
