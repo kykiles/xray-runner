@@ -72,3 +72,27 @@ func TestStatus_ProcessRowFollowsRescan(t *testing.T) {
 		t.Fatalf("an emptied list should go back to the empty text, got:\n%s", view)
 	}
 }
+
+// The mode row is named by what is actually happening: SPLIT only while a
+// listed process is captured, PROXY before and after.
+func TestStatus_ModeRowFollowsSplit(t *testing.T) {
+	m := statusModel{
+		info:    StatusInfo{Split: true, Mode: "PROXY (127.0.0.1:10809)", SplitMode: "SPLIT (127.0.0.1:10809)"},
+		updates: make(chan StatusUpdate, 1),
+	}
+
+	if strings.Contains(m.View(), "SPLIT") {
+		t.Fatal("no captured process yet — the row must still say PROXY")
+	}
+
+	got, _ := m.Update(StatusUpdate{Apps: []string{"claude"}})
+	m = got.(statusModel)
+	if view := m.View(); !strings.Contains(view, "SPLIT") {
+		t.Fatalf("a captured process should rename the mode to SPLIT, got:\n%s", view)
+	}
+
+	got, _ = m.Update(StatusUpdate{Apps: []string{}})
+	if view := got.(statusModel).View(); strings.Contains(view, "SPLIT") {
+		t.Fatalf("an emptied list should go back to PROXY, got:\n%s", view)
+	}
+}

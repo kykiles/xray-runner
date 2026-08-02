@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -477,7 +478,11 @@ func (a *App) bringUpSplit() {
 	}
 	if err != nil {
 		slog.Warn("split tunnel not enabled", "error", err)
-		a.pendingNote = "Маршрутизация по процессам не включена: " + err.Error()
+		if splitNeedsRoot(err) {
+			a.pendingNote = "⚠ режим SPLIT требует прав root — запустите через sudo. Сейчас работает режим PROXY"
+		} else {
+			a.pendingNote = "⚠ Маршрутизация по процессам не включена: " + err.Error()
+		}
 		return
 	}
 	a.setSplitMatched(true, matched)
@@ -489,6 +494,19 @@ func (a *App) bringUpSplit() {
 		return
 	}
 	slog.Info("split tunnel enabled", "processes", matched)
+}
+
+// splitNeedsRoot recognises the "no privileges" failure — nft refusing the
+// ruleset, or the cgroup directory refusing to be created — so the user gets the
+// same advice TUN gives instead of a raw nftables dump. Classified by the error
+// alone: a non-root run can still have split working via CAP_NET_ADMIN, and its
+// other failures (nft missing) must keep their own message.
+func splitNeedsRoot(err error) bool {
+	if errors.Is(err, os.ErrPermission) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not permitted") || strings.Contains(msg, "permission denied")
 }
 
 // splitState / setSplitMatched guard the split fields: the health loop rescans
@@ -707,14 +725,22 @@ func (a *App) statusInfo(t *target, ports sessionPorts) tui.StatusInfo {
 		info.Mode = "TUN (весь трафик через VPN)"
 		info.NextMode = "PROXY"
 	} else {
-		info.Mode = "PROXY (127.0.0.1:" + strconv.Itoa(ports.http) + ")"
+		addr := "127.0.0.1:" + strconv.Itoa(ports.http)
+		info.Mode = "PROXY (" + addr + ")"
 		// proxyTouched, not cfg.ProxySystem: it reports what actually happened,
 		// so a system proxy that failed to apply reads the same as one turned off.
 		if !a.proxyTouched {
 			info.Mode += " · системный прокси выключен"
 		}
+		// The name the screen shows while listed processes are actually captured.
+		info.SplitMode = "SPLIT (" + addr + ")"
+		if a.proxyTouched {
+			info.SplitMode += " · выбранные процессы + системный прокси"
+		}
 		info.NextMode = "TUN"
-		info.Split = len(a.splitApps) > 0
+		// splitState, not the apps list: a split that refused to start (no root)
+		// must not draw a process row claiming nothing is running.
+		info.Split = a.splitState()
 		info.Apps = a.splitMatched
 	}
 	return info

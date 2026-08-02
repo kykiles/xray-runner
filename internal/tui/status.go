@@ -24,7 +24,10 @@ type StatusInfo struct {
 	Endpoint string // host:port, empty for a balancer profile
 	Protocol string // "vless / tcp / reality" or "balancer/leastLoad · 33 сервера"
 	Mode     string // "PROXY (127.0.0.1:10809)"
-	NextMode string // mode offered by the m key, e.g. "TUN"
+	// SplitMode replaces Mode while at least one listed process is captured —
+	// that is the only moment traffic is actually routed per process.
+	SplitMode string
+	NextMode  string // mode offered by the m key, e.g. "TUN"
 	// Split says apps.txt has entries, so the process row is drawn even while
 	// Apps is empty — the empty case is a live state (nothing listed is running
 	// *yet*), not a one-off note that would outlive the truth.
@@ -160,7 +163,7 @@ func (m statusModel) View() string {
 		row("Адрес", m.info.Endpoint)
 	}
 	row("Протокол", m.info.Protocol)
-	row("Режим", m.info.Mode)
+	row("Режим", m.modeLine())
 	if m.info.Split {
 		row("Процессы", m.appsLine())
 	}
@@ -181,6 +184,17 @@ func (m statusModel) View() string {
 	}
 	b.WriteString(legend(m.width, keys))
 	return b.String()
+}
+
+// modeLine names the mode by what is happening right now: SPLIT only while a
+// listed process is captured, PROXY the rest of the time. Recomputed on every
+// render rather than fixed at connect, so a process that joins mid-session
+// renames the row along with the process list below it.
+func (m statusModel) modeLine() string {
+	if m.info.Split && len(m.info.Apps) > 0 && m.info.SplitMode != "" {
+		return m.info.SplitMode
+	}
+	return m.info.Mode
 }
 
 // appsPreview is how many process names the collapsed line shows before it

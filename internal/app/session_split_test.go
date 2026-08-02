@@ -2,7 +2,11 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"xray-runner/internal/subscription"
@@ -115,5 +119,42 @@ func TestReleaseSession_DisablesSplitOnlyWhenEnabled(t *testing.T) {
 	}
 	if a.splitOn {
 		t.Error("splitOn still set after teardown; a second teardown would undo it twice")
+	}
+}
+
+// A split that could not start for lack of privileges gets the same advice TUN
+// gives; every other failure keeps its own message.
+func TestSplitNeedsRoot(t *testing.T) {
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{errors.New("nft add table ip xray_split: exit status 1: Error: Could not process rule: Operation not permitted"), true},
+		{fmt.Errorf("создать cgroup /sys/fs/cgroup/xray-split: %w", os.ErrPermission), true},
+		{errors.New("nftables не найден: exec: \"nft\": executable file not found in $PATH"), false},
+	}
+	for _, c := range cases {
+		if got := splitNeedsRoot(c.err); got != c.want {
+			t.Errorf("splitNeedsRoot(%v) = %v, want %v", c.err, got, c.want)
+		}
+	}
+}
+
+// Without a working split the process row is not drawn at all: an empty row
+// would read as "nothing is running" when nothing was ever routed.
+func TestStatusInfo_SplitRowOnlyWhenEnabled(t *testing.T) {
+	a := newTemplateApp(t)
+	a.mode = "proxy"
+	a.splitApps = []string{"claude"}
+	ports := sessionPorts{socks: 10808, http: 10809}
+
+	if info := a.statusInfo(splitTarget(), ports); info.Split {
+		t.Error("split never started — no process row expected")
+	}
+
+	a.setSplitMatched(true, []string{"claude"})
+	info := a.statusInfo(splitTarget(), ports)
+	if !info.Split || !strings.HasPrefix(info.SplitMode, "SPLIT") {
+		t.Errorf("enabled split → %+v, want the row and a SPLIT label", info)
 	}
 }
