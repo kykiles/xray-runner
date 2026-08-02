@@ -204,8 +204,8 @@ func TestEnableSplitRuleOrder(t *testing.T) {
 			rules = append(rules, line)
 		}
 	}
-	if len(rules) != 7 {
-		t.Fatalf("got %d rules, want 7: %v", len(rules), rules)
+	if len(rules) != 8 {
+		t.Fatalf("got %d rules, want 8: %v", len(rules), rules)
 	}
 	// The blocks come last and live in filter chains, so they do not disturb the
 	// nat ordering above. Everything the redirect does not cover — other UDP,
@@ -216,6 +216,9 @@ func TestEnableSplitRuleOrder(t *testing.T) {
 		"l4proto tcp redirect to :10810",
 		"ip daddr",
 		"l4proto udp reject",
+		// Уцелевшие прямые TCP-потоки (открытые до включения режима) рвутся,
+		// иначе они так и ходят мимо туннеля с реальным адресом.
+		"l4proto tcp reject with tcp reset",
 		"ip6 daddr",
 		"reject with icmpv6",
 	} {

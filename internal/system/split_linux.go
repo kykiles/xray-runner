@@ -266,6 +266,18 @@ func installSplitRules(tcpPort, dnsPort int) error {
 		rule("ip", "block", "ip", "daddr", splitDirectNets, "return"),
 		rule("ip", "block", "meta", "l4proto", "udp", "reject", "with", "icmp", "type", "port-unreachable"),
 
+		// Соединения, открытые до включения режима, nat уже не увидит: hook
+		// output срабатывает на первом пакете потока, а эти потоки начались
+		// раньше. Приложение с длинными keep-alive (Claude Code держит HTTP/2 к
+		// api.anthropic.com часами) продолжает ходить с реальным адресом, пока
+		// не переоткроет сокет — то есть режим включён, а трафик утекает.
+		//
+		// Здесь остаются только НЕ отредиреченные TCP-потоки: у всего, что nat
+		// развернул, daddr уже 127.0.0.1, и его забрал bypass выше. Сброс с RST
+		// заставляет приложение переподключиться сразу, и новый поток уже
+		// проходит через redirect.
+		rule("ip", "block", "meta", "l4proto", "tcp", "reject", "with", "tcp", "reset"),
+
 		// IPv6 is not redirected at all: the nat chain above is the ip family and
 		// the dokodemo listener is v4-only. Left alone, an app on a network with
 		// IPv6 simply prefers the AAAA record and every byte leaves untunnelled —
