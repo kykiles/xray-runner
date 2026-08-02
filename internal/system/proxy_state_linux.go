@@ -5,15 +5,53 @@ package system
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"os/user"
+	"strconv"
 	"strings"
+	"syscall"
 )
 
 // desktopCmd runs one desktop-configuration command and returns its stdout.
 // Overridable in tests: gsettings and kwriteconfig5 write to the live session,
 // so the restore logic can't be exercised against the real binaries.
 var desktopCmd = func(bin string, args ...string) ([]byte, error) {
-	return exec.Command(bin, args...).Output()
+	cmd := exec.Command(bin, args...)
+	asDesktopUser(cmd)
+	return cmd.Output()
+}
+
+// asDesktopUser sends the command into the desktop session of the user who ran
+// sudo. Split tunnelling wants root, and gsettings as root talks to root's own
+// dconf over a session bus that is not there: `gsettings set` still exits 0, so
+// the proxy setting is silently dropped and the browser keeps going direct
+// while the status screen says PROXY. Nothing to do when not under sudo.
+func asDesktopUser(cmd *exec.Cmd) {
+	if os.Geteuid() != 0 {
+		return
+	}
+	uid, err := strconv.Atoi(os.Getenv("SUDO_UID"))
+	if err != nil {
+		return
+	}
+	gid, err := strconv.Atoi(os.Getenv("SUDO_GID"))
+	if err != nil {
+		return
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)},
+	}
+	run := "/run/user/" + strconv.Itoa(uid)
+	env := append(os.Environ(),
+		"DBUS_SESSION_BUS_ADDRESS=unix:path="+run+"/bus",
+		"XDG_RUNTIME_DIR="+run,
+	)
+	// dconf keeps its database under $HOME, which sudo left pointing at root's.
+	if u, err := user.LookupId(strconv.Itoa(uid)); err == nil && u.HomeDir != "" {
+		env = append(env, "HOME="+u.HomeDir)
+	}
+	cmd.Env = env
 }
 
 // gsettingsModes are the values GNOME accepts for the proxy mode. A saved Mode

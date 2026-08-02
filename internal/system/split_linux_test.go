@@ -5,6 +5,7 @@ package system
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -203,16 +204,20 @@ func TestEnableSplitRuleOrder(t *testing.T) {
 			rules = append(rules, line)
 		}
 	}
-	if len(rules) != 4 {
-		t.Fatalf("got %d rules, want 4: %v", len(rules), rules)
+	if len(rules) != 7 {
+		t.Fatalf("got %d rules, want 7: %v", len(rules), rules)
 	}
-	// The QUIC block comes last and lives in the filter chain, so it does not
-	// disturb the nat ordering above.
+	// The blocks come last and live in filter chains, so they do not disturb the
+	// nat ordering above. Everything the redirect does not cover — other UDP,
+	// all of IPv6 — is rejected rather than left to go out directly.
 	for i, want := range []string{
 		"udp dport 53 redirect to :10853",
-		"daddr",
+		"ip daddr",
 		"l4proto tcp redirect to :10810",
-		"udp dport 443 reject",
+		"ip daddr",
+		"l4proto udp reject",
+		"ip6 daddr",
+		"reject with icmpv6",
 	} {
 		if !strings.Contains(rules[i], want) {
 			t.Errorf("rule[%d] = %q, want it to contain %q", i, rules[i], want)
@@ -221,6 +226,25 @@ func TestEnableSplitRuleOrder(t *testing.T) {
 	for i, r := range rules {
 		if !strings.Contains(r, `socket cgroupv2 level 1 "xray-split"`) {
 			t.Errorf("rule[%d] = %q, missing the cgroup match — it would capture the whole host", i, r)
+		}
+	}
+}
+
+// An empty list is also the sweep for a run that was killed before its
+// teardown: its table would otherwise keep redirecting the leftover cgroup into
+// a port nobody listens on.
+func TestEnableSplitWithNoNamesClearsStaleRules(t *testing.T) {
+	stub := withFakes(t, map[string]string{"42": "code"})
+
+	if _, err := EnableSplit(nil, 10810, 10853); err != nil {
+		t.Fatalf("EnableSplit: %v", err)
+	}
+	for _, family := range []string{"ip", "ip6"} {
+		want := "delete table " + family + " " + splitTable
+		if !slices.ContainsFunc(stub.calls, func(c []string) bool {
+			return strings.Contains(strings.Join(c, " "), want)
+		}) {
+			t.Errorf("%q never ran: %v", want, stub.calls)
 		}
 	}
 }

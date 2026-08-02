@@ -76,6 +76,9 @@ func splitRel() string {
 // business crossing the tunnel, and sending it there breaks it outright.
 var splitDirectNets = "{ 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 }"
 
+// The v6 counterpart: loopback, link-local, unique-local and multicast.
+var splitDirectNets6 = "{ ::1/128, fe80::/10, fc00::/7, ff00::/8 }"
+
 // splitHome remembers each moved PID's original cgroup so teardown can put it
 // back, mirroring how route_linux.go remembers what it added. The mutex is for
 // the rescan: it runs on the health-check goroutine while teardown may be
@@ -187,6 +190,11 @@ func procName(pid string) string {
 // late-starting processes in without rebuilding the ruleset.
 func EnableSplit(names []string, tcpPort, dnsPort int) ([]string, error) {
 	if len(names) == 0 {
+		// A run killed before its teardown (SIGKILL, power loss) leaves the table
+		// and a populated cgroup behind, and those processes keep redirecting
+		// into a port nobody listens on. This is the only sweep that runs on
+		// every start, so an emptied apps.txt has to do the cleaning.
+		_ = DisableSplit()
 		return nil, nil
 	}
 	if err := nftCmd.lookPath("nft"); err != nil {
@@ -196,14 +204,17 @@ func EnableSplit(names []string, tcpPort, dnsPort int) ([]string, error) {
 		return nil, fmt.Errorf("создать cgroup %s: %w", splitCgroup, err)
 	}
 
-	matched, err := moveIntoSplit(names)
-	if err != nil {
-		return nil, err
-	}
-
+	// Rules before processes: a PID that joins the cgroup while the ruleset is
+	// still missing sends everything it opens in that window out untunnelled.
 	if err := installSplitRules(tcpPort, dnsPort); err != nil {
 		// Leave nothing half-built: the cgroup without rules would silently
 		// route nothing while the UI claims the processes are tunnelled.
+		_ = DisableSplit()
+		return nil, err
+	}
+
+	matched, err := moveIntoSplit(names)
+	if err != nil {
 		_ = DisableSplit()
 		return nil, err
 	}
@@ -214,12 +225,13 @@ func EnableSplit(names []string, tcpPort, dnsPort int) ([]string, error) {
 // a leftover ruleset from a crashed run cannot stack duplicate rules.
 func installSplitRules(tcpPort, dnsPort int) error {
 	_, _ = nftCmd.run("nft", "delete", "table", "ip", splitTable)
+	_, _ = nftCmd.run("nft", "delete", "table", "ip6", splitTable)
 
 	// The socket expression is the cgroup v2 match; meta cgroup is the v1
 	// net_cls classid and does not see this hierarchy.
 	match := []string{"socket", "cgroupv2", "level", strconv.Itoa(splitLevel()), `"` + filepath.Base(splitCgroup) + `"`}
-	rule := func(chain string, tail ...string) []string {
-		return append(append([]string{"add", "rule", "ip", splitTable, chain}, match...), tail...)
+	rule := func(family, chain string, tail ...string) []string {
+		return append(append([]string{"add", "rule", family, splitTable, chain}, match...), tail...)
 	}
 
 	cmds := [][]string{
@@ -228,20 +240,42 @@ func installSplitRules(tcpPort, dnsPort int) error {
 		// DNS goes first, before the bypass: the host's resolver usually *is* a
 		// bypassed address (127.0.0.53 for systemd-resolved, the router on a LAN
 		// address), so a later rule would never see the query.
-		rule("output", "udp", "dport", "53", "redirect", "to", ":"+strconv.Itoa(dnsPort)),
-		rule("output", "ip", "daddr", splitDirectNets, "return"),
-		rule("output", "meta", "l4proto", "tcp", "redirect", "to", ":"+strconv.Itoa(tcpPort)),
+		rule("ip", "output", "udp", "dport", "53", "redirect", "to", ":"+strconv.Itoa(dnsPort)),
+		rule("ip", "output", "ip", "daddr", splitDirectNets, "return"),
+		rule("ip", "output", "meta", "l4proto", "tcp", "redirect", "to", ":"+strconv.Itoa(tcpPort)),
 
-		// QUIC leaves over UDP, and only TCP is redirected above — a browser or
-		// Telegram speaking HTTP/3 would walk straight past the tunnel. Blocking
-		// it makes them fall back to TCP 443, which is redirected.
+		// Only TCP is redirected above, so every other UDP flow — QUIC, a voice
+		// call, WebRTC — would walk straight past the tunnel and out of the real
+		// interface with the real address. That is a leak, not a missing feature,
+		// so it is rejected: QUIC falls back to TCP 443, and the rest fails
+		// loudly instead of quietly going direct.
 		//
 		// A filter chain, not the nat one: nat only sees the first packet of a
 		// flow, so a drop there is a side effect of conntrack rather than a rule
 		// that plainly holds. Reject over drop for the same reason of clarity —
 		// the fallback is immediate instead of waiting out a timeout.
+		//
+		// The bypass comes first here too: by this hook the redirected DNS is
+		// already addressed to 127.0.0.1, and LAN/multicast UDP (mDNS, DHCP,
+		// a printer) belongs to the host exactly as it does in the nat chain.
+		//
+		// ponytail: UDP наружу закрыт целиком; звонки в Telegram перестанут
+		// работать, пока процесс в списке. Полноценный UDP через туннель — это
+		// TPROXY-инбаунд вместо NAT REDIRECT.
 		{"add", "chain", "ip", splitTable, "block", "{ type filter hook output priority 0; policy accept; }"},
-		rule("block", "udp", "dport", "443", "reject", "with", "icmp", "type", "port-unreachable"),
+		rule("ip", "block", "ip", "daddr", splitDirectNets, "return"),
+		rule("ip", "block", "meta", "l4proto", "udp", "reject", "with", "icmp", "type", "port-unreachable"),
+
+		// IPv6 is not redirected at all: the nat chain above is the ip family and
+		// the dokodemo listener is v4-only. Left alone, an app on a network with
+		// IPv6 simply prefers the AAAA record and every byte leaves untunnelled —
+		// the worst leak of the mode, because nothing in the UI hints at it.
+		// Rejecting it turns Happy Eyeballs around in milliseconds onto the v4
+		// path, which is redirected.
+		{"add", "table", "ip6", splitTable},
+		{"add", "chain", "ip6", splitTable, "block", "{ type filter hook output priority 0; policy accept; }"},
+		rule("ip6", "block", "ip6", "daddr", splitDirectNets6, "return"),
+		rule("ip6", "block", "reject", "with", "icmpv6", "type", "admin-prohibited"),
 	}
 	for _, args := range cmds {
 		if out, err := nftCmd.run("nft", args...); err != nil {
@@ -323,6 +357,7 @@ func DisableSplit() error {
 
 	// A missing table is the expected case on a clean run, not an error.
 	_, _ = nftCmd.run("nft", "delete", "table", "ip", splitTable)
+	_, _ = nftCmd.run("nft", "delete", "table", "ip6", splitTable)
 
 	if _, err := os.Stat(splitCgroup); err != nil {
 		return nil

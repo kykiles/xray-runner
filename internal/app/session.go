@@ -469,11 +469,12 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 // The list is re-scanned every second (splitRescanLoop), so an app started
 // after connecting joins the tunnel on its own.
 func (a *App) bringUpSplit() {
+	// Called even with an empty list: that is how EnableSplit gets to sweep a
+	// ruleset an earlier killed run left behind.
+	matched, err := system.EnableSplit(a.splitApps, xraycfg.RedirectPort, xraycfg.RedirectDNS)
 	if len(a.splitApps) == 0 {
 		return
 	}
-
-	matched, err := system.EnableSplit(a.splitApps, xraycfg.RedirectPort, xraycfg.RedirectDNS)
 	if err != nil {
 		slog.Warn("split tunnel not enabled", "error", err)
 		a.pendingNote = "Маршрутизация по процессам не включена: " + err.Error()
