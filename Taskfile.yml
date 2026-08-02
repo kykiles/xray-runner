@@ -44,6 +44,9 @@ tasks:
       GOOS: linux
       GOARCH: '{{.TARGET_ARCH}}'
     sources:
+      - cmd/**/*.go
+      - internal/**/*.go
+      - go.mod
       - xray_linux/xray
       - geoip.dat
       - geosite.dat
@@ -64,6 +67,9 @@ tasks:
       GOOS: windows
       GOARCH: '{{.TARGET_ARCH}}'
     sources:
+      - cmd/**/*.go
+      - internal/**/*.go
+      - go.mod
       - xray.exe
       - geoip.dat
       - geosite.dat
