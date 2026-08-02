@@ -49,7 +49,9 @@ PROJECT.md
 .superpowers/
 
 # Working specs / audit notes — kept locally, not published
-docs/
+docs/*
+# ...except the agent-skills config, which the whole repo needs
+!docs/agents/
 
 # Subscription URLs
 subscriptions.txt
@@ -72,3 +74,6 @@ geo/
 # Assets staged into the single-file build
 internal/bundle/assets/
 .task/
+
+# Local issue tracker (specs and tickets for the agent skills)
+.scratch/
