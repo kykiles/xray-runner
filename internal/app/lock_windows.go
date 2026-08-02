@@ -2,19 +2,26 @@
 
 package app
 
-import "os"
+import "syscall"
 
 // processAlive reports whether a process with the given pid is currently
-// running. On Windows os.FindProcess opens a handle to the process and fails if
-// no such process exists, so a successful open means the owner is still alive.
+// running. Opening a handle is not enough: Windows keeps a pid valid while any
+// handle to the dead process is still open, so an exited owner would look alive
+// and its stale lock would never be reclaimed. The exit code is the answer —
+// STILL_ACTIVE means the owner really is running.
 func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	proc, err := os.FindProcess(pid)
+	h, err := syscall.OpenProcess(syscall.PROCESS_QUERY_INFORMATION, false, uint32(pid))
 	if err != nil {
 		return false
 	}
-	proc.Release()
-	return true
+	defer syscall.CloseHandle(h)
+
+	var code uint32
+	if err := syscall.GetExitCodeProcess(h, &code); err != nil {
+		return false
+	}
+	return code == 259 // STILL_ACTIVE
 }

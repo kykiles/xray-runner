@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"xray-runner/internal/app"
 	"xray-runner/internal/config"
@@ -66,7 +67,11 @@ func main() {
 
 	defer applog.Init(cfg)()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// Крестик окна консоли — это не Ctrl+C: Windows шлёт CTRL_CLOSE_EVENT
+	// (Go отдаёт его как SIGTERM), терминал на Linux — SIGHUP. Без подписки
+	// рантайм убивает процесс сразу, и cleanup не успевает снять прокси,
+	// killswitch и lock-файл.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
 	slog.Info("starting xray-runner", "version", Version)
