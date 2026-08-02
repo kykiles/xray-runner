@@ -130,6 +130,12 @@ func (m appsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			i := vis[m.cursor]
 			m.rows[i].on = !m.rows[i].on
 		}
+	case "c", "с":
+		// Every row, not just the visible ones: a filter narrows the screen, never
+		// the selection — the same rule chosen() follows.
+		for i := range m.rows {
+			m.rows[i].on = false
+		}
 	case "/":
 		m.filter.start()
 	case "enter", "right":
@@ -146,7 +152,7 @@ func (m appsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-const appsKeys = "  ↑/↓ выбор · space отметить · / фильтр · enter сохранить · esc отмена"
+const appsKeys = "  ↑/↓ выбор · space отметить · c снять все · / фильтр · enter сохранить · esc отмена"
 
 func (m appsModel) View() string {
 	var b strings.Builder
@@ -163,7 +169,9 @@ func (m appsModel) View() string {
 		extra = 2
 	}
 
-	b.WriteString(header("  "+pad("", 4)+pad("ПРОЦЕСС", 32)+"PID") + "\n")
+	// Not "PID": the column counts how many processes share the name, and the
+	// cell below it reads "не запущен" when that count is zero.
+	b.WriteString(header("  "+pad("", 4)+pad("ПРОЦЕСС", 32)+"ЗАПУЩЕНО") + "\n")
 
 	vis := m.visible()
 	budget := rowBudget(m.height, m.width, keys, len(vis), extra)

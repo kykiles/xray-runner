@@ -105,3 +105,20 @@ func TestAppsPicker_SpaceTogglesTheVisibleRow(t *testing.T) {
 		t.Errorf("chosen = %v, want [sshd] — space hit the wrong row", got)
 	}
 }
+
+// "c" is the way back to plain PROXY without unticking each app by hand. It
+// clears every row, including the ones a filter is currently hiding.
+func TestAppsPicker_ClearAllIgnoresFilter(t *testing.T) {
+	m := newAppsModel([]system.Process{{Name: "code", PIDs: 3}, {Name: "chrome", PIDs: 37}}, []string{"code", "chrome"})
+
+	// Filter down to one row, then clear.
+	m = pressApps(m, "/", "chrome")
+	if len(m.visible()) != 1 {
+		t.Fatalf("filter should leave one row, got %d", len(m.visible()))
+	}
+	m = pressApps(m, "enter", "c") // leave the filter input, query stays
+
+	if got := m.chosen(); len(got) != 0 {
+		t.Fatalf("chosen = %v, want nothing ticked after clear", got)
+	}
+}

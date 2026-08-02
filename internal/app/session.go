@@ -479,7 +479,9 @@ func (a *App) bringUpSplit() {
 	if err != nil {
 		slog.Warn("split tunnel not enabled", "error", err)
 		if splitNeedsRoot(err) {
-			a.pendingNote = "⚠ режим SPLIT требует прав root — запустите через sudo. Сейчас работает режим PROXY"
+			// Same wording TUN refuses with; the mode row already says PROXY, so
+			// the note does not repeat it.
+			a.pendingNote = "⚠ режим SPLIT требует прав root — запустите через sudo"
 		} else {
 			a.pendingNote = "⚠ Маршрутизация по процессам не включена: " + err.Error()
 		}
@@ -733,9 +735,13 @@ func (a *App) statusInfo(t *target, ports sessionPorts) tui.StatusInfo {
 			info.Mode += " · системный прокси выключен"
 		}
 		// The name the screen shows while listed processes are actually captured.
-		info.SplitMode = "SPLIT (" + addr + ")"
+		// The port is the redirect one, not the HTTP proxy: that is where nft
+		// actually sends the listed processes.
+		info.SplitMode = "SPLIT (127.0.0.1:" + strconv.Itoa(xraycfg.RedirectPort) + ")"
 		if a.proxyTouched {
 			info.SplitMode += " · выбранные процессы + системный прокси"
+		} else {
+			info.SplitMode += " · только выбранные процессы"
 		}
 		info.NextMode = "TUN"
 		// splitState, not the apps list: a split that refused to start (no root)
