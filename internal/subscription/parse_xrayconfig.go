@@ -36,6 +36,9 @@ type xrayOutbound struct {
 type xrayOutboundSettdo struct {
 	Vnext   []xrayVNext  `json:"vnext"`   // vless / vmess
 	Servers []xraySSNode `json:"servers"` // shadowsocks
+	// hysteria2 carries the server inline instead of a node list.
+	Address string `json:"address"`
+	Port    int    `json:"port"`
 }
 
 type xrayVNext struct {
@@ -81,6 +84,9 @@ type xrayStream struct {
 	GRPC *struct {
 		ServiceName string `json:"serviceName"`
 	} `json:"grpcSettings"`
+	Hysteria *struct {
+		Auth string `json:"auth"`
+	} `json:"hysteriaSettings"`
 }
 
 // isXrayConfigArray reports whether the array's first element looks like a full
@@ -216,6 +222,23 @@ func outboundToEntry(o *xrayOutbound) (SubEntry, bool) {
 			Password: s.Password,
 			Remarks:  s.Address,
 		}, true
+
+	case "hysteria", "hysteria2":
+		addr := sanitize(o.Settings.Address)
+		if addr == "" {
+			return SubEntry{}, false
+		}
+		e := SubEntry{
+			Protocol: "hysteria2",
+			Address:  addr,
+			Port:     o.Settings.Port,
+			Remarks:  addr,
+		}
+		if o.Stream.Hysteria != nil {
+			e.Password = o.Stream.Hysteria.Auth
+		}
+		applyStream(&e, &o.Stream)
+		return e, true
 
 	default:
 		return SubEntry{}, false

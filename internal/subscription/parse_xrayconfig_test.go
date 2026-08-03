@@ -145,3 +145,28 @@ func TestProxyOutboundJSON_RawIsLaunchedVerbatim(t *testing.T) {
 		t.Errorf("spiderX lost: %q", got.Stream.Reality.SpiderX)
 	}
 }
+
+// Panels ship hysteria2 as an xray outbound with the server inline in settings
+// and the password in streamSettings.hysteriaSettings.auth.
+func TestParseXrayConfigHysteria2(t *testing.T) {
+	cfg := `[{"remarks":"hy2","outbounds":[
+	  {"tag":"proxy","protocol":"hysteria","settings":{"address":"nl4.example.com","port":443,"version":2},
+	   "streamSettings":{"network":"hysteria","security":"tls","hysteriaSettings":{"version":2,"auth":"pw"},
+	     "tlsSettings":{"serverName":"nl4.example.com","fingerprint":"chrome","alpn":["h3"]}}},
+	  {"tag":"direct","protocol":"freedom"}]}]`
+
+	entries, err := parse([]byte(cfg))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Protocol != "hysteria2" || e.Address != "nl4.example.com" || e.Port != 443 || e.Password != "pw" {
+		t.Errorf("got %+v", e)
+	}
+	if len(e.RawOutbound) == 0 {
+		t.Error("RawOutbound empty — launcher would rebuild the outbound instead of reusing it")
+	}
+}
