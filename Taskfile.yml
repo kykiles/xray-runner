@@ -53,6 +53,17 @@ tasks:
     generates:
       - "{{.BINARY}}"
 
+  build:windows:dist:
+    desc: Build the windows binary into xray_windows/ (ассеты рядом, не внутри)
+    cmds:
+      - go build -ldflags "-X main.Version={{.GIT_COMMIT}}" -o 'xray_windows/{{.BINARY}}.exe' {{.CMD}}
+      - cp README.md xray_windows/README.md
+    env:
+      GOOS: windows
+      GOARCH: '{{.TARGET_ARCH}}'
+    generates:
+      - "xray_windows/{{.BINARY}}.exe"
+
   build:windows:
     desc: Build a single self-contained xray-runner.exe (core + geo + wintun inside)
     cmds:
