@@ -292,8 +292,12 @@ func (m subsModel) View() string {
 		b.WriteString("  " + cursor + line + "\n")
 	}
 
-	// Task #3: the notice sits right under the list — the blank line above it only
-	// pushed the legend further down.
+	// The notice gets the same air as on the server screen, where the scroll
+	// indicator happens to separate it from the list. Both lines are written
+	// whether or not there is a notice: an appearing message must not shove the
+	// legend down the screen (that was the point of task #3).
+	b.WriteString("\n")
+
 	if m.mode == subsLoading {
 		b.WriteString("  " + dimStyle.Render("⏳ Загрузка серверов…") + "\n")
 		return b.String()
@@ -301,7 +305,7 @@ func (m subsModel) View() string {
 
 	if m.mode == subsConfirmDelete {
 		b.WriteString("  " + warnStyle.Render(fmt.Sprintf("Удалить «%s»? (y/n)", m.subs[m.cursor].Name)) + "\n")
-	} else if m.status != "" {
+	} else {
 		b.WriteString("  " + m.status + "\n")
 	}
 

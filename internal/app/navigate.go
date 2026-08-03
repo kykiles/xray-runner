@@ -253,9 +253,10 @@ func (a *App) pickApps() error {
 	if err != nil {
 		return fmt.Errorf("список процессов: %w", err)
 	}
-	saved, err := system.LoadApps(system.AppsFile)
+	appsPath := config.Path(system.AppsFile)
+	saved, err := system.LoadApps(appsPath)
 	if err != nil {
-		return fmt.Errorf("%s: %w", system.AppsFile, err)
+		return fmt.Errorf("%s: %w", appsPath, err)
 	}
 
 	chosen, save, err := tui.SelectApps(procs, saved)
@@ -265,8 +266,8 @@ func (a *App) pickApps() error {
 	if !save || slices.Equal(chosen, saved) {
 		return nil
 	}
-	if err := system.SaveApps(system.AppsFile, chosen); err != nil {
-		return fmt.Errorf("сохранить %s: %w", system.AppsFile, err)
+	if err := system.SaveApps(appsPath, chosen); err != nil {
+		return fmt.Errorf("сохранить %s: %w", appsPath, err)
 	}
 	// The running session, if any, keeps its own rules: they were installed at
 	// connect and are torn down with it. The new list applies on the next one.

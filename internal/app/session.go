@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"xray-runner/internal/config"
 	"xray-runner/internal/subscription"
 	"xray-runner/internal/system"
 	"xray-runner/internal/tui"
@@ -30,9 +31,10 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	// Re-read per session, not once at startup: editing apps.txt (or picking
 	// processes on the screen) then reconnecting is how the list is changed.
 	// A broken file is not worth refusing a connection over.
-	apps, err := system.LoadApps(system.AppsFile)
+	appsPath := config.Path(system.AppsFile)
+	apps, err := system.LoadApps(appsPath)
 	if err != nil {
-		slog.Warn("apps list not read", "file", system.AppsFile, "error", err)
+		slog.Warn("apps list not read", "file", appsPath, "error", err)
 	}
 	a.splitApps = apps
 
@@ -345,6 +347,13 @@ func (a *App) buildModeConfig(t *target) (json.RawMessage, sessionPorts, error) 
 		if err != nil {
 			return nil, sessionPorts{}, err
 		}
+		// The health check must travel the tunnel it reports on: the panel's own
+		// rules send the check hosts out direct, which is how the screen showed
+		// "ок" while nothing was going through the proxy (ADR-0002).
+		raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs()))
+		if err != nil {
+			return nil, sessionPorts{}, err
+		}
 		ports, err := portsFromInbounds(inbounds, a.mode)
 		return raw, ports, err
 	}
@@ -388,6 +397,9 @@ func (a *App) singleServerFromProfile(t *target, inbounds []xraycfg.Inbound) (js
 	}
 
 	raw, err := xraycfg.MergeProfileSingle(t.profileRaw, tag, inbounds, a.cfg.XrayLogLvl)
+	if err == nil {
+		raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs()))
+	}
 	if err != nil {
 		// Degrade to template.json rather than refuse to connect: the session
 		// still works, just without the panel's rules.

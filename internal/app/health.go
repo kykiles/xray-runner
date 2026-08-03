@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"time"
 
+	"xray-runner/internal/config"
 	"xray-runner/internal/system"
 	"xray-runner/internal/tui"
 )
@@ -318,7 +319,7 @@ func (a *App) verifySystemProxy(httpPort int) {
 	s := system.ReadProxyState()
 	if !s.Enabled {
 		slog.Warn("system proxy not confirmed", "mode", s.Mode, "server", s.Server, "expected", fmt.Sprintf("127.0.0.1:%d", httpPort))
-		a.publishStatus(tui.StatusUpdate{Note: "⚠ Системный прокси не применился — браузер идёт напрямую (процессы из " + system.AppsFile + " туннель не теряют)", Err: true})
+		a.publishStatus(tui.StatusUpdate{Note: "⚠ Системный прокси не применился — браузер идёт напрямую (процессы из " + config.Path(system.AppsFile) + " туннель не теряют)", Err: true})
 		return
 	}
 	expected := fmt.Sprintf("127.0.0.1:%d", httpPort)

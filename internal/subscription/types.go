@@ -48,4 +48,10 @@ type SubEntry struct {
 	// so no transport detail is lost. Empty for URL/bare links, which have no
 	// outbound to preserve and go through BuildOutboundJSON.
 	RawOutbound json.RawMessage
+
+	// ProfileRaw is the panel config this server was extracted from. The ping
+	// needs it to measure the server exactly as the session will run it — same
+	// dns, same routing, same outbound chain — instead of guessing with
+	// template.json. Empty for URL/bare links, which have no panel config.
+	ProfileRaw json.RawMessage
 }

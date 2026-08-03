@@ -52,6 +52,8 @@ PROJECT.md
 docs/*
 # ...except the agent-skills config, which the whole repo needs
 !docs/agents/
+# ...and the ADRs: they record why the code is the way it is
+!docs/adr/
 
 # Subscription URLs
 subscriptions.txt

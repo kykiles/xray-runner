@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"xray-runner/internal/config"
 )
 
 type NamedSubscription struct {
@@ -14,10 +16,20 @@ type NamedSubscription struct {
 	Name string
 }
 
-var subscriptionsFile = "subscriptions.txt"
+// subscriptionsFile overrides where the list lives; empty means "resolve it",
+// which is what every run does. Tests set it to a temp file.
+var subscriptionsFile = ""
+
+// subsPath is the resolved location of the subscription list.
+func subsPath() string {
+	if subscriptionsFile != "" {
+		return subscriptionsFile
+	}
+	return config.Path("subscriptions.txt")
+}
 
 func LoadSubscriptions() ([]NamedSubscription, error) {
-	f, err := os.Open(subscriptionsFile)
+	f, err := os.Open(subsPath())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -59,7 +71,7 @@ func LoadSubscriptions() ([]NamedSubscription, error) {
 }
 
 func RemoveSubscription(index int) error {
-	data, err := os.ReadFile(subscriptionsFile)
+	data, err := os.ReadFile(subsPath())
 	if err != nil {
 		return fmt.Errorf("read subscriptions: %w", err)
 	}
@@ -101,7 +113,7 @@ func RemoveSubscription(index int) error {
 		sb.WriteString(e.url + "\n")
 	}
 
-	return writeFileAtomic(subscriptionsFile, []byte(sb.String()))
+	return writeFileAtomic(subsPath(), []byte(sb.String()))
 }
 
 // writeFileAtomic replaces a file through a temp file in the same directory, so
@@ -147,7 +159,7 @@ func NameSubscription(rawURL, name string) error {
 		return nil
 	}
 
-	data, err := os.ReadFile(subscriptionsFile)
+	data, err := os.ReadFile(subsPath())
 	if err != nil {
 		return fmt.Errorf("read subscriptions: %w", err)
 	}
@@ -171,11 +183,11 @@ func NameSubscription(rawURL, name string) error {
 	if !named {
 		return nil
 	}
-	return writeFileAtomic(subscriptionsFile, []byte(strings.Join(out, "\n")+"\n"))
+	return writeFileAtomic(subsPath(), []byte(strings.Join(out, "\n")+"\n"))
 }
 
 func SaveSubscription(rawURL string) error {
-	f, err := os.OpenFile(subscriptionsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(subsPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return fmt.Errorf("save subscription: %w", err)
 	}

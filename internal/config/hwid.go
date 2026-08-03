@@ -48,14 +48,15 @@ func readHWID(path string) string {
 	return strings.TrimSpace(string(data))
 }
 
-// hwidPath returns the preferred HWID location under the user config dir,
-// falling back to CWD when it is unavailable.
+// hwidPath returns the preferred HWID location in the data dir, falling back to
+// CWD when it is unavailable. Under sudo the data dir belongs to the invoking
+// user, so a TUN run and a proxy run report the same device to the panel.
 func hwidPath() string {
-	dir, err := os.UserConfigDir()
-	if err != nil {
+	dir := DataDir()
+	if dir == "" {
 		return hwidFile
 	}
-	return filepath.Join(dir, "xray-runner", "hwid")
+	return filepath.Join(dir, "hwid")
 }
 
 func writeHWID(path, hwid string) error {

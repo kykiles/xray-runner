@@ -52,7 +52,7 @@ func TestStatusScreenClosesWhenSessionEnds(t *testing.T) {
 // A refused switch keeps the session alive and re-opens the screen with the
 // refusal on it.
 func TestWatchSessionSurvivesRefusedModeSwitch(t *testing.T) {
-	t.Chdir(t.TempDir()) // rememberMode writes the state file
+	isolateState(t)
 
 	refusal := errors.New("режим TUN требует прав root")
 	var notes []string

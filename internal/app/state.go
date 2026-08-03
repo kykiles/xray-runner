@@ -6,9 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"xray-runner/internal/config"
 )
 
 const stateFile = "last_server.json"
+
+// statePath resolves the state file the same way as every other piece of user
+// state — see config.Path.
+func statePath() string { return config.Path(stateFile) }
 
 type LastState struct {
 	SubscriptionURL string `json:"subscription_url"`
@@ -21,7 +27,7 @@ type LastState struct {
 }
 
 func loadLastState() (*LastState, error) {
-	data, err := os.ReadFile(stateFile)
+	data, err := os.ReadFile(statePath())
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +45,7 @@ func saveLastState(s LastState) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(stateFile, data, 0600)
+	return os.WriteFile(statePath(), data, 0600)
 }
 
 // updateState edits the saved state in place. The server selection and the mode

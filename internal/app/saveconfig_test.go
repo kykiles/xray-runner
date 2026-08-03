@@ -11,7 +11,7 @@ import (
 // Saving lands under configs/<subscription>/<name>.json, recreates the directory
 // if it is gone, and overwrites an earlier copy of the same server.
 func TestSaveConfig(t *testing.T) {
-	t.Chdir(t.TempDir())
+	isolateState(t)
 
 	a := &App{}
 	a.nav.subs = []subscription.NamedSubscription{{URL: "https://panel.example.com/sub/uuid", Name: "panel.example.com"}}

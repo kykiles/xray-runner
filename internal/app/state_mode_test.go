@@ -10,7 +10,7 @@ import (
 
 func newModeApp(t *testing.T, envMode string, priv func() error) *App {
 	t.Helper()
-	t.Chdir(t.TempDir())
+	isolateState(t)
 	a := New(&config.Config{Mode: envMode}, Options{})
 	if priv != nil {
 		a.checkPrivileges = priv

@@ -96,3 +96,25 @@ func TestStatus_ModeRowFollowsSplit(t *testing.T) {
 		t.Fatalf("an emptied list should go back to PROXY, got:\n%s", view)
 	}
 }
+
+// The counter measures the live connection: nothing is shown while the screen
+// says "подключение", and the clock starts on the first successful check.
+func TestUptimeStartsOnFirstOK(t *testing.T) {
+	m := statusModel{}
+
+	if got := m.health(); strings.Contains(got, "uptime") {
+		t.Errorf("health() = %q, want no uptime before the first check", got)
+	}
+
+	failed, _ := m.Update(StatusUpdate{OK: false})
+	m = failed.(statusModel)
+	if got := m.health(); strings.Contains(got, "uptime") {
+		t.Errorf("health() = %q, want no uptime while the connection is down", got)
+	}
+
+	ok, _ := m.Update(StatusUpdate{OK: true})
+	m = ok.(statusModel)
+	if got := m.health(); !strings.Contains(got, "uptime") {
+		t.Errorf("health() = %q, want an uptime once connected", got)
+	}
+}

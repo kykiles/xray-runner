@@ -77,11 +77,16 @@ func TestBuildSessionConfig_SingleServerKeepsPanelRouting(t *testing.T) {
 		t.Fatalf("config is not valid JSON: %v", err)
 	}
 
-	if len(got.Routing.Rules) != 3 {
-		t.Fatalf("rules = %d, want the panel's 3", len(got.Routing.Rules))
+	// The panel's 3 rules plus the probe rule the session prepends so the health
+	// check travels the tunnel it reports on.
+	if len(got.Routing.Rules) != 4 {
+		t.Fatalf("rules = %d, want the panel's 3 plus the probe rule", len(got.Routing.Rules))
 	}
-	if string(got.Routing.Rules[0]["outboundTag"]) != `"direct"` {
-		t.Errorf("2ip.ru rule lost: %v", got.Routing.Rules[0])
+	if got.Routing.Rules[0]["domain"] == nil {
+		t.Errorf("probe rule is not first: %v", got.Routing.Rules[0])
+	}
+	if string(got.Routing.Rules[1]["outboundTag"]) != `"direct"` {
+		t.Errorf("2ip.ru rule lost: %v", got.Routing.Rules[1])
 	}
 	if len(got.DNS) == 0 {
 		t.Error("panel dns dropped")
@@ -200,7 +205,7 @@ func TestResolveScriptedTarget_KeepsPanelRouting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load template: %v", err)
 	}
-	t.Chdir(t.TempDir())
+	isolateState(t)
 	if err := os.WriteFile("subscriptions.txt", []byte(srv.URL+"\n"), 0600); err != nil {
 		t.Fatalf("write subscriptions: %v", err)
 	}
@@ -235,11 +240,11 @@ func TestResolveScriptedTarget_KeepsPanelRouting(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("config is not valid JSON: %v", err)
 	}
-	if len(got.Routing.Rules) != 3 {
-		t.Fatalf("rules = %d, want the panel's 3", len(got.Routing.Rules))
+	if len(got.Routing.Rules) != 4 {
+		t.Fatalf("rules = %d, want the panel's 3 plus the probe rule", len(got.Routing.Rules))
 	}
-	if string(got.Routing.Rules[0]["outboundTag"]) != `"direct"` {
-		t.Errorf("2ip.ru rule lost in the scripted path: %v", got.Routing.Rules[0])
+	if string(got.Routing.Rules[1]["outboundTag"]) != `"direct"` {
+		t.Errorf("2ip.ru rule lost in the scripted path: %v", got.Routing.Rules[1])
 	}
 	validateWithXray(t, raw)
 }

@@ -26,7 +26,7 @@ func TestBuildProfileBenchConfigKeepsBalancerAndRouting(t *testing.T) {
 	p := subscription.Profile{Name: "Balanced", Raw: raw}
 	ports := portPair{socks: 41080, http: 41081}
 
-	out, err := buildProfileBenchConfig(p, ports, "error")
+	out, err := buildProfileBenchConfig(p, ports, "error", nil)
 	if err != nil {
 		t.Fatalf("buildProfileBenchConfig() = %v, want nil", err)
 	}

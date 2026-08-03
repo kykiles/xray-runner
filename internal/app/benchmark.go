@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -52,6 +54,21 @@ type ProxyBenchmarker struct {
 	timeout       time.Duration
 	allowInsecure bool
 	checkURLs     []string
+	probeHosts    []string
+}
+
+// probeHosts turns the check URLs into exact-match routing domains, so the
+// probe rule matches those hosts and nothing else.
+func probeHosts(urls []string) []string {
+	var hosts []string
+	for _, raw := range urls {
+		u, err := url.Parse(raw)
+		if err != nil || u.Hostname() == "" {
+			continue
+		}
+		hosts = append(hosts, "full:"+u.Hostname())
+	}
+	return hosts
 }
 
 // NewProxyBenchmarker takes the whole config rather than the four knobs it
@@ -65,6 +82,7 @@ func NewProxyBenchmarker(template *xraycfg.XrayConfig, binary string, cfg *confi
 		timeout:       cfg.BenchTimeout,
 		allowInsecure: cfg.AllowInsecure,
 		checkURLs:     cfg.CheckURLs(),
+		probeHosts:    probeHosts(cfg.CheckURLs()),
 	}
 }
 
@@ -97,21 +115,47 @@ func benchInbounds(ports portPair) []xraycfg.Inbound {
 // buildProfileBenchConfig measures the profile the way it will actually run:
 // its own outbounds, routing and balancer are kept untouched, so the number
 // reflects the provider's balancing rules rather than one server picked by us.
-func buildProfileBenchConfig(p subscription.Profile, ports portPair, logLevel string) (json.RawMessage, error) {
-	return xraycfg.MergeProfile(p.Raw, benchInbounds(ports), logLevel)
+func buildProfileBenchConfig(p subscription.Profile, ports portPair, logLevel string, hosts []string) (json.RawMessage, error) {
+	raw, err := xraycfg.MergeProfile(p.Raw, benchInbounds(ports), logLevel)
+	if err != nil {
+		return nil, err
+	}
+	// The probe has to go through the balancer as well; the panel's own rules
+	// would otherwise send it straight out and time the plain internet.
+	return xraycfg.PrependProbeRule(raw, hosts)
 }
 
+// measureOne times one server and records why it failed. The column has room
+// for one word (see BenchmarkResult.String); the reason itself only exists here
+// and in the log, which is where a "timeout" everywhere is diagnosed from.
 func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.SubEntry, ports portPair, dir string) subscription.BenchmarkResult {
+	res := pb.measureEntry(ctx, entry, ports, dir)
+	if res.Error != nil && ctx.Err() == nil {
+		slog.Warn("ping failed", "server", entry.Remarks, "address", entry.Address, "verdict", res.String(), "error", res.Error)
+	}
+	return res
+}
+
+func (pb *ProxyBenchmarker) measureEntry(ctx context.Context, entry subscription.SubEntry, ports portPair, dir string) subscription.BenchmarkResult {
 	if err := entry.Validate(); err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
+
+	inbounds := benchInbounds(ports)
+
+	// A server from a panel subscription is measured the way it will be run —
+	// same dns, same routing, same outbound chain (ADR-0002). Rebuilding it on
+	// template.json instead is what made new subscriptions read "timeout" while
+	// connecting to them worked.
+	if data, ok := pb.buildSingleBenchConfig(entry, inbounds); ok {
+		return pb.runAndMeasure(ctx, data, ports, dir)
+	}
+
 	entry.AllowInsecure = pb.allowInsecure
 	outboundJSON, err := subscription.ProxyOutboundJSON(&entry)
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
-
-	inbounds := benchInbounds(ports)
 
 	outbounds := []json.RawMessage{outboundJSON}
 	for _, ob := range pb.template.Outbounds {
@@ -130,11 +174,49 @@ func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.S
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
+	data, err = xraycfg.PrependProbeRule(data, pb.probeHosts)
+	if err != nil {
+		return subscription.BenchmarkResult{Error: err}
+	}
 	return pb.runAndMeasure(ctx, data, ports, dir)
+}
+
+// buildSingleBenchConfig builds the session's own config for one server, pinned
+// to it. False means the server has no panel config behind it (URL list, bare
+// link) and the caller falls back to template.json, exactly as the session does.
+func (pb *ProxyBenchmarker) buildSingleBenchConfig(entry subscription.SubEntry, inbounds []xraycfg.Inbound) (json.RawMessage, bool) {
+	if len(entry.ProfileRaw) == 0 || len(entry.RawOutbound) == 0 {
+		return nil, false
+	}
+	tag := xraycfg.OutboundTag(entry.RawOutbound)
+	if tag == "" {
+		return nil, false
+	}
+	raw, err := xraycfg.MergeProfileSingle(entry.ProfileRaw, tag, inbounds, "error")
+	if err != nil {
+		if !errors.Is(err, xraycfg.ErrNoPanelRouting) {
+			slog.Warn("panel routing not applied to the measured config", "server", entry.Remarks, "error", err)
+		}
+		return nil, false
+	}
+	raw, err = xraycfg.PrependProbeRule(raw, pb.probeHosts)
+	if err != nil {
+		slog.Warn("probe rule not applied to the measured config", "server", entry.Remarks, "error", err)
+		return nil, false
+	}
+	return raw, true
 }
 
 // measureProfile times the profile as a whole, through its own balancer.
 func (pb *ProxyBenchmarker) measureProfile(ctx context.Context, p subscription.Profile, ports portPair, dir string) subscription.BenchmarkResult {
+	res := pb.measureProfileEntry(ctx, p, ports, dir)
+	if res.Error != nil && ctx.Err() == nil {
+		slog.Warn("ping failed", "profile", p.Name, "verdict", res.String(), "error", res.Error)
+	}
+	return res
+}
+
+func (pb *ProxyBenchmarker) measureProfileEntry(ctx context.Context, p subscription.Profile, ports portPair, dir string) subscription.BenchmarkResult {
 	// A bare link carries no panel config: it is a single server wearing a
 	// profile's clothes, so measure it as one.
 	if len(p.Raw) == 0 {
@@ -144,7 +226,7 @@ func (pb *ProxyBenchmarker) measureProfile(ctx context.Context, p subscription.P
 		return pb.measureOne(ctx, p.Entries[0], ports, dir)
 	}
 
-	data, err := buildProfileBenchConfig(p, ports, "error")
+	data, err := buildProfileBenchConfig(p, ports, "error", pb.probeHosts)
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
@@ -172,7 +254,7 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 	defer func() { _ = runner.Stop(); _ = runner.Wait() }()
 
 	if !awaitPort(ctx, ports.http, "", pb.timeout) {
-		return subscription.BenchmarkResult{Error: fmt.Errorf("port %d not ready within timeout", ports.http)}
+		return subscription.BenchmarkResult{Error: fmt.Errorf("%w: порт %d так и не открылся", subscription.ErrCoreNotReady, ports.http)}
 	}
 
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", ports.http)

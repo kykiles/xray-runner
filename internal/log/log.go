@@ -22,7 +22,7 @@ func Init(cfg *config.Config) func() {
 
 	logFile := cfg.LogFile
 	if logFile == "" {
-		logFile = "xray-runner.log"
+		logFile = config.Path("xray-runner.log")
 	}
 
 	// Truncated, not appended: xray's own output lands here, and a TUN session

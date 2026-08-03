@@ -65,10 +65,12 @@ type statusTickMsg time.Time
 // updates streams health results; it is closed by the caller when the session
 // ends on its own (e.g. the core died), which closes the screen with StatusQuit.
 func ShowStatus(info StatusInfo, updates <-chan StatusUpdate) (StatusAction, error) {
+	// started stays zero until the first successful health check — see health().
+	// A reconnect or a mode switch builds a new screen, so the counter restarts
+	// with the connection rather than carrying the old one's age over.
 	m := statusModel{
 		info:    info,
 		updates: updates,
-		started: time.Now(),
 		action:  StatusQuit,
 	}
 	res, err := runScreen(m)
@@ -118,6 +120,9 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			u := msg
 			m.last = &u
+			if u.OK && m.started.IsZero() {
+				m.started = time.Now()
+			}
 		}
 		return m, m.waitUpdate()
 	case tea.KeyMsg:
@@ -221,9 +226,8 @@ func (m statusModel) appsLine() string {
 }
 
 func (m statusModel) health() string {
-	uptime := time.Since(m.started).Round(time.Second)
 	if m.last == nil {
-		return dimStyle.Render("● проверка… ") + fmt.Sprintf("· uptime %s", fmtDuration(uptime))
+		return dimStyle.Render("● проверка… ")
 	}
 	mark := okStyle.Render("● ок")
 	if !m.last.OK {
@@ -233,7 +237,12 @@ func (m statusModel) health() string {
 	if m.last.Latency > 0 {
 		out += fmt.Sprintf(" · %d ms", m.last.Latency.Milliseconds())
 	}
-	return out + fmt.Sprintf(" · uptime %s", fmtDuration(uptime))
+	// No uptime until the connection has actually answered once: the counter
+	// measures the live connection, not how long the screen has been open.
+	if m.started.IsZero() {
+		return out
+	}
+	return out + fmt.Sprintf(" · uptime %s", fmtDuration(time.Since(m.started).Round(time.Second)))
 }
 
 func fmtDuration(d time.Duration) string {

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"xray-runner/internal/config"
 )
 
 // Running under sudo makes every file the app writes — apps.txt, the generated
@@ -50,17 +52,24 @@ func reclaimFiles() {
 	if !ok {
 		return
 	}
-	dir, err := os.Getwd()
-	if err != nil || !safeToReclaim(dir) {
-		return
+	// The working directory still holds the files of an older install, and the
+	// data dir holds everything written since — both need handing back.
+	dirs := []string{config.DataDir()}
+	if wd, err := os.Getwd(); err == nil {
+		dirs = append(dirs, wd)
 	}
-	_ = filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	for _, dir := range dirs {
+		if !safeToReclaim(dir) {
+			continue
 		}
-		// Lchown, not Chown: a symlink here should change hands itself rather
-		// than redirect the call at whatever it points to.
-		_ = os.Lchown(path, uid, gid)
-		return nil
-	})
+		_ = filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			// Lchown, not Chown: a symlink here should change hands itself rather
+			// than redirect the call at whatever it points to.
+			_ = os.Lchown(path, uid, gid)
+			return nil
+		})
+	}
 }

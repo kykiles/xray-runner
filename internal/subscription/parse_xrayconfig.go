@@ -137,6 +137,7 @@ func parseXrayConfigProfiles(arr []json.RawMessage) ([]Profile, error) {
 			// Preserve the original outbound so the launcher can run it verbatim
 			// instead of rebuilding it from the distilled fields above.
 			e.RawOutbound = raw
+			e.ProfileRaw = item
 			key := entryKey(e)
 			if seen[key] {
 				continue

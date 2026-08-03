@@ -27,7 +27,7 @@ func TestBareLink_ScriptedTargetToConfig(t *testing.T) {
 
 	// subscriptions.txt and last_server.json are resolved relative to the
 	// working directory, so the test runs in a scratch dir.
-	t.Chdir(t.TempDir())
+	isolateState(t)
 	if err := os.WriteFile("subscriptions.txt", []byte(link+"\n"), 0600); err != nil {
 		t.Fatalf("write subscriptions: %v", err)
 	}
