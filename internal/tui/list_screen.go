@@ -444,18 +444,19 @@ func (m listModel) startBench() (tea.Model, tea.Cmd) {
 		targets = append(targets, benchTarget{key: key})
 	}
 	for _, r := range vis {
-		if r.kind == rowServer {
+		switch {
+		case r.kind == rowServer:
 			addSrv(r.entry)
-			continue
-		}
-		// Task #2: the servers behind a balancer are measured whether they are
-		// unfolded or not, so opening one after a run shows numbers instead of
-		// holes. An unfolded child is a visible row of its own — the dedup by
-		// endpoint keeps it from being measured twice.
-		// ponytail: a balancer of N servers now costs N+1 measurements instead of
-		// 1. Skip the children of folded balancers if that gets slow.
-		for _, e := range m.profiles[r.profIdx].Entries {
-			addSrv(e)
+		case m.expanded[r.profIdx]:
+			// The children are visible rows of their own and were added above.
+		case r.kind == rowBalancer:
+			// A folded balancer is measured as a whole and nothing else: the number
+			// on its row is the profile's, and its servers cost N extra measurements
+			// nobody is looking at. Unfold it and press b again for those.
+		default: // a folded group has no measurement of its own — its servers do
+			for _, e := range m.profiles[r.profIdx].Entries {
+				addSrv(e)
+			}
 		}
 	}
 	// Balancer targets follow the server ones, matching the run order below.

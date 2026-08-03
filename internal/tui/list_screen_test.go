@@ -176,9 +176,10 @@ func drainBench(m listModel, cmd tea.Cmd) listModel {
 	return m
 }
 
-// Variant A: b measures the visible balancers as whole profiles and every server
-// one by one — the ones behind a folded balancer included (task #2) — in one run,
-// routing each result to the right cache.
+// Variant A: b measures the visible balancers as whole profiles and every
+// visible server one by one, in one run, routing each result to the right cache.
+// A folded balancer costs one measurement, not N+1: the servers behind it are
+// only measured once it is unfolded.
 func TestList_BenchmarkVariantA(t *testing.T) {
 	var srvSeen, profSeen []string
 	m := newList(balancerFixture())
@@ -200,9 +201,9 @@ func TestList_BenchmarkVariantA(t *testing.T) {
 	next, cmd := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
 	m = drainBench(next.(listModel), cmd)
 
-	// Every server is measured on its own, folded balancers included, and each
-	// balancer additionally as a whole.
-	if want := "de1.example.ru,de2.example.ru,us1.example.com,nl1.example.ru"; strings.Join(srvSeen, ",") != want {
+	// Both balancers are folded, so only the standalone server is measured on its
+	// own; each balancer is measured as a whole.
+	if want := "us1.example.com"; strings.Join(srvSeen, ",") != want {
 		t.Errorf("server bench saw %v, want %v", srvSeen, want)
 	}
 	if strings.Join(profSeen, ",") != "Германия,Нидерланды" {
@@ -216,6 +217,29 @@ func TestList_BenchmarkVariantA(t *testing.T) {
 	}
 	if m.run.running {
 		t.Error("run still marked running after completion")
+	}
+}
+
+// Unfolding a balancer puts its servers back into the run: they are visible
+// rows now, and the row that used to carry the profile's number gives its cell
+// up to them.
+func TestList_BenchmarkMeasuresUnfoldedChildren(t *testing.T) {
+	var srvSeen []string
+	m := newList(balancerFixture())
+	m.srvBench = func(_ context.Context, entries []subscription.SubEntry, on func(subscription.BenchmarkResult)) []subscription.BenchmarkResult {
+		for i, e := range entries {
+			srvSeen = append(srvSeen, e.Address)
+			on(subscription.BenchmarkResult{Index: i, Latency: 10 * time.Millisecond})
+		}
+		return nil
+	}
+
+	m = press(m, "s") // unfold Германия, the cursor starts on it
+	next, cmd := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+	drainBench(next.(listModel), cmd)
+
+	if want := "de1.example.ru,de2.example.ru,us1.example.com"; strings.Join(srvSeen, ",") != want {
+		t.Errorf("server bench saw %v, want %v", srvSeen, want)
 	}
 }
 
