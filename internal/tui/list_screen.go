@@ -85,7 +85,7 @@ type listModel struct {
 	benchTargets []benchTarget
 
 	refreshing  bool
-	lastRefresh time.Time // when `r` last brought a list back — see refreshCooldown
+	lastRefresh time.Time // when the list last came from the panel — see refreshCooldown
 	status      string
 	width       int
 	height      int
@@ -141,6 +141,10 @@ func SelectList(
 		profPings:   profPings,
 		action:      ListQuit,
 		choice:      -1,
+		// The list handed in was just fetched, so the cooldown starts here: `r`
+		// pressed right after opening a subscription used to re-fetch it a second
+		// later, two panel hits (and two HWID registrations) for one list.
+		lastRefresh: time.Now(),
 	}
 	m.restoreCursor(lastAddress, lastPort, lastProfIdx)
 
@@ -503,7 +507,7 @@ func (m listModel) startRefresh() (tea.Model, tea.Cmd) {
 	if m.refresh == nil || m.refreshing || m.run.running {
 		return m, nil
 	}
-	if wait := refreshCooldown - time.Since(m.lastRefresh); wait > 0 && !m.lastRefresh.IsZero() {
+	if wait := refreshCooldown - time.Since(m.lastRefresh); wait > 0 {
 		m.status = warnStyle.Render(fmt.Sprintf("Только что обновлялось — подождите %ds", int(wait.Seconds())+1))
 		return m, nil
 	}

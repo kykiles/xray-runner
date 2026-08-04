@@ -183,7 +183,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				a.useGeoAssets(rawURL, a.nav.geo)
 				return nil
 			}
-			profiles, geo, err := a.loadProfiles(rawURL)
+			profiles, geo, err := a.loadProfiles(rawURL, "open")
 			if err != nil {
 				return err
 			}
@@ -292,7 +292,7 @@ func (a *App) selectFromList(ctx context.Context) (*target, error) {
 	// A-4: `r` re-fetches with the same HWID headers as the initial load, keeping
 	// the profile structure so the same list is shown again.
 	refresh := func() ([]subscription.Profile, error) {
-		profiles, info, err := a.loadProfiles(subURL)
+		profiles, info, err := a.loadProfiles(subURL, "refresh")
 		if err != nil {
 			return nil, err
 		}
@@ -386,8 +386,10 @@ func (a *App) profileConfig(p subscription.Profile) (string, error) {
 }
 
 // loadProfiles fetches between two full-screen menus, so it prints nothing: the
-// next screen would overwrite a progress line anyway.
-func (a *App) loadProfiles(subURL string) ([]subscription.Profile, subscription.PanelInfo, error) {
+// next screen would overwrite a progress line anyway. why names what asked for
+// the fetch: two "subscription loaded" lines in a row are only diagnosable if
+// the log says which of them was the user pressing `r`.
+func (a *App) loadProfiles(subURL, why string) ([]subscription.Profile, subscription.PanelInfo, error) {
 	hwid := config.GetOrCreateHWID(a.cfg.HWID)
 	profiles, info, err := subscription.FetchProfilesWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
 	if err != nil {
@@ -397,7 +399,7 @@ func (a *App) loadProfiles(subURL string) ([]subscription.Profile, subscription.
 	// to them before anything builds a config from this subscription.
 	a.useGeoAssets(subURL, info)
 	a.adoptPanelTitle(subURL, info.Title)
-	slog.Info("subscription loaded", "profiles", len(profiles), "servers", len(subscription.Flatten(profiles)))
+	slog.Info("subscription loaded", "profiles", len(profiles), "servers", len(subscription.Flatten(profiles)), "why", why)
 	return profiles, info, nil
 }
 

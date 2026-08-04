@@ -458,6 +458,19 @@ func TestList_RefreshCooldown(t *testing.T) {
 	}
 }
 
+// A list that just came from the panel is already fresh: SelectList stamps
+// lastRefresh at open, so `r` pressed a second later is refused instead of
+// fetching the same subscription twice.
+func TestList_RefreshCooldownStartsAtOpen(t *testing.T) {
+	m := newList(flatFixture())
+	m.refresh = func() ([]subscription.Profile, error) { return flatFixture(), nil }
+	m.lastRefresh = time.Now()
+
+	if _, cmd := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}); cmd != nil {
+		t.Error("r right after opening a freshly fetched subscription fetched it again")
+	}
+}
+
 // Coming back from a session unfolds the balancer holding the last connected
 // server and lands the cursor on it.
 func TestList_RestoreCursorUnfoldsChild(t *testing.T) {
