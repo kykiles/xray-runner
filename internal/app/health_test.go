@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -73,5 +75,28 @@ func TestConnectivityWarmup_ContextCancelled(t *testing.T) {
 	}
 	if time.Since(start) > time.Second {
 		t.Error("cancellation should abort the warm-up promptly, not sleep out the window")
+	}
+}
+
+func TestReachCheck_ReportsOutcome(t *testing.T) {
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ok.Close()
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer bad.Close()
+
+	client := &http.Client{Timeout: time.Second}
+	if !reachCheck(context.Background(), client, []string{bad.URL, ok.URL}, "test") {
+		t.Error("a URL answering 204 must report success even after a bad one")
+	}
+	// Three attempts with 1s+2s backoff would take too long to sit through; a
+	// cancelled context is the same "nothing answered" answer.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if reachCheck(ctx, client, []string{bad.URL}, "test") {
+		t.Error("nothing answering must report failure")
 	}
 }

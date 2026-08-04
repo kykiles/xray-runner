@@ -468,8 +468,17 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 	slog.Info("system proxy enabled", "port", ports.http)
 
 	go func() {
-		a.testProxyConnection(ctx, ports.http)
+		// The OS setting first: it is a registry read, so the user hears about a
+		// proxy that did not apply right away instead of behind the network test.
 		a.verifySystemProxy(ports.http)
+		// A proxy the OS accepted but nothing answers through is the case the
+		// status screen used to report as connected — say so out loud.
+		if !a.testProxyConnection(ctx, ports.http) && ctx.Err() == nil {
+			a.publishStatus(tui.StatusUpdate{
+				Note: "⚠ Через прокси ничего не отвечает — сервер принял подключение, но трафик не идёт",
+				Err:  true,
+			})
+		}
 	}()
 	return nil
 }

@@ -40,13 +40,14 @@ func (a *App) awaitTUNInterface(ctx context.Context, name string, timeout time.D
 // reachCheck walks the check URLs until one answers, retrying the whole list
 // three times with exponential backoff. The TUN and proxy paths differ only in
 // the client they hand in: one goes out directly, the other through xray's http
-// inbound. label names the check in the log.
-func reachCheck(ctx context.Context, client *http.Client, urls []string, label string, logArgs ...any) {
+// inbound. label names the check in the log. False means nothing answered —
+// the caller decides whether that is worth telling the user about.
+func reachCheck(ctx context.Context, client *http.Client, urls []string, label string, logArgs ...any) bool {
 	for attempt := 0; attempt < 3; attempt++ {
 		for _, testURL := range urls {
 			select {
 			case <-ctx.Done():
-				return
+				return false
 			default:
 			}
 			req, _ := http.NewRequestWithContext(ctx, "GET", testURL, nil)
@@ -57,7 +58,7 @@ func reachCheck(ctx context.Context, client *http.Client, urls []string, label s
 			_ = resp.Body.Close()
 			if resp.StatusCode == 204 || resp.StatusCode == 200 {
 				slog.Info(label+" ok", append(logArgs, "status", resp.StatusCode)...)
-				return
+				return true
 			}
 		}
 		delay := time.Duration(1<<uint(attempt)) * time.Second
@@ -66,10 +67,11 @@ func reachCheck(ctx context.Context, client *http.Client, urls []string, label s
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
-			return
+			return false
 		}
 	}
 	slog.Error(label + " failed after 3 attempts")
+	return false
 }
 
 // dialPort reports whether something is listening on the local port right now.
@@ -119,7 +121,11 @@ func awaitPort(ctx context.Context, port int, label string, timeout time.Duratio
 	return false
 }
 
-func (a *App) testProxyConnection(ctx context.Context, httpPort int) {
+// testProxyConnection reports whether anything actually comes back through
+// xray's http inbound. 5s per request rather than 10: three URLs times three
+// attempts made a dead tunnel take a minute and a half to say so, and a proxy
+// that needs more than 5s for a 204 is not one to report as working.
+func (a *App) testProxyConnection(ctx context.Context, httpPort int) bool {
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", httpPort)
 	transport := &http.Transport{
 		Proxy: func(req *http.Request) (*url.URL, error) {
@@ -128,7 +134,7 @@ func (a *App) testProxyConnection(ctx context.Context, httpPort int) {
 	}
 	defer transport.CloseIdleConnections()
 
-	reachCheck(ctx, &http.Client{Transport: transport, Timeout: 10 * time.Second},
+	return reachCheck(ctx, &http.Client{Transport: transport, Timeout: 5 * time.Second},
 		a.cfg.CheckURLs(), "proxy test", "proxy", proxyURL)
 }
 
@@ -331,5 +337,7 @@ func (a *App) verifySystemProxy(httpPort int) {
 		})
 		return
 	}
-	slog.Info("system proxy confirmed", "port", httpPort)
+	// Only the OS setting is confirmed here; whether anything travels through it
+	// is what testProxyConnection answers.
+	slog.Info("system proxy setting applied", "port", httpPort)
 }
