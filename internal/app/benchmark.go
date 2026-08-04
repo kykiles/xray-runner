@@ -55,6 +55,10 @@ type ProxyBenchmarker struct {
 	allowInsecure bool
 	checkURLs     []string
 	probeHosts    []string
+	// logLevel is the session's own knob rather than a hardcoded "error": a ping
+	// that disagrees with what connects is diagnosed from the core's routing
+	// lines, and those were unreachable without rebuilding the app.
+	logLevel string
 }
 
 // probeHosts turns the check URLs into exact-match routing domains, so the
@@ -83,6 +87,7 @@ func NewProxyBenchmarker(template *xraycfg.XrayConfig, binary string, cfg *confi
 		allowInsecure: cfg.AllowInsecure,
 		checkURLs:     cfg.CheckURLs(),
 		probeHosts:    probeHosts(cfg.CheckURLs()),
+		logLevel:      cfg.XrayLogLvl,
 	}
 }
 
@@ -130,8 +135,14 @@ func buildProfileBenchConfig(p subscription.Profile, ports portPair, logLevel st
 // and in the log, which is where a "timeout" everywhere is diagnosed from.
 func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.SubEntry, ports portPair, dir string) subscription.BenchmarkResult {
 	res := pb.measureEntry(ctx, entry, ports, dir)
-	if res.Error != nil && ctx.Err() == nil {
+	switch {
+	case res.Error != nil && ctx.Err() == nil:
 		slog.Warn("ping failed", "server", entry.Remarks, "address", entry.Address, "verdict", res.String(), "error", res.Error)
+	case res.Error == nil:
+		// Only failures used to be logged, so a log could not say whether two
+		// servers or twelve had answered — the failure rate is the whole
+		// diagnosis when the ping disagrees with what connects.
+		slog.Debug("ping ok", "server", entry.Remarks, "address", entry.Address, "latency", res.Latency)
 	}
 	return res
 }
@@ -163,7 +174,7 @@ func (pb *ProxyBenchmarker) measureEntry(ctx context.Context, entry subscription
 	}
 
 	cfg := &xraycfg.XrayConfig{
-		Log:       &xraycfg.LogConfig{Loglevel: "error"},
+		Log:       &xraycfg.LogConfig{Loglevel: pb.logLevel},
 		DNS:       pb.template.DNS,
 		Inbounds:  inbounds,
 		Outbounds: outbounds,
@@ -192,7 +203,7 @@ func (pb *ProxyBenchmarker) buildSingleBenchConfig(entry subscription.SubEntry, 
 	if tag == "" {
 		return nil, false
 	}
-	raw, err := xraycfg.MergeProfileSingle(entry.ProfileRaw, tag, inbounds, "error")
+	raw, err := xraycfg.MergeProfileSingle(entry.ProfileRaw, tag, inbounds, pb.logLevel)
 	if err != nil {
 		if !errors.Is(err, xraycfg.ErrNoPanelRouting) {
 			slog.Warn("panel routing not applied to the measured config", "server", entry.Remarks, "error", err)
@@ -210,8 +221,11 @@ func (pb *ProxyBenchmarker) buildSingleBenchConfig(entry subscription.SubEntry, 
 // measureProfile times the profile as a whole, through its own balancer.
 func (pb *ProxyBenchmarker) measureProfile(ctx context.Context, p subscription.Profile, ports portPair, dir string) subscription.BenchmarkResult {
 	res := pb.measureProfileEntry(ctx, p, ports, dir)
-	if res.Error != nil && ctx.Err() == nil {
+	switch {
+	case res.Error != nil && ctx.Err() == nil:
 		slog.Warn("ping failed", "profile", p.Name, "verdict", res.String(), "error", res.Error)
+	case res.Error == nil:
+		slog.Debug("ping ok", "profile", p.Name, "latency", res.Latency)
 	}
 	return res
 }
@@ -226,7 +240,7 @@ func (pb *ProxyBenchmarker) measureProfileEntry(ctx context.Context, p subscript
 		return pb.measureOne(ctx, p.Entries[0], ports, dir)
 	}
 
-	data, err := buildProfileBenchConfig(p, ports, "error", pb.probeHosts)
+	data, err := buildProfileBenchConfig(p, ports, pb.logLevel, pb.probeHosts)
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
@@ -288,8 +302,19 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 // and both TLS handshakes on top of the round trip, so it reads far higher than
 // the link is. The number reported is the one after that, over the connection
 // already in the pool — see warmProbe.
+// The pause between rounds doubles instead of staying at 300ms. A server that
+// refuses the handshake answers instantly, so a flat interval fired ~26 rounds
+// of three connections each inside one 8s window — a burst the panel's own
+// connection limits may answer with exactly the refusal being measured. The
+// backoff keeps the same window with a handful of rounds.
+const (
+	probeBackoff    = 300 * time.Millisecond
+	probeBackoffMax = 2 * time.Second
+)
+
 func probe(ctx context.Context, client *http.Client, checkURLs []string, deadline time.Time) subscription.BenchmarkResult {
 	var lastErr error
+	wait := probeBackoff
 	for {
 		for _, checkURL := range checkURLs {
 			latency, err := timeRequest(ctx, client, checkURL)
@@ -302,7 +327,10 @@ func probe(ctx context.Context, client *http.Client, checkURLs []string, deadlin
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			return subscription.BenchmarkResult{Error: lastErr}
 		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(wait)
+		if wait *= 2; wait > probeBackoffMax {
+			wait = probeBackoffMax
+		}
 	}
 }
 

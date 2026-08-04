@@ -100,3 +100,29 @@ func TestProbeFallsThroughToSecondURL(t *testing.T) {
 		t.Fatalf("probe: %v", got.Error)
 	}
 }
+
+// A server that refuses instantly answers as fast as the loop can ask, so a
+// flat retry interval turned one 8s measurement into a burst of connections —
+// the kind a panel's own limits may answer with the refusal being measured.
+func TestProbeBacksOffOnInstantRefusal(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	base, _ := url.Parse(srv.URL)
+	client := &http.Client{Transport: rewriteHost{base}, Timeout: time.Second}
+
+	got := probe(context.Background(), client, []string{"https://example.invalid/x"}, time.Now().Add(3*time.Second))
+	if got.Error == nil {
+		t.Fatal("a refusing endpoint must end as a failure")
+	}
+	// 300ms flat would fire ~10 rounds in the same window; the backoff caps it at
+	// a handful. The exact count depends on scheduling, the order of magnitude
+	// is the point.
+	if n > 6 {
+		t.Errorf("rounds = %d, want the backoff to keep it under 7", n)
+	}
+}
