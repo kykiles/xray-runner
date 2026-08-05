@@ -272,26 +272,34 @@ func TestList_BalancerPingMovesToChildren(t *testing.T) {
 	}
 }
 
-// Task #1: a star beside the cursor marks a balancer, and only there.
-func TestList_StarMarksBalancerUnderCursor(t *testing.T) {
-	m := newList(balancerFixture())
-	if line := cursorLine(m.View()); !strings.Contains(line, "★") {
-		t.Errorf("cursor on a balancer, want a star:\n%q", line)
-	}
-	m.cursor = 1 // the США server row
-	if line := cursorLine(m.View()); strings.Contains(line, "★") {
-		t.Errorf("cursor on a server, want no star:\n%q", line)
-	}
-}
+// Task #4: the star is gone — conhost drew it as a blank box. Colour carries
+// the row's kind and bold carries the cursor, so a balancer under the cursor is
+// still recognisably a balancer instead of being repainted like any other row.
+func TestList_BalancerKeepsItsColourUnderTheCursor(t *testing.T) {
+	amber := lipgloss.Color(colorGold)
 
-// cursorLine is the rendered line the cursor marker sits on.
-func cursorLine(view string) string {
-	for _, l := range strings.Split(view, "\n") {
-		if strings.Contains(l, "▸") {
-			return l
+	for _, selected := range []bool{false, true} {
+		if got := rowStyle(rowBalancer, selected).GetForeground(); got != amber {
+			t.Errorf("balancer selected=%v: colour %v, want %v", selected, got, amber)
+		}
+		if got := rowStyle(rowBalancer, selected).GetBold(); got != selected {
+			t.Errorf("balancer selected=%v: bold %v, want %v", selected, got, selected)
 		}
 	}
-	return ""
+	// The accent belongs to balancers alone: a group unfolds but never runs as a
+	// whole, and a server is not a pool.
+	for _, kind := range []listKind{rowServer, rowGroup} {
+		for _, selected := range []bool{false, true} {
+			if got := rowStyle(kind, selected).GetForeground(); got == amber {
+				t.Errorf("kind %v selected=%v wears the balancer accent", kind, selected)
+			}
+		}
+	}
+
+	m := newList(balancerFixture())
+	if view := m.View(); strings.Contains(view, "★") {
+		t.Errorf("the star is still rendered:\n%s", view)
+	}
 }
 
 // Pressing b again restarts on what is on screen now; the cancelled run's late

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"xray-runner/internal/subscription"
 )
@@ -679,29 +680,7 @@ func (m listModel) View() string {
 		if pos == m.cursor {
 			cursor = cursorStyle.Render("▸ ")
 		}
-		// Task #1: a star beside the cursor says the row it points at is a
-		// balancer — the gold alone is a small difference to catch. It goes in the
-		// left margin every row already carries, so no column moves when it shows
-		// up and the table keeps its full width on a narrow terminal.
-		margin := "  "
-		if pos == m.cursor && r.kind == rowBalancer {
-			margin = goldStyle.Render("★ ")
-		}
-
-		line := tableRow(r.name, r.entry, showPing)
-		switch r.kind {
-		case rowBalancer:
-			// Gold marks a balancer — the rows that unfold and run as a whole.
-			line = goldStyle.Bold(pos == m.cursor).Render(line)
-		case rowGroup:
-			line = textStyle.Bold(pos == m.cursor).Render(line)
-		default:
-			if pos == m.cursor {
-				line = selectedStyle.Render(line)
-			} else {
-				line = textStyle.Render(line)
-			}
-		}
+		line := rowStyle(r.kind, pos == m.cursor).Render(tableRow(r.name, r.entry, showPing))
 
 		// Ping cell from whichever cache owns this row.
 		if r.kind == rowServer {
@@ -722,7 +701,7 @@ func (m listModel) View() string {
 		}
 
 		indent := strings.Repeat("  ", r.depth)
-		b.WriteString(margin + cursor + indent + clip(line, m.width-4-2*r.depth) + "\n")
+		b.WriteString("  " + cursor + indent + clip(line, m.width-4-2*r.depth) + "\n")
 	}
 	b.WriteString(moreDown(below))
 
@@ -739,6 +718,25 @@ func (m listModel) View() string {
 
 	b.WriteString(legend(m.width, keys))
 	return b.String()
+}
+
+// rowStyle dresses one row. Colour says what the row is, bold says where the
+// cursor is: a balancer keeps its amber under the cursor instead of being
+// repainted like every other row. That repainting is what the star beside the
+// cursor used to compensate for — and the star was a blank box in Windows
+// conhost, so it never worked where it was needed most (task #4).
+func rowStyle(kind listKind, selected bool) lipgloss.Style {
+	switch kind {
+	case rowBalancer:
+		return goldStyle.Bold(selected)
+	case rowGroup:
+		return textStyle.Bold(selected)
+	default:
+		if selected {
+			return selectedStyle
+		}
+		return textStyle
+	}
 }
 
 // bestKey names the lowest successful latency in a cache, or "" when none.

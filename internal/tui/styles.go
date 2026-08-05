@@ -14,11 +14,13 @@ import (
 // brightest for titles and the selected/best rows, mid-grey for body text, dim
 // grey for menu chrome. Hex defaults degrade to 256-color on terminals without
 // truecolor; COLOR_* env vars override any of them. Status colors (err/ok/warn)
-// stay outside the ramp so failures and successes remain distinguishable.
+// stay outside the ramp so failures and successes remain distinguishable, and
+// so does the balancer amber: inside the ramp it was one grey among greys, which
+// is why the row needed a star beside it to be noticed at all.
 const (
 	colorSet     = "#f2f2f2" // brightest — the wordmark / titles
 	colorCoffee  = "#a5a5a5" // ordinary text — servers, descriptions
-	colorGold    = "#cccccc" // balancers — a notch above body text
+	colorGold    = "#d8a657" // balancers — the one accent outside the ramp
 	colorSocket  = "#7f7f7f" // menu, legend, cursor chrome
 	colorBest    = "#f2f2f2" // fastest ping (bold)
 	colorSelBest = "#f2f2f2" // selected row (bold)
@@ -37,8 +39,9 @@ var (
 	// selectedStyle marks the highlighted row — brighter coffee so it stands out
 	// against the plain coffee rows without leaving the palette.
 	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorSelBest)).Bold(true)
-	// goldStyle marks a row that hides more behind it: a profile with a balancer,
-	// the only kind that unfolds into a server list.
+	// goldStyle marks a balancer row — the only kind that runs as a whole rather
+	// than as one server. Colour says what a row is, bold says where the cursor
+	// is, so the two never have to compete for the same attribute.
 	goldStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorGold))
 	// bestStyle marks the fastest measured ping. The list is no longer sorted by
 	// latency, so the winner has to stand out where it stands.
