@@ -11,5 +11,5 @@ func Error(text string) {
 }
 
 func Warn(text string) {
-	fmt.Printf("  %s⚠️%s %s\n", colorYellow, colorReset, text)
+	fmt.Printf("  %s%s%s\n", colorYellow, text, colorReset)
 }
