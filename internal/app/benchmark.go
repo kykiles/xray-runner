@@ -268,6 +268,18 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 	defer func() { _ = runner.Stop(); _ = runner.Wait() }()
 
 	if !awaitPort(ctx, ports.http, "", pb.timeout) {
+		// A core that never opened its port was either still starting or handed a
+		// config it cannot parse — a panel config written for a newer Xray than the
+		// installed one, most often. Only the core can tell the two apart, and the
+		// answer is what the user needs: waiting longer never fixes the second.
+		// Cancellation is not a verdict about the config, so it is left alone.
+		if ctx.Err() == nil {
+			testCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			if err := runner.TestConfig(testCtx); err != nil {
+				return subscription.BenchmarkResult{Error: fmt.Errorf("%w: %w", subscription.ErrConfigRejected, err)}
+			}
+		}
 		return subscription.BenchmarkResult{Error: fmt.Errorf("%w: порт %d так и не открылся", subscription.ErrCoreNotReady, ports.http)}
 	}
 
