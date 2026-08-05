@@ -2,28 +2,43 @@ package tui
 
 import "testing"
 
-// A VS16 emoji whose base is narrow on its own (☁️) advances the terminal by one
-// column, not the two lipgloss counts — the profile names that carry it used to
-// drag every column after them a cell to the left.
-func TestDispWidth_NarrowVS16(t *testing.T) {
+// The three placements the panel names actually use: an emoji opening the name,
+// one sitting inside it, one trailing — plus the runs of several in a row that
+// made the old width machinery drift columns left.
+func TestStripEmoji(t *testing.T) {
 	cases := []struct {
-		s    string
-		want int
+		name string
+		in   string
+		want string
 	}{
-		{"☁️", 1},
-		{"⚪️", 2}, // base is already wide — untouched
-		{"🇩🇪", 2},
-		{"AA", 2},
-		{"🇩🇪 ⚪️🟢 ☁️FRDM", 13},
+		{"leading flag", "🇩🇪 Germany Munich 01", "Germany Munich 01"},
+		{"leading run", "🇩🇪🇳🇱⚡ Europe Pool", "Europe Pool"},
+		{"leading with separator", "🇩🇪 | DE-01", "DE-01"},
+		{"inside collapses to one space", "Germany☁️Munich", "Germany Munich"},
+		{"inside run collapses to one space", "Germany 🟢🟢 Munich", "Germany Munich"},
+		{"trailing", "Amsterdam 🇳🇱", "Amsterdam"},
+		{"trailing run", "Amsterdam ⚡⚡", "Amsterdam"},
+		{"cyrillic survives", "🤝 Подписка Ялта", "Подписка Ялта"},
+		{"digits open a name", "🇩🇪 01 Munich", "01 Munich"},
+		{"no emoji is untouched", "Frankfurt DE-02", "Frankfurt DE-02"},
+		{"placeholder keeps its bracket", "(без имени)", "(без имени)"},
+		{"emoji only", "🇩🇪⚡", ""},
 	}
 	for _, c := range cases {
-		if got := dispWidth(c.s); got != c.want {
-			t.Errorf("dispWidth(%q) = %d, want %d", c.s, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			if got := stripEmoji(c.in); got != c.want {
+				t.Errorf("stripEmoji(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
 	}
-	// Padding is what the table relies on: two names differing only by the cloud
-	// must still end at the same column.
-	if a, b := pad("☁️x", 6), pad("x", 6); dispWidth(a) != dispWidth(b) {
-		t.Errorf("padded widths differ: %d vs %d", dispWidth(a), dispWidth(b))
+}
+
+// What the whole point was: two names differing only by an emoji must pad to the
+// same column, so the table's NAME column stops drifting.
+func TestStripEmoji_PadsAlike(t *testing.T) {
+	a := pad(stripEmoji("☁️Frankfurt"), 20)
+	b := pad(stripEmoji("Frankfurt"), 20)
+	if a != b {
+		t.Errorf("padded names differ: %q vs %q", a, b)
 	}
 }

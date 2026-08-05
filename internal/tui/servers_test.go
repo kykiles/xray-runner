@@ -71,21 +71,6 @@ func TestFilter_EmptyAndCaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestFlagSpace(t *testing.T) {
-	tests := []struct{ in, want string }{
-		{"🇩🇪Германия", "🇩🇪 Германия"},
-		{"🇩🇪  Германия", "🇩🇪 Германия"},
-		{"🇩🇪 Германия", "🇩🇪 Германия"},
-		{"Германия", "Германия"},
-		{"🇩🇪", "🇩🇪"},
-	}
-	for _, tt := range tests {
-		if got := flagSpace(tt.in); got != tt.want {
-			t.Errorf("flagSpace(%q) = %q, want %q", tt.in, got, tt.want)
-		}
-	}
-}
-
 // address:port identifies a server across a refresh, where names change and
 // positions shift.
 func TestIndexOfServer(t *testing.T) {

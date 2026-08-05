@@ -276,9 +276,9 @@ func (m subsModel) View() string {
 	for i, s := range m.subs {
 		cursor := "  "
 		// Task #1: the list shows only the panel name, never the URL — the token
-		// stays off screen until asked for with s. pad is display-width aware, so a
-		// flag emoji in the name does not push the revealed URL out of line (task #2).
-		name := pad(s.Name, 28)
+		// stays off screen until asked for with s. The panel writes its name with
+		// emoji; they are stripped here so the revealed URL stays in line.
+		name := pad(stripEmoji(s.Name), 28)
 		line := textStyle.Render(name)
 		if i == m.cursor {
 			cursor = cursorStyle.Render("▸ ")

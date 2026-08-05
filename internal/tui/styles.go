@@ -74,22 +74,60 @@ func envColor(key, def string) lipgloss.Color {
 	return lipgloss.Color(def)
 }
 
-// flagSpace normalizes the gap after a leading flag emoji to exactly one space,
-// so the two regional-indicator runes and the text that follows neither collide
-// nor drift apart in the table.
-func flagSpace(s string) string {
-	r := []rune(s)
-	if len(r) < 2 || !isRegional(r[0]) || !isRegional(r[1]) {
-		return s
-	}
-	rest := strings.TrimLeft(string(r[2:]), " ")
-	if rest == "" {
-		return string(r[:2])
-	}
-	return string(r[:2]) + " " + rest
+// emojiRanges are the rune blocks a panel draws its names with: flags, coloured
+// circles, weather, hearts, dingbats — plus the joiners that glue a sequence
+// together (VS15/VS16, ZWJ, skin tones, keycap). Go has no emoji table in the
+// standard library and one subscription list does not justify pulling a package
+// in, so the blocks are listed here.
+var emojiRanges = [][2]rune{
+	{0x200D, 0x200D},   // zero-width joiner
+	{0x20E3, 0x20E3},   // combining keycap
+	{0x2190, 0x21FF},   // arrows
+	{0x2300, 0x23FF},   // misc technical (⌚ ⏳ …)
+	{0x2600, 0x27BF},   // misc symbols + dingbats (☀ ★ ✅ ➡ …)
+	{0x2B00, 0x2BFF},   // arrows/symbols (⭐ ⬛ …)
+	{0xFE0E, 0xFE0F},   // variation selectors 15/16
+	{0x1F000, 0x1FAFF}, // the pictograph planes, flags and skin tones included
 }
 
-func isRegional(r rune) bool { return r >= 0x1F1E6 && r <= 0x1F1FF }
+func isEmoji(r rune) bool {
+	for _, rg := range emojiRanges {
+		if r >= rg[0] && r <= rg[1] {
+			return true
+		}
+	}
+	return false
+}
+
+// stripEmoji removes emoji from a display name. A leading run goes entirely,
+// together with the separator it was pinned to ("🇩🇪 | DE-01" → "DE-01"); a run
+// inside the name collapses to one space; a trailing run just goes. Windows
+// conhost draws them as blank boxes, and their width is unknowable anyway — a
+// name that is only letters is a name the table can align.
+func stripEmoji(s string) string {
+	var b strings.Builder
+	led := false // an emoji opened the name, so its orphaned separator goes too
+	for i, r := range s {
+		switch {
+		case !isEmoji(r):
+			b.WriteRune(r)
+		case i == 0:
+			led = true
+			fallthrough
+		default:
+			// One space per run, not per rune: 🇩🇪🇳🇱 must not become two gaps.
+			if !strings.HasSuffix(b.String(), " ") {
+				b.WriteByte(' ')
+			}
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	if led {
+		out = strings.TrimLeft(out, "|-–—·•/\\ ")
+	}
+	// Collapse the gaps the removed runs left behind, so the column reads evenly.
+	return strings.Join(strings.Fields(out), " ")
+}
 
 // clip shortens an already-styled line to w display columns, keeping table rows
 // from wrapping or running past the terminal edge. It uses lipgloss so embedded
@@ -118,34 +156,11 @@ func legend(width int, items string) string {
 	return legendStyle.Render(strings.Join(parts, "\n"))
 }
 
-// vs16 is the variation selector that asks for emoji presentation: ☁ + U+FE0F.
-const vs16 = '️'
-
-// dispWidth is how many columns the terminal actually advances for s. lipgloss
-// counts a VS16 sequence (☁️) as two, but terminals advance by one when the base
-// character is narrow on its own — the glyph then overpaints the next cell and
-// every column after it drifts left. Whether the base is narrow is asked of
-// lipgloss itself, so there is no second width table to keep in sync: ☁ is 1
-// (adjusted down), ⚪ is already 2 (left alone).
-func dispWidth(s string) int {
-	w := lipgloss.Width(s)
-	if !strings.ContainsRune(s, vs16) {
-		return w
-	}
-	var prev rune
-	for _, r := range s {
-		if r == vs16 && lipgloss.Width(string(prev)) == 1 {
-			w--
-		}
-		prev = r
-	}
-	return w
-}
-
-// pad right-pads s to w display columns. Server names carry flag emoji, which
-// occupy two columns each, so %-*s (byte-based) would misalign the table.
+// pad right-pads s to w display columns. Names reach here through stripEmoji,
+// so every rune left is one lipgloss can measure honestly — but %-*s counts
+// bytes, and Cyrillic alone is enough to misalign that.
 func pad(s string, w int) string {
-	if n := dispWidth(s); n < w {
+	if n := lipgloss.Width(s); n < w {
 		return s + strings.Repeat(" ", w-n)
 	}
 	return s
@@ -154,7 +169,7 @@ func pad(s string, w int) string {
 // padLeft left-pads s to w display columns, so numbers line up on their right
 // edge in a table column.
 func padLeft(s string, w int) string {
-	if n := dispWidth(s); n < w {
+	if n := lipgloss.Width(s); n < w {
 		return strings.Repeat(" ", w-n) + s
 	}
 	return s
@@ -163,12 +178,12 @@ func padLeft(s string, w int) string {
 // truncate shortens s to w display columns, keeping the table from wrapping on
 // narrow terminals.
 func truncate(s string, w int) string {
-	if dispWidth(s) <= w {
+	if lipgloss.Width(s) <= w {
 		return s
 	}
 	var b strings.Builder
 	for _, r := range s {
-		if dispWidth(b.String()+string(r)) > w-1 {
+		if lipgloss.Width(b.String()+string(r)) > w-1 {
 			break
 		}
 		b.WriteRune(r)

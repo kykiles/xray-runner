@@ -163,7 +163,7 @@ func (m statusModel) View() string {
 		b.WriteString("  " + dimStyle.Render(pad(label, 10)) + textStyle.Render(value) + "\n")
 	}
 
-	row("Сервер", m.info.Title)
+	row("Сервер", stripEmoji(m.info.Title))
 	if m.info.Endpoint != "" {
 		row("Адрес", m.info.Endpoint)
 	}
