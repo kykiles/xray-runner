@@ -147,9 +147,9 @@ func TestList_FilterNarrowsAndKeepsChoice(t *testing.T) {
 	next, _ := m.updateKey(tea.KeyMsg{Type: tea.KeyEnter})
 	m = next.(listModel)
 
-	vis := m.visibleRows()
-	if len(vis) != 1 || vis[0].name != "Нидерланды" {
-		t.Fatalf("visible = %+v, want just Нидерланды", vis)
+	// The balancer matched by name, so it brings its servers along.
+	if got := rowNames(m.visibleRows()); !equal(got, []string{"Нидерланды", "NL-1"}) {
+		t.Fatalf("visible = %v, want Нидерланды and its server", got)
 	}
 	if strings.Contains(m.View(), "us1.example.com") {
 		t.Errorf("filtered-out row still rendered:\n%s", m.View())
@@ -533,5 +533,72 @@ func TestList_WindowStableWhileScrollingAndBenching(t *testing.T) {
 	}
 	if idle, busy := rowsShown(false), rowsShown(true); idle != busy {
 		t.Errorf("benchmark changed the row count: %d idle, %d benching", idle, busy)
+	}
+}
+
+// rowNames names the visible rows in order, nested servers included.
+func rowNames(rows []listRow) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.name
+	}
+	return out
+}
+
+// Task #2: the filter walks the tree instead of a pre-flattened row list. The
+// four cases that matter — parent matched, child matched, both, neither —
+// used to collapse into two bugs: a match inside a folded balancer was invisible,
+// and unfolding a matched balancer hid the servers behind it.
+func TestList_FilterWalksTheTree(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{"parent matched brings its servers", "нидер", []string{"Нидерланды", "NL-1"}},
+		{"child matched brings its parent", "de-2", []string{"Германия", "🇩🇪 DE-2"}},
+		{"child match narrows to that child", "nl1.example.ru", []string{"Нидерланды", "NL-1"}},
+		{"single-server profile stands alone", "сша", []string{"США"}},
+		{"a column other than the name", "vmess", []string{"США"}},
+		{"transport matches inside a balancer", "ws", []string{"Германия", "🇩🇪 DE-1", "🇩🇪 DE-2"}},
+		{"nothing matched", "исландия", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := newList(balancerFixture())
+			m.filter.input.SetValue(c.query)
+			if got := rowNames(m.visibleRows()); !equal(got, c.want) {
+				t.Errorf("filter %q = %v, want %v", c.query, got, c.want)
+			}
+		})
+	}
+}
+
+// A folded balancer no longer hides its servers from the filter, and folding is
+// off while one is active — so s cannot take away a row the filter put there.
+func TestList_FilterIgnoresFoldsAndDisablesS(t *testing.T) {
+	m := newList(balancerFixture())
+	if m.expanded[0] {
+		t.Fatal("fixture should start folded")
+	}
+	m.filter.input.SetValue("de-1")
+	if got := rowNames(m.visibleRows()); !equal(got, []string{"Германия", "🇩🇪 DE-1"}) {
+		t.Fatalf("folded balancer hid its matching server: %v", got)
+	}
+
+	// s on the balancer head must not fold the match away.
+	m.cursor = 0
+	m = press(m, "s")
+	if got := rowNames(m.visibleRows()); !equal(got, []string{"Германия", "🇩🇪 DE-1"}) {
+		t.Errorf("s changed a filtered list: %v", got)
+	}
+	if strings.Contains(m.keys(), "s серверы") {
+		t.Error("legend still offers s while the filter is active")
+	}
+
+	// Clearing the filter hands the hand-set fold state back untouched.
+	m.filter.input.SetValue("")
+	if m.expanded[0] {
+		t.Error("s leaked into the fold state while filtering")
 	}
 }

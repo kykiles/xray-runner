@@ -200,18 +200,76 @@ func (m listModel) children(pi int, p subscription.Profile) []listRow {
 	return out
 }
 
-// visibleRows are the rows matching the filter, over the same columns the table
+// filtering reports the search terms, or nil when the list is unfiltered.
+func (m listModel) filtering() []string {
+	return strings.Fields(strings.ToLower(strings.TrimSpace(m.filter.value())))
+}
+
+// rowMatches asks the filter about one row, over the same columns the table
 // shows.
+func rowMatches(r listRow, terms []string) bool {
+	return matchTerms(strings.ToLower(r.name)+" "+entryHaystack(r.entry), terms)
+}
+
+// visibleRows are the rows the filter leaves, as a tree rather than a flat
+// list. A balancer matching by name brings all of its servers along; a server
+// matching inside a balancer brings its balancer along, so the row stays
+// reachable and its group is still visible. Folds are ignored while filtering —
+// a match hidden inside a folded balancer used to be dropped entirely, and
+// unfolding a matched balancer then hid the very servers behind it.
 func (m listModel) visibleRows() []listRow {
-	all := m.rows()
-	terms := strings.Fields(strings.ToLower(strings.TrimSpace(m.filter.value())))
+	terms := m.filtering()
 	if len(terms) == 0 {
-		return all
+		return m.rows()
 	}
-	out := make([]listRow, 0, len(all))
-	for _, r := range all {
-		if matchTerms(strings.ToLower(r.name)+" "+entryHaystack(r.entry), terms) {
-			out = append(out, r)
+	if m.flat {
+		all := m.rows()
+		out := make([]listRow, 0, len(all))
+		for _, r := range all {
+			if rowMatches(r, terms) {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+
+	var out []listRow
+	for pi, p := range m.profiles {
+		// A single-server profile is a plain server row: it stands or falls alone.
+		if p.Balancer == nil && len(p.Entries) == 1 {
+			e := p.Entries[0]
+			e.Remarks = profileName(p)
+			r := listRow{kind: rowServer, profIdx: pi, entry: e, name: e.Remarks}
+			if rowMatches(r, terms) {
+				out = append(out, r)
+			}
+			continue
+		}
+
+		kind := rowGroup
+		if p.Balancer != nil {
+			kind = rowBalancer
+		}
+		head := listRow{kind: kind, profIdx: pi, entry: face(p), name: profileName(p)}
+		// The head answers for its name alone. Its other columns are borrowed from
+		// the first server, so matching them would make "de-1" pull in every
+		// sibling while "de-2" pulled in none.
+		headHit := matchTerms(strings.ToLower(head.name), terms)
+
+		kids := make([]listRow, 0, len(p.Entries))
+		for _, e := range p.Entries {
+			kid := listRow{kind: rowServer, profIdx: pi, entry: e, name: orDash(mark(e)), depth: 1}
+			if headHit || rowMatches(kid, terms) {
+				kids = append(kids, kid)
+			}
+		}
+		switch {
+		case len(kids) > 0:
+			out = append(out, head)
+			out = append(out, kids...)
+		case len(p.Entries) == 0 && headHit:
+			// A profile the panel shipped without servers still answers for itself.
+			out = append(out, head)
 		}
 	}
 	return out
@@ -388,10 +446,12 @@ func (m *listModel) clearBenchStatus() {
 	}
 }
 
-// toggleFold unfolds/folds a balancer or group row.
+// toggleFold unfolds/folds a balancer or group row. A filtered list decides its
+// own shape, so folding is off while one is active — and the fold state the user
+// set by hand survives untouched for when the filter is cleared.
 func (m *listModel) toggleFold() {
 	r, ok := m.current()
-	if !ok || r.kind == rowServer {
+	if !ok || r.kind == rowServer || len(m.filtering()) > 0 {
 		return
 	}
 	m.expanded[r.profIdx] = !m.expanded[r.profIdx]
@@ -565,7 +625,7 @@ func (m listModel) keys() string {
 	}
 	keys := "  ↑/↓ выбор · → подключить"
 	r, ok := m.current()
-	if ok && (r.kind == rowBalancer || r.kind == rowGroup) {
+	if ok && (r.kind == rowBalancer || r.kind == rowGroup) && len(m.filtering()) == 0 {
 		keys += " · s серверы"
 	}
 	if ok && r.kind != rowGroup {
