@@ -35,7 +35,7 @@ func TestSubs_LoadUsesLiveListAfterAdd(t *testing.T) {
 	// Add a second subscription: Reload now returns two entries.
 	stored = append(stored, subscription.NamedSubscription{Name: "new", URL: "https://new.example/sub"})
 	m = feed(m, typeURL("https://new.example/sub")...)
-	m = feed(m, tea.KeyMsg{Type: tea.KeyEnter}) // confirm add → cursor lands on "new"
+	m = confirmAdd(t, m) // confirm add → cursor lands on "new"
 
 	// Open the highlighted (newly added) subscription.
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -49,6 +49,22 @@ func TestSubs_LoadUsesLiveListAfterAdd(t *testing.T) {
 	if loadedURL != "https://new.example/sub" {
 		t.Fatalf("Load got %q, want the newly added subscription URL", loadedURL)
 	}
+}
+
+// confirmAdd presses enter on the add prompt and delivers the result. Adding
+// goes to the panel for the subscription's name, so it lands as a message
+// rather than finishing inside the key handler.
+func confirmAdd(t *testing.T, m tea.Model) tea.Model {
+	t.Helper()
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter on the add prompt scheduled nothing")
+	}
+	msg := cmd()
+	if _, ok := msg.(addedMsg); !ok {
+		t.Fatalf("expected addedMsg, got %T", msg)
+	}
+	return feed(m, msg)
 }
 
 func feed(m tea.Model, msgs ...tea.Msg) tea.Model {
@@ -97,8 +113,7 @@ func TestSubs_ReloadFailureIsReported(t *testing.T) {
 	t.Run("after_add", func(t *testing.T) {
 		m := subsModel{subs: stored, cb: cb, choice: -1, mode: subsAdding, input: textinput.New()}
 		m.input.SetValue("https://three.example/sub")
-		got, _ := m.updateAdding(tea.KeyMsg{Type: tea.KeyEnter})
-		final := got.(subsModel)
+		final := confirmAdd(t, m).(subsModel)
 		if !strings.Contains(final.note.view(), "подписки не читаются") {
 			t.Errorf("status = %q, want the reload error", final.note.view())
 		}
@@ -170,5 +185,53 @@ func TestSubs_ShortListIsNotWindowed(t *testing.T) {
 	}
 	if strings.Contains(view, "ещё") {
 		t.Error("a list that fits must not show scroll indicators")
+	}
+}
+
+// Task #6: adding now goes to the panel for a name, so the screen must say so
+// instead of freezing, and a validation failure must hand the typed URL back
+// rather than dropping the user into the list.
+func TestSubs_AddShowsTheWaitAndKeepsTheUrlOnFailure(t *testing.T) {
+	cb := SubsCallbacks{
+		Add:    func(string) error { return errors.New("не похоже на ссылку подписки") },
+		Reload: func() ([]subscription.NamedSubscription, error) { return nil, nil },
+	}
+	m := subsModel{cb: cb, choice: -1, mode: subsAdding, input: textinput.New()}
+	m.input.SetValue("мусор")
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	waiting := next.(subsModel)
+	if waiting.mode != subsLoading {
+		t.Errorf("mode = %v while the panel is being asked, want subsLoading", waiting.mode)
+	}
+	if view := waiting.View(); !strings.Contains(view, "Получение названия") {
+		t.Errorf("the wait is not on screen:\n%s", view)
+	}
+
+	final := feed(waiting, cmd()).(subsModel)
+	if final.mode != subsAdding {
+		t.Errorf("mode = %v after a rejected URL, want back at the prompt", final.mode)
+	}
+	if final.input.Value() != "мусор" {
+		t.Errorf("typed URL was dropped: %q", final.input.Value())
+	}
+	if !strings.Contains(final.note.view(), "не похоже на ссылку") {
+		t.Errorf("notice = %q, want the reason", final.note.view())
+	}
+}
+
+// Opening a subscription and adding one both wait on the network, and the two
+// waits must not describe each other.
+func TestSubs_WaitLinesAreDistinct(t *testing.T) {
+	cb := SubsCallbacks{Load: func(string) error { return nil }}
+	m := subsModel{
+		subs:   []subscription.NamedSubscription{{Name: "панель", URL: "https://x.example/sub"}},
+		cb:     cb,
+		choice: -1,
+		input:  textinput.New(),
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if view := next.(subsModel).View(); !strings.Contains(view, "Загрузка серверов") {
+		t.Errorf("opening a subscription shows the wrong wait:\n%s", view)
 	}
 }

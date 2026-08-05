@@ -169,7 +169,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 	}
 
 	cb := tui.SubsCallbacks{
-		Add:    addSubscription,
+		Add:    a.addAndName,
 		Delete: subscription.RemoveSubscription,
 		Reload: subscription.LoadSubscriptions,
 		// Load fetches the chosen subscription's profiles from inside the
@@ -202,11 +202,20 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 		case levelSubs:
 			// subIdx carries the last opened subscription back in, so returning
 			// from a subscription lands the cursor on it instead of the top.
-			subs, choice, action, err := tui.SelectSubscription(a.nav.subs, a.nav.subIdx, cb)
+			_, choice, action, err := tui.SelectSubscription(a.nav.subs, a.nav.subIdx, cb)
 			if err != nil {
 				return nil, fmt.Errorf("TUI: %w", err)
 			}
-			a.nav.subs = subs
+			// The list comes back from disk, not from the screen's copy of it.
+			// The screen captured its copy before cb.Load ran, and Load is where
+			// adoptPanelTitle learns the panel's name for the subscription — taking
+			// the screen's copy here threw that name away, so it only showed up
+			// after an explicit refresh in the server list (task #6). Everything
+			// that changes the list (add, delete, rename) writes to disk first, so
+			// disk is the one copy that is never behind.
+			if subs, err := subscription.LoadSubscriptions(); err == nil {
+				a.nav.subs = subs
+			}
 			if action == tui.SubsQuit {
 				// ErrUserQuit propagates up to main for a single clean exit (R-4).
 				return nil, ErrUserQuit

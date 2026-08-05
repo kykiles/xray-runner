@@ -46,6 +46,11 @@ const (
 // loadedMsg carries the result of SubsCallbacks.Load back into the model.
 type loadedMsg struct{ err error }
 
+// addedMsg carries the result of SubsCallbacks.Add back into the model. Adding
+// now goes to the panel for the subscription's name, so it cannot run inside
+// the key handler without freezing the screen for the length of a request.
+type addedMsg struct{ err error }
+
 type subsModel struct {
 	subs   []subscription.NamedSubscription
 	cb     SubsCallbacks
@@ -53,6 +58,9 @@ type subsModel struct {
 	mode   subsMode
 	input  textinput.Model
 	note   notice
+	// busy is what the waiting line says while a callback is in flight. Both
+	// waits look the same on screen and differ only in wording.
+	busy   string
 	action SubsAction
 	choice int
 	// reveal shows the selected subscription's full URL. Masking stays on by
@@ -119,6 +127,27 @@ func (m subsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.note.tick(tick)
 	}
 
+	if am, ok := msg.(addedMsg); ok {
+		if am.err != nil {
+			// Back to the prompt with the typed URL intact, so a typo can be fixed
+			// instead of retyped.
+			m.mode = subsAdding
+			m.note.fail(am.err.Error())
+			return m, nil
+		}
+		m.mode = subsList
+		// M-1: a stale list is worse than a visible error — the new subscription
+		// would be missing while the notice claimed it was added.
+		subs, err := m.cb.Reload()
+		if err != nil {
+			m.note.fail(fmt.Sprintf("Список подписок не перечитан: %v", err))
+			return m, nil
+		}
+		m.subs = subs
+		m.cursor = len(m.subs) - 1
+		return m, m.note.ok("Подписка добавлена")
+	}
+
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
@@ -168,6 +197,7 @@ func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// stays up and the shell does not flash before the next menu (task #3).
 		m.choice = m.cursor
 		m.mode = subsLoading
+		m.busy = "Загрузка серверов…"
 		m.note.clear()
 		url := m.subs[m.cursor].URL
 		load := m.cb.Load
@@ -211,21 +241,13 @@ func (m subsModel) updateAdding(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.note.fail("URL не может быть пустым")
 			return m, nil
 		}
-		if err := m.cb.Add(rawURL); err != nil {
-			m.note.fail(err.Error())
-			return m, nil
-		}
-		m.mode = subsList
-		// M-1: a stale list is worse than a visible error — the new subscription
-		// would be missing while the status claimed it was added.
-		subs, err := m.cb.Reload()
-		if err != nil {
-			m.note.fail(fmt.Sprintf("Список подписок не перечитан: %v", err))
-			return m, nil
-		}
-		m.subs = subs
-		m.cursor = len(m.subs) - 1
-		return m, m.note.ok("Подписка добавлена")
+		// Saving is instant; asking the panel what it calls itself is not, so the
+		// wait happens here in the loading state rather than behind a frozen screen.
+		m.mode = subsLoading
+		m.busy = "Получение названия…"
+		m.note.clear()
+		add := m.cb.Add
+		return m, func() tea.Msg { return addedMsg{err: add(rawURL)} }
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(key)
@@ -321,7 +343,7 @@ func (m subsModel) View() string {
 	b.WriteString(moreDown(below))
 
 	if m.mode == subsLoading {
-		b.WriteString("  " + dimStyle.Render("⏳ Загрузка серверов…") + "\n")
+		b.WriteString("  " + dimStyle.Render("⏳ "+m.busy) + "\n")
 		return b.String()
 	}
 

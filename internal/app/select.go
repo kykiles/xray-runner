@@ -98,7 +98,7 @@ func (a *App) migrateLegacyURL() error {
 		if l.value == "" {
 			continue
 		}
-		if err := addSubscription(l.value); err != nil {
+		if _, err := addSubscription(l.value); err != nil {
 			return fmt.Errorf("%s: %w", l.name, err)
 		}
 		slog.Info("migrated legacy url from .env into the subscription list", "var", l.name)
@@ -180,23 +180,51 @@ func (a *App) rememberSelection(subURL string, e *subscription.SubEntry) {
 
 // addSubscription validates and stores a subscription URL; it runs inside the
 // TUI, so it must not print — problems come back as errors.
-func addSubscription(rawURL string) error {
+// It reports the URL actually stored, which differs from the one typed when a
+// happ:// wrapper was unwrapped — the caller needs that one to ask the panel
+// what it calls itself.
+func addSubscription(rawURL string) (string, error) {
 	// A happ://crypt… link is an encrypted wrapper around the real URL. Unwrap it
 	// on the way in so the stored list holds something readable and everything
 	// downstream (masking, fetching, naming) works unchanged.
 	if subscription.IsHappLink(rawURL) {
 		plain, err := subscription.DecryptHappLink(rawURL)
 		if err != nil {
-			return err
+			return "", err
 		}
 		rawURL = plain
 	}
 	if err := validateSubscriptionInput(rawURL); err != nil {
-		return err
+		return "", err
 	}
 	if err := subscription.SaveSubscription(rawURL); err != nil {
-		return fmt.Errorf("ошибка сохранения: %w", err)
+		return "", fmt.Errorf("ошибка сохранения: %w", err)
 	}
+	return rawURL, nil
+}
+
+// addAndName stores the subscription, then asks the panel for its name so the
+// list reads "alohavpnbot" from the first moment instead of the host the URL
+// happens to have. The name is cosmetic: a panel that is down, a token that has
+// expired or no network at all must not stop the subscription being saved, so
+// a failed fetch is logged and swallowed (task #6). The name is picked up on
+// the first open anyway.
+func (a *App) addAndName(rawURL string) error {
+	stored, err := addSubscription(rawURL)
+	if err != nil {
+		return err
+	}
+	// A bare vless:// link is its own server — there is no panel to ask.
+	if subscription.IsBareLink(stored) {
+		return nil
+	}
+	hwid := config.GetOrCreateHWID(a.cfg.HWID)
+	_, info, err := subscription.FetchProfilesWithHWID(stored, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
+	if err != nil {
+		slog.Warn("название подписки не получено, останется адрес", "error", err)
+		return nil
+	}
+	a.adoptPanelTitle(stored, info.Title)
 	return nil
 }
 
