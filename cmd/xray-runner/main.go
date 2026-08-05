@@ -41,7 +41,7 @@ func main() {
 
 	cfg, err := config.Load(*flagConfig)
 	if err != nil {
-		log.Fatalf("❌ %v", err)
+		log.Fatalf("%v", err)
 	}
 	// Colors are tunable from .env (task #6); apply them once the environment is
 	// loaded, before any TUI screen renders.
@@ -53,12 +53,12 @@ func main() {
 			subURL = args[0]
 		}
 		if subURL == "" {
-			fmt.Fprintln(os.Stderr, "❌ dump-links: не задан URL подписки (аргумент или SUBSCRIPTION_URL)")
+			fmt.Fprintln(os.Stderr, "dump-links: не задан URL подписки (аргумент или SUBSCRIPTION_URL)")
 			os.Exit(2)
 		}
 		path, err := dumpLinks(cfg, subURL)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("✅ Ссылки сохранены: %s\n", path)
@@ -87,12 +87,11 @@ func main() {
 		// deferred cleanup has already released proxies/firewall by this point.
 		if errors.Is(err, app.ErrUserQuit) || errors.Is(err, context.Canceled) {
 			slog.Info("session ended by user")
-			fmt.Println("\n👋 До встречи!")
 			return
 		}
 		slog.Error("fatal", "error", err)
 		// Logs go to the file only, so a fatal error must still reach the user.
-		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		// U-2: distinct exit codes for scripts/systemd — 2 means the requested
 		// server/subscription could not be selected, 1 is a runtime failure.
 		if errors.Is(err, app.ErrSelection) {
@@ -102,5 +101,4 @@ func main() {
 	}
 
 	slog.Info("session ended")
-	fmt.Println("\n👋 До встречи!")
 }

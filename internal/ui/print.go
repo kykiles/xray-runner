@@ -7,7 +7,7 @@ import "fmt"
 // render them.
 
 func Error(text string) {
-	fmt.Printf("  %s❌%s %s\n", colorRed, colorReset, text)
+	fmt.Printf("  %s%s%s\n", colorRed, text, colorReset)
 }
 
 func Warn(text string) {
