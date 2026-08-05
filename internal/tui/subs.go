@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"xray-runner/internal/subscription"
 )
@@ -257,7 +258,8 @@ func (m subsModel) updateConfirmDelete(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m subsModel) View() string {
 	var b strings.Builder
-	b.WriteString(renderLogo(m.width, m.height) + "\n\n")
+	logo := renderLogo(m.width, m.height)
+	b.WriteString(logo + "\n\n")
 
 	if m.mode == subsAdding {
 		b.WriteString("  " + textStyle.Render("Вставьте URL подписки (http/https) или ссылку на сервер") + "\n")
@@ -270,10 +272,28 @@ func (m subsModel) View() string {
 		return b.String()
 	}
 
+	keys := "  ↑/↓ выбор · → открыть · s показать URL · + добавить · d удалить · p процессы · u обновить · q выход"
+	if m.reveal {
+		keys = "  ↑/↓ выбор · → открыть · s скрыть URL · + добавить · d удалить · p процессы · u обновить · q выход"
+	}
+
 	if len(m.subs) == 0 {
 		b.WriteString(dimStyle.Render("  Подписок нет — нажмите + чтобы добавить") + "\n")
 	}
-	for i, s := range m.subs {
+	// The rows scroll inside their own window, the way the server list does:
+	// printing every subscription made the terminal scroll instead, and the
+	// wordmark went off the top with it. Chrome around the rows is the logo's
+	// blank line, the two scroll indicators and the notice — four lines, plus
+	// however many the legend wraps to.
+	rows := len(m.subs)
+	if m.height > 0 {
+		rows = max(1, m.height-(lipgloss.Height(logo)+4+legendHeight(m.width, keys)))
+	}
+	start, end, above, below := window(len(m.subs), m.cursor, rows)
+
+	b.WriteString(moreUp(above))
+	for i := start; i < end; i++ {
+		s := m.subs[i]
 		cursor := "  "
 		// Task #1: the list shows only the panel name, never the URL — the token
 		// stays off screen until asked for with s. The panel writes its name with
@@ -291,12 +311,10 @@ func (m subsModel) View() string {
 		}
 		b.WriteString("  " + cursor + line + "\n")
 	}
-
-	// The notice gets the same air as on the server screen, where the scroll
-	// indicator happens to separate it from the list. Both lines are written
-	// whether or not there is a notice: an appearing message must not shove the
-	// legend down the screen (that was the point of task #3).
-	b.WriteString("\n")
+	// moreDown always occupies its line, so the notice below keeps its place
+	// instead of jumping as the window scrolls past the end of the list — and it
+	// gives the notice the same air the server screen has (task #3).
+	b.WriteString(moreDown(below))
 
 	if m.mode == subsLoading {
 		b.WriteString("  " + dimStyle.Render("⏳ Загрузка серверов…") + "\n")
@@ -309,10 +327,6 @@ func (m subsModel) View() string {
 		b.WriteString("  " + m.status + "\n")
 	}
 
-	keys := "  ↑/↓ выбор · → открыть · s показать URL · + добавить · d удалить · p процессы · u обновить · q выход"
-	if m.reveal {
-		keys = "  ↑/↓ выбор · → открыть · s скрыть URL · + добавить · d удалить · p процессы · u обновить · q выход"
-	}
 	b.WriteString(legend(m.width, keys))
 	return b.String()
 }
