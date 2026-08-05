@@ -86,11 +86,11 @@ func TestSubs_ReloadFailureIsReported(t *testing.T) {
 		m := subsModel{subs: stored, cb: cb, choice: -1, input: textinput.New()}
 		got, _ := m.updateConfirmDelete(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 		final := got.(subsModel)
-		if !strings.Contains(final.status, "подписки не читаются") {
-			t.Errorf("status = %q, want the reload error", final.status)
+		if !strings.Contains(final.note.view(), "подписки не читаются") {
+			t.Errorf("status = %q, want the reload error", final.note.view())
 		}
-		if strings.Contains(final.status, "удалена") {
-			t.Errorf("status claims success despite a stale list: %q", final.status)
+		if strings.Contains(final.note.view(), "удалена") {
+			t.Errorf("status claims success despite a stale list: %q", final.note.view())
 		}
 	})
 
@@ -99,8 +99,8 @@ func TestSubs_ReloadFailureIsReported(t *testing.T) {
 		m.input.SetValue("https://three.example/sub")
 		got, _ := m.updateAdding(tea.KeyMsg{Type: tea.KeyEnter})
 		final := got.(subsModel)
-		if !strings.Contains(final.status, "подписки не читаются") {
-			t.Errorf("status = %q, want the reload error", final.status)
+		if !strings.Contains(final.note.view(), "подписки не читаются") {
+			t.Errorf("status = %q, want the reload error", final.note.view())
 		}
 	})
 }

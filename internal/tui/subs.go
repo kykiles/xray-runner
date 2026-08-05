@@ -52,7 +52,7 @@ type subsModel struct {
 	cursor int
 	mode   subsMode
 	input  textinput.Model
-	status string
+	note   notice
 	action SubsAction
 	choice int
 	// reveal shows the selected subscription's full URL. Masking stays on by
@@ -103,7 +103,7 @@ func (m subsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if lm, ok := msg.(loadedMsg); ok {
 		if lm.err != nil {
 			m.mode = subsList
-			m.status = errStyle.Render(lm.err.Error())
+			m.note.fail(lm.err.Error())
 			return m, nil
 		}
 		m.action = SubsSelected
@@ -113,6 +113,10 @@ func (m subsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width, m.height = ws.Width, ws.Height
 		return m, nil
+	}
+
+	if tick, ok := msg.(noticeTickMsg); ok {
+		return m, m.note.tick(tick)
 	}
 
 	key, ok := msg.(tea.KeyMsg)
@@ -164,7 +168,7 @@ func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// stays up and the shell does not flash before the next menu (task #3).
 		m.choice = m.cursor
 		m.mode = subsLoading
-		m.status = ""
+		m.note.clear()
 		url := m.subs[m.cursor].URL
 		load := m.cb.Load
 		return m, func() tea.Msg { return loadedMsg{err: load(url)} }
@@ -174,10 +178,10 @@ func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = subsAdding
 		m.input.SetValue("")
 		m.input.Focus()
-		m.status = ""
+		m.note.clear()
 	case "d", "в":
 		if len(m.subs) == 0 {
-			m.status = errStyle.Render("Нет подписок для удаления")
+			m.note.fail("Нет подписок для удаления")
 			return m, nil
 		}
 		m.mode = subsConfirmDelete
@@ -199,16 +203,16 @@ func (m subsModel) updateAdding(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.mode = subsList
-		m.status = ""
+		m.note.clear()
 		return m, nil
 	case tea.KeyEnter:
 		rawURL := strings.TrimSpace(m.input.Value())
 		if rawURL == "" {
-			m.status = errStyle.Render("URL не может быть пустым")
+			m.note.fail("URL не может быть пустым")
 			return m, nil
 		}
 		if err := m.cb.Add(rawURL); err != nil {
-			m.status = errStyle.Render(err.Error())
+			m.note.fail(err.Error())
 			return m, nil
 		}
 		m.mode = subsList
@@ -216,13 +220,12 @@ func (m subsModel) updateAdding(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// would be missing while the status claimed it was added.
 		subs, err := m.cb.Reload()
 		if err != nil {
-			m.status = errStyle.Render(fmt.Sprintf("Список подписок не перечитан: %v", err))
+			m.note.fail(fmt.Sprintf("Список подписок не перечитан: %v", err))
 			return m, nil
 		}
 		m.subs = subs
 		m.cursor = len(m.subs) - 1
-		m.status = okStyle.Render("Подписка добавлена")
-		return m, nil
+		return m, m.note.ok("Подписка добавлена")
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(key)
@@ -230,30 +233,31 @@ func (m subsModel) updateAdding(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m subsModel) updateConfirmDelete(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
 	switch key.String() {
 	case "y", "Y", "н", "Н", "enter":
 		name := m.subs[m.cursor].Name
 		switch err := m.cb.Delete(m.cursor); {
 		case err != nil:
-			m.status = errStyle.Render(fmt.Sprintf("Ошибка удаления: %v", err))
+			m.note.fail(fmt.Sprintf("Ошибка удаления: %v", err))
 		default:
 			// M-1: without the reloaded list the deleted subscription stays on
 			// screen and can still be opened, so report the failure instead of
 			// claiming success.
 			subs, rerr := m.cb.Reload()
 			if rerr != nil {
-				m.status = errStyle.Render(fmt.Sprintf("Список подписок не перечитан: %v", rerr))
+				m.note.fail(fmt.Sprintf("Список подписок не перечитан: %v", rerr))
 				break
 			}
 			m.subs = subs
 			if m.cursor >= len(m.subs) && m.cursor > 0 {
 				m.cursor--
 			}
-			m.status = okStyle.Render(fmt.Sprintf("Подписка «%s» удалена", name))
+			cmd = m.note.ok(fmt.Sprintf("Подписка «%s» удалена", name))
 		}
 	}
 	m.mode = subsList
-	return m, nil
+	return m, cmd
 }
 
 func (m subsModel) View() string {
@@ -265,8 +269,8 @@ func (m subsModel) View() string {
 		b.WriteString("  " + textStyle.Render("Вставьте URL подписки (http/https) или ссылку на сервер") + "\n")
 		b.WriteString("  " + textStyle.Render("(vless/vmess/ss/hysteria2):") + "\n")
 		b.WriteString("  " + m.input.View() + "\n")
-		if m.status != "" {
-			b.WriteString("\n  " + m.status + "\n")
+		if !m.note.empty() {
+			b.WriteString("\n  " + m.note.view() + "\n")
 		}
 		b.WriteString(legend(m.width, "  enter добавить · esc назад · ctrl+c выход"))
 		return b.String()
@@ -324,7 +328,7 @@ func (m subsModel) View() string {
 	if m.mode == subsConfirmDelete {
 		b.WriteString("  " + warnStyle.Render(fmt.Sprintf("Удалить «%s»? (y/n)", m.subs[m.cursor].Name)) + "\n")
 	} else {
-		b.WriteString("  " + m.status + "\n")
+		b.WriteString("  " + m.note.view() + "\n")
 	}
 
 	b.WriteString(legend(m.width, keys))

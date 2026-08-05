@@ -384,7 +384,7 @@ func TestList_ConfigViewer(t *testing.T) {
 	// On a balancer row.
 	view := press(m, "c")
 	if !view.cfg.open() {
-		t.Fatalf("c did not open the viewer on a balancer; status %q", view.status)
+		t.Fatalf("c did not open the viewer on a balancer; status %q", view.note.view())
 	}
 	if out := view.View(); !strings.Contains(out, "balancers") || !strings.Contains(out, "Германия · конфиг") {
 		t.Fatalf("balancer config view missing data:\n%s", out)
@@ -408,11 +408,11 @@ func TestList_BenchStatusClearsOnNavigation(t *testing.T) {
 	m := newList(flatFixture())
 	done, _ := m.Update(benchDoneMsg{})
 	m = done.(listModel)
-	if !strings.Contains(m.status, "Пинг завершён") {
-		t.Fatalf("status after ping = %q, want the completion notice", m.status)
+	if !strings.Contains(m.note.view(), "Пинг завершён") {
+		t.Fatalf("status after ping = %q, want the completion notice", m.note.view())
 	}
 	next, _ := m.updateKey(tea.KeyMsg{Type: tea.KeyDown})
-	if got := next.(listModel).status; got != "" {
+	if got := next.(listModel).note.view(); got != "" {
 		t.Errorf("status after navigation = %q, want cleared", got)
 	}
 }

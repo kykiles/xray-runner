@@ -87,7 +87,7 @@ type listModel struct {
 
 	refreshing  bool
 	lastRefresh time.Time // when the list last came from the panel — see refreshCooldown
-	status      string
+	note        notice
 	width       int
 	height      int
 
@@ -337,13 +337,12 @@ func (m listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.run.stop()
-		m.status = okStyle.Render("Пинг завершён")
-		return m, nil
+		return m, m.note.ok("Пинг завершён")
 	case listRefreshDoneMsg:
 		m.refreshing = false
 		m.lastRefresh = time.Now()
 		if msg.err != nil {
-			m.status = errStyle.Render(fmt.Sprintf("Ошибка обновления: %v", msg.err))
+			m.note.fail(fmt.Sprintf("Ошибка обновления: %v", msg.err))
 			return m, nil
 		}
 		m.profiles = msg.profiles
@@ -352,8 +351,9 @@ func (m listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		clear(m.pings)     // the list is new; old numbers would outlive their servers
 		clear(m.profPings) // the same for balancers
 		m.cursor = 0
-		m.status = okStyle.Render(fmt.Sprintf("Подписка обновлена: %d серверов", len(subscription.Flatten(msg.profiles))))
-		return m, nil
+		return m, m.note.ok(fmt.Sprintf("Подписка обновлена: %d серверов", len(subscription.Flatten(msg.profiles))))
+	case noticeTickMsg:
+		return m, m.note.tick(msg)
 	case tea.KeyMsg:
 		return m.updateKey(msg)
 	}
@@ -408,7 +408,7 @@ func (m listModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "/", "f", "а":
 		m.filter.start()
-		m.status = ""
+		m.note.clear()
 	case "s", "ы":
 		m.clearBenchStatus()
 		m.toggleFold()
@@ -443,7 +443,7 @@ func (m *listModel) clampCursor() {
 // clearBenchStatus drops the "Пинг завершён" notice; pings themselves stay.
 func (m *listModel) clearBenchStatus() {
 	if !m.run.running {
-		m.status = ""
+		m.note.clear()
 	}
 }
 
@@ -476,11 +476,11 @@ func (m listModel) activate() (tea.Model, tea.Cmd) {
 	default: // rowServer
 		e := r.entry
 		if !supportedProtocols[e.Protocol] {
-			m.status = warnStyle.Render(fmt.Sprintf("Протокол %s не поддерживается — выберите другой", e.Protocol))
+			m.note.warn(fmt.Sprintf("Протокол %s не поддерживается — выберите другой", e.Protocol))
 			return m, nil
 		}
 		if err := e.Validate(); err != nil {
-			m.status = warnStyle.Render(fmt.Sprintf("Запись невалидна: %v — выберите другую", err))
+			m.note.warn(fmt.Sprintf("Запись невалидна: %v — выберите другую", err))
 			return m, nil
 		}
 		m.action = ListConnect
@@ -536,7 +536,7 @@ func (m listModel) startBench() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.benchTargets = targets
-	m.status = ""
+	m.note.clear()
 
 	srvBench, profBench := m.srvBench, m.profBench
 	base := len(srvEntries)
@@ -569,11 +569,11 @@ func (m listModel) startRefresh() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if wait := refreshCooldown - time.Since(m.lastRefresh); wait > 0 {
-		m.status = warnStyle.Render(fmt.Sprintf("Только что обновлялось — подождите %ds", int(wait.Seconds())+1))
+		m.note.warn(fmt.Sprintf("Только что обновлялось — подождите %ds", int(wait.Seconds())+1))
 		return m, nil
 	}
 	m.refreshing = true
-	m.status = ""
+	m.note.clear()
 	refresh := m.refresh
 	return m, func() tea.Msg {
 		profiles, err := refresh()
@@ -597,7 +597,7 @@ func (m *listModel) showConfig() {
 		e := r.entry
 		text, err := m.srvPreview(&e, r.profIdx)
 		if err != nil {
-			m.status = errStyle.Render(fmt.Sprintf("Конфиг недоступен: %v", err))
+			m.note.fail(fmt.Sprintf("Конфиг недоступен: %v", err))
 			return
 		}
 		title := orDash(mark(e))
@@ -612,7 +612,7 @@ func (m *listModel) showConfig() {
 		p := m.profiles[r.profIdx]
 		text, err := m.profPreview(p)
 		if err != nil {
-			m.status = errStyle.Render(fmt.Sprintf("Конфиг недоступен: %v", err))
+			m.note.fail(fmt.Sprintf("Конфиг недоступен: %v", err))
 			return
 		}
 		m.cfg.show(profileName(p), text, saver(m.saveCfg, profileName(p), text))
@@ -713,7 +713,7 @@ func (m listModel) View() string {
 	case m.refreshing:
 		b.WriteString("  " + dimStyle.Render("⏳ Обновление подписки...") + "\n")
 	default:
-		b.WriteString("  " + m.status + "\n")
+		b.WriteString("  " + m.note.view() + "\n")
 	}
 
 	b.WriteString(legend(m.width, keys))
