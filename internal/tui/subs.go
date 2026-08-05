@@ -348,7 +348,7 @@ func (m subsModel) View() string {
 	}
 
 	if m.mode == subsConfirmDelete {
-		b.WriteString("  " + warnStyle.Render(fmt.Sprintf("Удалить «%s»? (y/n)", m.subs[m.cursor].Name)) + "\n")
+		b.WriteString("  " + warnStyle.Render(fmt.Sprintf("Удалить «%s»? (y/n)", stripEmoji(m.subs[m.cursor].Name))) + "\n")
 	} else {
 		b.WriteString("  " + m.note.view() + "\n")
 	}
