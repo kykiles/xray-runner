@@ -730,18 +730,15 @@ func (a *App) statusInfo(t *target, ports sessionPorts) tui.StatusInfo {
 
 	if t.isProfile() {
 		p := a.nav.profiles[a.nav.profIdx]
-		info.Protocol = fmt.Sprintf("%s · %d %s", p.Mode(), len(p.Entries), plural(len(p.Entries)))
+		// The protocol row answers "what am I connected through", and it answered
+		// with the balancing strategy — which is not a protocol. The strategy moved
+		// to its own row and this one now names the pool's transport stack.
+		info.Protocol = poolProtocol(p.Entries)
+		info.Balancer = fmt.Sprintf("%s · %d %s", p.Mode(), len(p.Entries), plural(len(p.Entries)))
 	} else {
 		e := t.entry
 		info.Endpoint = fmt.Sprintf("%s:%d", e.Address, e.Port)
-		parts := []string{e.Protocol}
-		if e.Network != "" {
-			parts = append(parts, e.Network)
-		}
-		if e.Security != "" {
-			parts = append(parts, e.Security)
-		}
-		info.Protocol = strings.Join(parts, " / ")
+		info.Protocol = entryProtocol(*e)
 	}
 
 	if a.mode == "tun" {
@@ -771,6 +768,38 @@ func (a *App) statusInfo(t *target, ports sessionPorts) tui.StatusInfo {
 		info.Apps = a.splitMatched
 	}
 	return info
+}
+
+// entryProtocol names one server's transport stack: "vless / tcp / reality".
+func entryProtocol(e subscription.SubEntry) string {
+	parts := []string{e.Protocol}
+	if e.Network != "" {
+		parts = append(parts, e.Network)
+	}
+	if e.Security != "" {
+		parts = append(parts, e.Security)
+	}
+	return strings.Join(parts, " / ")
+}
+
+// poolProtocol names what the servers behind a balancer have in common. They
+// are interchangeable endpoints and normally share a stack, so the pool's
+// answer is the connection's answer. When they do not share one, no single
+// answer is true — and saying so beats borrowing the first server's and
+// presenting it as the one in use, which is the mistake this row is fixing.
+// Xray picks an outbound per connection, so there is no "current server" to
+// name: several are live at once.
+func poolProtocol(entries []subscription.SubEntry) string {
+	if len(entries) == 0 {
+		return "—"
+	}
+	first := entryProtocol(entries[0])
+	for _, e := range entries[1:] {
+		if entryProtocol(e) != first {
+			return "смешанные"
+		}
+	}
+	return first
 }
 
 func plural(n int) string {

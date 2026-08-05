@@ -248,3 +248,49 @@ func TestResolveScriptedTarget_KeepsPanelRouting(t *testing.T) {
 	}
 	validateWithXray(t, raw)
 }
+
+// Task #10: the protocol row used to answer with the balancing strategy, which
+// is not a protocol. Behind a balancer the servers are interchangeable
+// endpoints and normally share a stack — that stack is the honest answer, and
+// the strategy moved to a row of its own.
+func TestPoolProtocol(t *testing.T) {
+	vlessReality := subscription.SubEntry{Protocol: "vless", Network: "tcp", Security: "reality"}
+	cases := []struct {
+		name    string
+		entries []subscription.SubEntry
+		want    string
+	}{
+		{
+			"a uniform pool answers for the connection",
+			[]subscription.SubEntry{vlessReality, vlessReality, vlessReality},
+			"vless / tcp / reality",
+		},
+		{
+			"a differing transport has no single answer",
+			[]subscription.SubEntry{vlessReality, {Protocol: "vless", Network: "ws", Security: "tls"}},
+			"смешанные",
+		},
+		{
+			"a differing protocol has no single answer",
+			[]subscription.SubEntry{vlessReality, {Protocol: "hysteria2"}},
+			"смешанные",
+		},
+		{
+			"a bare protocol carries no transport",
+			[]subscription.SubEntry{{Protocol: "hysteria2"}},
+			"hysteria2",
+		},
+		{
+			"a profile the panel shipped empty says nothing",
+			nil,
+			"—",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := poolProtocol(c.entries); got != c.want {
+				t.Errorf("poolProtocol = %q, want %q", got, c.want)
+			}
+		})
+	}
+}

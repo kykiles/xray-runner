@@ -22,7 +22,10 @@ const (
 type StatusInfo struct {
 	Title    string // server or profile name
 	Endpoint string // host:port, empty for a balancer profile
-	Protocol string // "vless / tcp / reality" or "balancer/leastLoad · 33 сервера"
+	Protocol string // "vless / tcp / reality" — the pool's stack for a balancer
+	// Balancer is the strategy and pool size, empty for a single server. It has
+	// its own row because it is not a protocol, and it used to be shown as one.
+	Balancer string // "balancer/leastLoad · 33 сервера"
 	Mode     string // "PROXY (127.0.0.1:10809)"
 	// SplitMode replaces Mode while at least one listed process is captured —
 	// that is the only moment traffic is actually routed per process.
@@ -153,6 +156,12 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// labelWidth is the label column of the connected screen, wide enough for the
+// longest label ("Балансировка") plus its gap. The wrapped process list indents
+// to the same column, so both read it from here rather than from two numbers
+// that drift apart.
+const labelWidth = 13
+
 func (m statusModel) View() string {
 	var b strings.Builder
 	// The title carries the same two-column indent as the rows below it, so the
@@ -160,7 +169,7 @@ func (m statusModel) View() string {
 	b.WriteString(titleStyle.Render("  Подключено") + "\n\n")
 
 	row := func(label, value string) {
-		b.WriteString("  " + dimStyle.Render(pad(label, 10)) + textStyle.Render(value) + "\n")
+		b.WriteString("  " + dimStyle.Render(pad(label, labelWidth)) + textStyle.Render(value) + "\n")
 	}
 
 	row("Сервер", stripEmoji(m.info.Title))
@@ -168,12 +177,15 @@ func (m statusModel) View() string {
 		row("Адрес", m.info.Endpoint)
 	}
 	row("Протокол", m.info.Protocol)
+	if m.info.Balancer != "" {
+		row("Балансировка", m.info.Balancer)
+	}
 	row("Режим", m.modeLine())
 	if m.info.Split {
 		row("Процессы", m.appsLine())
 	}
 	// The status row carries its own health colors, so it is written raw.
-	b.WriteString("  " + dimStyle.Render(pad("Статус", 10)) + m.health() + "\n")
+	b.WriteString("  " + dimStyle.Render(pad("Статус", labelWidth)) + m.health() + "\n")
 
 	if m.note != "" {
 		style := warnStyle
@@ -216,7 +228,7 @@ func (m statusModel) appsLine() string {
 	}
 	if m.appsOpen {
 		// The extra rows line up under the first name, past the label column.
-		return strings.Join(m.info.Apps, "\n  "+strings.Repeat(" ", 10))
+		return strings.Join(m.info.Apps, "\n  "+strings.Repeat(" ", labelWidth))
 	}
 	if len(m.info.Apps) <= appsPreview {
 		return strings.Join(m.info.Apps, ", ")
