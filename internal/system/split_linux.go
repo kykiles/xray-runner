@@ -5,6 +5,8 @@ package system
 import (
 	"fmt"
 	"log/slog"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -266,16 +268,15 @@ func installSplitRules(tcpPort, dnsPort int) error {
 		rule("ip", "block", "ip", "daddr", splitDirectNets, "return"),
 		rule("ip", "block", "meta", "l4proto", "udp", "reject", "with", "icmp", "type", "port-unreachable"),
 
-		// Соединения, открытые до включения режима, nat уже не увидит: hook
-		// output срабатывает на первом пакете потока, а эти потоки начались
-		// раньше. Приложение с длинными keep-alive (Claude Code держит HTTP/2 к
-		// api.anthropic.com часами) продолжает ходить с реальным адресом, пока
-		// не переоткроет сокет — то есть режим включён, а трафик утекает.
+		// Страховка от утечки: сюда доходит только TCP, которого nat почему-то не
+		// развернул (у развёрнутого daddr уже 127.0.0.1, и его забрал bypass
+		// выше). Сброс с RST заставляет приложение переподключиться, а не идти
+		// наружу с реальным адресом.
 		//
-		// Здесь остаются только НЕ отредиреченные TCP-потоки: у всего, что nat
-		// развернул, daddr уже 127.0.0.1, и его забрал bypass выше. Сброс с RST
-		// заставляет приложение переподключиться сразу, и новый поток уже
-		// проходит через redirect.
+		// Сокеты, открытые ДО переезда процесса в cgroup, это правило не ловит:
+		// "socket cgroupv2" читает cgroup из sk_cgrp_data, который ядро
+		// проставляет при создании сокета и не обновляет при миграции процесса.
+		// Их закрывает killLeaked.
 		rule("ip", "block", "meta", "l4proto", "tcp", "reject", "with", "tcp", "reset"),
 
 		// IPv6 is not redirected at all: the nat chain above is the ip family and
@@ -327,6 +328,7 @@ func moveIntoSplit(names []string) ([]string, error) {
 
 	procs := filepath.Join(splitCgroup, "cgroup.procs")
 	found := map[string]bool{}
+	moved := map[string]bool{}
 	for _, e := range entries {
 		if _, err := strconv.Atoi(e.Name()); err != nil {
 			continue
@@ -347,11 +349,16 @@ func moveIntoSplit(names []string) ([]string, error) {
 		}
 		// A rescan re-reads processes it moved itself, whose "home" now *is* the
 		// split cgroup: recording that would send them nowhere on teardown.
-		if home != "" && home != splitRel() {
-			splitHome[e.Name()] = home
+		if home != splitRel() {
+			// Процесс только что переехал снаружи: его старые сокеты мимо туннеля.
+			moved[e.Name()] = true
+			if home != "" {
+				splitHome[e.Name()] = home
+			}
 		}
 		found[name] = true
 	}
+	killLeaked(moved)
 
 	out := make([]string, 0, len(found))
 	for n := range found {
@@ -359,6 +366,71 @@ func moveIntoSplit(names []string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// killLeaked closes the TCP connections the given processes had open before they
+// joined the cgroup. Those sockets are invisible to the whole ruleset: nft's
+// "socket cgroupv2" reads sk_cgrp_data, which the kernel fills in when the socket
+// is created and never updates when the process migrates. So a long-lived
+// keep-alive — Claude Code holds HTTP/2 to api.anthropic.com for hours — keeps
+// going out with the real address while the log shows new flows through the
+// redirect, and the site answers by country: "connected, then asks to log in".
+//
+// Closing the socket is the only lever left; the app reconnects at once and the
+// new socket is matched. Only PIDs that came from outside the cgroup are passed
+// in, so the one-second rescan cannot keep killing what it already tunnelled.
+func killLeaked(pids map[string]bool) {
+	if len(pids) == 0 {
+		return
+	}
+	// ss prints the process next to each socket, which saves mapping inode
+	// numbers out of /proc/<pid>/fd ourselves.
+	out, err := nftCmd.run("ss", "-tnHp", "state", "established")
+	if err != nil {
+		slog.Debug("split: ss failed", "error", err)
+		return
+	}
+	for line := range strings.SplitSeq(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 || !strings.HasPrefix(f[len(f)-1], "users:") {
+			continue
+		}
+		local, peer, users := f[len(f)-3], f[len(f)-2], f[len(f)-1]
+		if !ownedBy(users, pids) || !routable(peer) {
+			continue
+		}
+		if _, err := nftCmd.run("ss", "-K", "state", "established", "src", local, "dst", peer); err != nil {
+			slog.Debug("split: socket not closed", "src", local, "dst", peer, "error", err)
+			continue
+		}
+		slog.Debug("split: closed pre-existing connection", "src", local, "dst", peer)
+	}
+}
+
+// ownedBy reports whether ss's users:(("name",pid=N,fd=M),…) column names any of
+// the given PIDs.
+func ownedBy(users string, pids map[string]bool) bool {
+	for _, part := range strings.Split(users, "pid=")[1:] {
+		if pid, _, _ := strings.Cut(part, ","); pids[pid] {
+			return true
+		}
+	}
+	return false
+}
+
+// routable is the ss-address counterpart of the splitDirectNets bypass: only
+// connections that would have been redirected are worth closing. Killing the
+// loopback ones would cut the app off from its own editor or IPC socket.
+func routable(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() && !ip.IsMulticast() && !ip.IsUnspecified()
 }
 
 // DisableSplit removes the ruleset and empties the cgroup. It is safe to call

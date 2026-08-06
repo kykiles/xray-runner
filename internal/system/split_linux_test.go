@@ -52,6 +52,7 @@ type stubNft struct {
 	calls   [][]string
 	failOn  string
 	missing bool
+	ssOut   string // what "ss -tnHp" reports
 }
 
 func (s *stubNft) lookPath(string) error {
@@ -65,6 +66,9 @@ func (s *stubNft) run(bin string, args ...string) ([]byte, error) {
 	s.calls = append(s.calls, append([]string{bin}, args...))
 	if s.failOn != "" && strings.Contains(strings.Join(args, " "), s.failOn) {
 		return []byte("boom"), os.ErrPermission
+	}
+	if bin == "ss" && len(args) > 0 && args[0] == "-tnHp" {
+		return []byte(s.ssOut), nil
 	}
 	return nil, nil
 }
@@ -167,6 +171,49 @@ func TestRefreshSplitPicksUpLateProcesses(t *testing.T) {
 	}
 }
 
+// Сокеты, открытые до переезда процесса в cgroup, правила не видят вообще:
+// "socket cgroupv2" смотрит на cgroup времени создания сокета. Их надо закрыть
+// руками — иначе долгий keep-alive так и ходит мимо туннеля. Закрывать можно
+// только внешние адреса и только у тех, кто действительно только что переехал.
+func TestEnableSplitClosesPreExistingConnections(t *testing.T) {
+	stub := withFakes(t, map[string]string{"42": "code", "99": "sshd"})
+	stub.ssOut = strings.Join([]string{
+		`0 0 192.168.31.94:56196 160.79.104.10:443 users:(("code",pid=42,fd=20))`,
+		`0 0 127.0.0.1:37442 127.0.0.1:40276 users:(("code",pid=42,fd=62))`,
+		`0 0 192.168.31.94:45278 18.97.36.2:443 users:(("sshd",pid=99,fd=18))`,
+	}, "\n")
+
+	if _, err := EnableSplit([]string{"code"}, 10810, 10853); err != nil {
+		t.Fatalf("EnableSplit: %v", err)
+	}
+
+	var killed []string
+	for _, c := range stub.calls {
+		if c[0] == "ss" && c[1] == "-K" {
+			killed = append(killed, strings.Join(c, " "))
+		}
+	}
+	want := "ss -K state established src 192.168.31.94:56196 dst 160.79.104.10:443"
+	if len(killed) != 1 || killed[0] != want {
+		t.Fatalf("killed = %v, want exactly [%s]", killed, want)
+	}
+
+	// Второй проход: процесс уже в cgroup, его новые сокеты идут через redirect.
+	// Рвать их каждую секунду — значит не давать приложению вообще работать.
+	if err := os.WriteFile(filepath.Join(procRoot, "42", "cgroup"), []byte("0::"+splitRel()+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stub.calls = nil
+	if _, err := RefreshSplit([]string{"code"}); err != nil {
+		t.Fatalf("RefreshSplit: %v", err)
+	}
+	for _, c := range stub.calls {
+		if c[0] == "ss" && c[1] == "-K" {
+			t.Errorf("rescan killed a socket it had already tunnelled: %v", c)
+		}
+	}
+}
+
 // A name in the list that is not running is skipped, not an error: the file is
 // a standing preference, and the task explicitly asks for silence here.
 func TestEnableSplitSkipsMissingProcesses(t *testing.T) {
@@ -216,8 +263,8 @@ func TestEnableSplitRuleOrder(t *testing.T) {
 		"l4proto tcp redirect to :10810",
 		"ip daddr",
 		"l4proto udp reject",
-		// Уцелевшие прямые TCP-потоки (открытые до включения режима) рвутся,
-		// иначе они так и ходят мимо туннеля с реальным адресом.
+		// TCP, которого nat не развернул, рвётся, а не уходит наружу с реальным
+		// адресом.
 		"l4proto tcp reject with tcp reset",
 		"ip6 daddr",
 		"reject with icmpv6",
