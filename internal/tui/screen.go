@@ -38,6 +38,13 @@ func (a altKeeper) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// onResize is what every screen returns from a tea.WindowSizeMsg. Windows keeps
+// the cursor-visibility flag per screen buffer and resets it when the buffer is
+// resized, so the hidden cursor comes back blinking at the start of the last
+// rendered line (the legend); ClearScreen drops whatever the console reflowed
+// while resizing, which is what left a second copy of the legend on screen.
+func onResize() tea.Cmd { return tea.Batch(tea.ClearScreen, tea.HideCursor) }
+
 // runScreen runs one full-screen program and keeps the alternate buffer after
 // it exits, so nothing flashes before the next screen opens.
 func runScreen(m tea.Model) (tea.Model, error) {

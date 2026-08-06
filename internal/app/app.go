@@ -201,7 +201,7 @@ func (a *App) resolveMode() error {
 		return err
 	}
 	slog.Warn("saved tun mode unavailable, falling back to proxy", "error", err)
-	a.pendingNote = "⚠ Прошлый режим TUN недоступен: " + err.Error() + ". Работаем в PROXY."
+	a.pendingNote = "Прошлый режим TUN недоступен: " + err.Error() + ". Работаем в PROXY."
 	a.mode = "proxy"
 	return nil
 }

@@ -15,6 +15,7 @@ import (
 	"xray-runner/internal/config"
 	applog "xray-runner/internal/log"
 	"xray-runner/internal/tui"
+	"xray-runner/internal/ui"
 )
 
 var Version = "dev"
@@ -61,7 +62,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("✅ Ссылки сохранены: %s\n", path)
+		fmt.Printf("Ссылки сохранены: %s\n", path)
 		os.Exit(0)
 	}
 
@@ -75,6 +76,7 @@ func main() {
 	defer stop()
 
 	slog.Info("starting xray-runner", "version", Version)
+	ui.ClearScreen()
 	fmt.Print(banner())
 
 	application := app.New(cfg, app.Options{

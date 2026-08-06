@@ -108,7 +108,7 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
-		return m, nil
+		return m, onResize()
 	case statusTickMsg:
 		return m, statusTick()
 	case sessionEndedMsg:

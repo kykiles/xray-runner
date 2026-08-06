@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,11 +90,21 @@ func geoDate(dir string) string {
 
 func (m updateModel) Init() tea.Cmd { return m.spinner.Tick }
 
+// fail ends the screen on err and puts it in the log too, so a failure survives
+// the keypress that closes the screen. A nil err is the success path.
+func (m *updateModel) fail(err error) {
+	m.stage = updDone
+	m.err = err
+	if err != nil {
+		slog.Error("обновление не выполнено", "kind", m.kind, "error", err)
+	}
+}
+
 func (m updateModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		return m, nil
+		return m, onResize()
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -103,8 +114,7 @@ func (m updateModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case geoReleaseMsg:
 		return m.onGeoRelease(msg)
 	case installedMsg:
-		m.stage = updDone
-		m.err = msg.err
+		m.fail(msg.err)
 		m.status = ""
 		if msg.err == nil {
 			// Refresh the header so it reflects what we just installed instead of
@@ -129,8 +139,7 @@ func (m updateModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // this platform and let the user pick one.
 func (m updateModel) onReleases(msg releasesMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		m.stage = updDone
-		m.err = msg.err
+		m.fail(msg.err)
 		return m, nil
 	}
 	var withCore []updater.Release
@@ -140,8 +149,7 @@ func (m updateModel) onReleases(msg releasesMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if len(withCore) == 0 {
-		m.stage = updDone
-		m.err = fmt.Errorf("в последних релизах нет сборки ядра под вашу ОС/архитектуру")
+		m.fail(fmt.Errorf("в последних релизах нет сборки ядра под вашу ОС/архитектуру"))
 		return m, nil
 	}
 	m.releases = updater.TrimToLatestStable(withCore)
@@ -153,14 +161,12 @@ func (m updateModel) onReleases(msg releasesMsg) (tea.Model, tea.Cmd) {
 // onGeoRelease installs the geo databases straight from the latest geo release.
 func (m updateModel) onGeoRelease(msg geoReleaseMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		m.stage = updDone
-		m.err = msg.err
+		m.fail(msg.err)
 		return m, nil
 	}
 	ip, site, ok := updater.GeoAssets(msg.release)
 	if !ok {
-		m.stage = updDone
-		m.err = fmt.Errorf("в последнем релизе нет geoip.dat/geosite.dat")
+		m.fail(fmt.Errorf("в последнем релизе нет geoip.dat/geosite.dat"))
 		return m, nil
 	}
 	// Task #4: the same release is already on disk — re-entering the screen and
@@ -398,12 +404,12 @@ func (m updateModel) View() string {
 	case updDone:
 		switch {
 		case m.err != nil:
-			b.WriteString("  " + errStyle.Render("✖ "+m.err.Error()) + "\n")
+			b.WriteString("  " + errStyle.Render(m.err.Error()) + "\n")
 		case m.status != "":
 			// Nothing was downloaded — say why instead of claiming an install.
-			b.WriteString("  " + okStyle.Render("✔ "+m.status) + "\n")
+			b.WriteString("  " + okStyle.Render(m.status) + "\n")
 		default:
-			b.WriteString("  " + okStyle.Render("✔ Готово") + "\n")
+			b.WriteString("  " + okStyle.Render("Готово") + "\n")
 		}
 		b.WriteString(legend(m.width, "  любая клавиша назад в меню · q выход"))
 	}

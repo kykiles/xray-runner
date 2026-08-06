@@ -85,7 +85,7 @@ func TestWatchSessionSurvivesRefusedModeSwitch(t *testing.T) {
 	if screens != 2 {
 		t.Fatalf("status screen shown %d times, want 2 (the refusal must not end the session)", screens)
 	}
-	if len(notes) != 1 || notes[0] != "⚠ "+refusal.Error() {
+	if len(notes) != 1 || notes[0] != refusal.Error() {
 		t.Errorf("notes = %q, want the refusal on the second screen", notes)
 	}
 	if a.mode != "proxy" {

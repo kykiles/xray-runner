@@ -315,7 +315,7 @@ func (a *App) publishStatus(u tui.StatusUpdate) {
 // restarted after failed health checks (U-5).
 func (a *App) announceRestart() {
 	slog.Warn("3 consecutive health check failures, requesting xray restart")
-	a.publishStatus(tui.StatusUpdate{Note: "🔁 Health-check не прошёл 3 раза подряд — перезапускаю xray…"})
+	a.publishStatus(tui.StatusUpdate{Note: "Health-check не прошёл 3 раза подряд — перезапускаю xray…"})
 }
 
 // verifySystemProxy reports whether the OS actually took the proxy setting; a
@@ -325,14 +325,14 @@ func (a *App) verifySystemProxy(httpPort int) {
 	s := system.ReadProxyState()
 	if !s.Enabled {
 		slog.Warn("system proxy not confirmed", "mode", s.Mode, "server", s.Server, "expected", fmt.Sprintf("127.0.0.1:%d", httpPort))
-		a.publishStatus(tui.StatusUpdate{Note: "⚠ Системный прокси не применился — браузер идёт напрямую (процессы из " + config.Path(system.AppsFile) + " туннель не теряют)", Err: true})
+		a.publishStatus(tui.StatusUpdate{Note: "Системный прокси не применился — браузер идёт напрямую (процессы из " + config.Path(system.AppsFile) + " туннель не теряют)", Err: true})
 		return
 	}
 	expected := fmt.Sprintf("127.0.0.1:%d", httpPort)
 	if s.Server != expected {
 		slog.Warn("system proxy mismatch", "got", s.Server, "expected", expected)
 		a.publishStatus(tui.StatusUpdate{
-			Note: fmt.Sprintf("⚠ Системный прокси: %s (ожидался %s)", s.Server, expected),
+			Note: fmt.Sprintf("Системный прокси: %s (ожидался %s)", s.Server, expected),
 			Err:  true,
 		})
 		return

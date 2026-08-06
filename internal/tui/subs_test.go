@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -102,8 +103,8 @@ func TestSubs_ReloadFailureIsReported(t *testing.T) {
 		m := subsModel{subs: stored, cb: cb, choice: -1, input: textinput.New()}
 		got, _ := m.updateConfirmDelete(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 		final := got.(subsModel)
-		if !strings.Contains(final.note.view(), "подписки не читаются") {
-			t.Errorf("status = %q, want the reload error", final.note.view())
+		if !strings.Contains(final.note.view(), "не перечитан") {
+			t.Errorf("status = %q, want the reload failure", final.note.view())
 		}
 		if strings.Contains(final.note.view(), "удалена") {
 			t.Errorf("status claims success despite a stale list: %q", final.note.view())
@@ -114,8 +115,8 @@ func TestSubs_ReloadFailureIsReported(t *testing.T) {
 		m := subsModel{subs: stored, cb: cb, choice: -1, mode: subsAdding, input: textinput.New()}
 		m.input.SetValue("https://three.example/sub")
 		final := confirmAdd(t, m).(subsModel)
-		if !strings.Contains(final.note.view(), "подписки не читаются") {
-			t.Errorf("status = %q, want the reload error", final.note.view())
+		if !strings.Contains(final.note.view(), "не перечитан") {
+			t.Errorf("status = %q, want the reload failure", final.note.view())
 		}
 	})
 }
@@ -215,8 +216,9 @@ func TestSubs_AddShowsTheWaitAndKeepsTheUrlOnFailure(t *testing.T) {
 	if final.input.Value() != "мусор" {
 		t.Errorf("typed URL was dropped: %q", final.input.Value())
 	}
-	if !strings.Contains(final.note.view(), "не похоже на ссылку") {
-		t.Errorf("notice = %q, want the reason", final.note.view())
+	// Audit #3: the reason goes to the log, the screen keeps one short line.
+	if !strings.Contains(final.note.view(), "Подписка не добавлена") {
+		t.Errorf("notice = %q, want the short failure line", final.note.view())
 	}
 }
 
@@ -233,5 +235,34 @@ func TestSubs_WaitLinesAreDistinct(t *testing.T) {
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if view := next.(subsModel).View(); !strings.Contains(view, "Загрузка серверов") {
 		t.Errorf("opening a subscription shows the wrong wait:\n%s", view)
+	}
+}
+
+// Audit #6: s unfolds the URL as a child row under its subscription, not as a
+// tail on the same line, and the row it belongs to is the one under the cursor.
+func TestSubs_RevealUnfoldsUnderTheRow(t *testing.T) {
+	m := subsModel{
+		subs: []subscription.NamedSubscription{
+			{Name: "первая", URL: "https://one.example/sub?token=a"},
+			{Name: "вторая", URL: "https://two.example/sub?token=b"},
+		},
+		cursor: 1,
+		reveal: true,
+		choice: -1,
+		input:  textinput.New(),
+	}
+	lines := strings.Split(m.View(), "\n")
+	i := slices.IndexFunc(lines, func(l string) bool { return strings.Contains(l, "вторая") })
+	if i < 0 {
+		t.Fatalf("the selected subscription is not on screen:\n%s", m.View())
+	}
+	if strings.Contains(lines[i], "two.example") {
+		t.Errorf("the URL is still glued to the name row: %q", lines[i])
+	}
+	if !strings.Contains(lines[i+1], "└─") || !strings.Contains(lines[i+1], "two.example") {
+		t.Errorf("row below the cursor = %q, want the URL unfolded under it", lines[i+1])
+	}
+	if strings.Contains(m.View(), "one.example") {
+		t.Error("a row without the cursor revealed its URL")
 	}
 }

@@ -32,7 +32,7 @@ func Init(cfg *config.Config) func() {
 	if err != nil {
 		// The only stderr write we allow: without it a broken log path would be
 		// invisible, since there is no console logging to fall back on.
-		fmt.Fprintf(os.Stderr, "⚠ не удалось открыть лог-файл %s: %v\n", logFile, err)
+		fmt.Fprintf(os.Stderr, "не удалось открыть лог-файл %s: %v\n", logFile, err)
 		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 		return func() {}
 	}
@@ -43,7 +43,7 @@ func Init(cfg *config.Config) func() {
 	// cost us the logging itself, but it is worth a word — silently keeping the
 	// log root-only is the bug this is here to prevent (L-8).
 	if err := system.RestoreSudoOwnerFile(f); err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ не удалось вернуть владельца лог-файла %s: %v\n", logFile, err)
+		fmt.Fprintf(os.Stderr, "не удалось вернуть владельца лог-файла %s: %v\n", logFile, err)
 	}
 
 	w := &cappedWriter{f: f, limit: maxLogBytes}

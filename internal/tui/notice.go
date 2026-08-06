@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"log/slog"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,32 +27,37 @@ const (
 // ticks of a message that has already been replaced do not blank its successor.
 type noticeTickMsg struct{ gen int }
 
-// notice is the one-line message under a screen's list. Success fades out on
-// its own; failures stay, because losing the reason a subscription would not
-// load after three seconds is worse than a line left on screen.
+// notice is the one-line message under a screen's list. Every message fades out
+// on its own, failures included: the screen stays minimal and the detail worth
+// keeping goes to the log (failErr), not onto a line left lit forever.
 type notice struct {
 	text  string
 	style lipgloss.Style
-	fades bool
 	step  int // 0 while fully lit, then one per rung of noticeFade
 	gen   int
 }
 
-// ok shows a success and starts it fading. The returned command must be handed
-// back to bubbletea, or the message stays lit forever.
-func (n *notice) ok(text string) tea.Cmd { return n.set(text, okStyle, true) }
+// ok/fail/warn show a message and start it fading. The returned command must be
+// handed back to bubbletea, or the message stays lit forever.
+func (n *notice) ok(text string) tea.Cmd   { return n.set(text, okStyle) }
+func (n *notice) fail(text string) tea.Cmd { return n.set(text, errStyle) }
+func (n *notice) warn(text string) tea.Cmd { return n.set(text, warnStyle) }
 
-// fail and warn stay until something replaces them or the user moves on.
-func (n *notice) fail(text string) { n.set(text, errStyle, false) }
-func (n *notice) warn(text string) { n.set(text, warnStyle, false) }
+// failErr is the pair the screens use for anything that went wrong: a short line
+// the user reads, the whole error in the log. A raw error on screen ran to the
+// full URL of a failed fetch and pushed the layout around.
+func (n *notice) failErr(text string, err error) tea.Cmd {
+	slog.Error(text, "error", err)
+	return n.fail(text)
+}
 
 // clear takes the line back immediately.
-func (n *notice) clear() { n.set("", okStyle, false) }
+func (n *notice) clear() { n.set("", okStyle) }
 
-func (n *notice) set(text string, style lipgloss.Style, fades bool) tea.Cmd {
+func (n *notice) set(text string, style lipgloss.Style) tea.Cmd {
 	n.gen++
-	n.text, n.style, n.fades, n.step = text, style, fades, 0
-	if !fades || text == "" {
+	n.text, n.style, n.step = text, style, 0
+	if text == "" {
 		return nil
 	}
 	return n.wait(noticeHold)
@@ -64,7 +70,7 @@ func (n notice) wait(d time.Duration) tea.Cmd {
 
 // tick walks one rung down the ramp, and blanks the line off its end.
 func (n *notice) tick(msg noticeTickMsg) tea.Cmd {
-	if msg.gen != n.gen || !n.fades || n.text == "" {
+	if msg.gen != n.gen || n.text == "" {
 		return nil
 	}
 	n.step++

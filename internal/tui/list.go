@@ -126,7 +126,7 @@ func (b benchState) accept(gen int) bool { return gen == b.gen }
 
 // benchLine is the progress line both screens show while measuring.
 func benchLine(b benchState) string {
-	return dimStyle.Render(fmt.Sprintf("⏳ Замер latency... %d/%d", b.done, b.total))
+	return dimStyle.Render(fmt.Sprintf("Замер latency... %d/%d", b.done, b.total))
 }
 
 // filterKeys replaces the legend while the filter is being typed into.

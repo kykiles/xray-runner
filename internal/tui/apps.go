@@ -97,7 +97,7 @@ func (m appsModel) visible() []int {
 func (m appsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width, m.height = ws.Width, ws.Height
-		return m, nil
+		return m, onResize()
 	}
 
 	key, ok := msg.(tea.KeyMsg)

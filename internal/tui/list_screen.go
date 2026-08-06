@@ -317,7 +317,7 @@ func (m listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		return m, nil
+		return m, onResize()
 	case benchResultMsg:
 		// A cancelled run keeps emitting for a moment; drop what it sends.
 		if !m.run.accept(msg.gen) {
@@ -342,8 +342,7 @@ func (m listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshing = false
 		m.lastRefresh = time.Now()
 		if msg.err != nil {
-			m.note.fail(fmt.Sprintf("Ошибка обновления: %v", msg.err))
-			return m, nil
+			return m, m.note.failErr("Не удалось обновить подписку — подробности в логе", msg.err)
 		}
 		m.profiles = msg.profiles
 		m.flat = subscription.AllSingle(msg.profiles)
@@ -414,7 +413,7 @@ func (m listModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.toggleFold()
 	case "c", "с":
 		m.clearBenchStatus()
-		m.showConfig()
+		return m, m.showConfig()
 	case "b", "и":
 		return m.startBench()
 	case "r", "к":
@@ -476,12 +475,10 @@ func (m listModel) activate() (tea.Model, tea.Cmd) {
 	default: // rowServer
 		e := r.entry
 		if !supportedProtocols[e.Protocol] {
-			m.note.warn(fmt.Sprintf("Протокол %s не поддерживается — выберите другой", e.Protocol))
-			return m, nil
+			return m, m.note.warn(fmt.Sprintf("Протокол %s не поддерживается — выберите другой", e.Protocol))
 		}
 		if err := e.Validate(); err != nil {
-			m.note.warn(fmt.Sprintf("Запись невалидна: %v — выберите другую", err))
-			return m, nil
+			return m, m.note.failErr("Запись невалидна — выберите другую", err)
 		}
 		m.action = ListConnect
 		m.choice = r.profIdx
@@ -569,8 +566,7 @@ func (m listModel) startRefresh() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if wait := refreshCooldown - time.Since(m.lastRefresh); wait > 0 {
-		m.note.warn(fmt.Sprintf("Только что обновлялось — подождите %ds", int(wait.Seconds())+1))
-		return m, nil
+		return m, m.note.warn(fmt.Sprintf("Только что обновлялось — подождите %ds", int(wait.Seconds())+1))
 	}
 	m.refreshing = true
 	m.note.clear()
@@ -584,21 +580,20 @@ func (m listModel) startRefresh() (tea.Model, tea.Cmd) {
 // showConfig opens the viewer on the config the current row would launch: a
 // server's session config, or a balancer's whole-profile config. A group row
 // has no config of its own — its servers do.
-func (m *listModel) showConfig() {
+func (m *listModel) showConfig() tea.Cmd {
 	r, ok := m.current()
 	if !ok {
-		return
+		return nil
 	}
 	switch r.kind {
 	case rowServer:
 		if m.srvPreview == nil {
-			return
+			return nil
 		}
 		e := r.entry
 		text, err := m.srvPreview(&e, r.profIdx)
 		if err != nil {
-			m.note.fail(fmt.Sprintf("Конфиг недоступен: %v", err))
-			return
+			return m.note.failErr("Конфиг недоступен", err)
 		}
 		title := orDash(mark(e))
 		if title == "-" {
@@ -607,16 +602,16 @@ func (m *listModel) showConfig() {
 		m.cfg.show(title, text, saver(m.saveCfg, title, text))
 	case rowBalancer:
 		if m.profPreview == nil {
-			return
+			return nil
 		}
 		p := m.profiles[r.profIdx]
 		text, err := m.profPreview(p)
 		if err != nil {
-			m.note.fail(fmt.Sprintf("Конфиг недоступен: %v", err))
-			return
+			return m.note.failErr("Конфиг недоступен", err)
 		}
 		m.cfg.show(profileName(p), text, saver(m.saveCfg, profileName(p), text))
 	}
+	return nil
 }
 
 // keys is the bottom legend, adapting to the row under the cursor.
@@ -687,9 +682,9 @@ func (m listModel) View() string {
 			pr, measured := m.pings[pingKey(r.entry)]
 			line += pingCell(pr, measured, m.run.running, measured && pingKey(r.entry) == bestSrv)
 			if !supportedProtocols[r.entry.Protocol] {
-				line += "  " + warnStyle.Render("⚠ не поддерживается")
+				line += "  " + warnStyle.Render("не поддерживается")
 			} else if r.entry.Validate() != nil {
-				line += "  " + warnStyle.Render("⚠ invalid")
+				line += "  " + warnStyle.Render("invalid")
 			}
 		} else if r.kind == rowBalancer && !m.expanded[r.profIdx] {
 			// Task #2: unfolded, the servers below carry the numbers and the balancer
@@ -711,7 +706,7 @@ func (m listModel) View() string {
 	case m.run.running:
 		b.WriteString("  " + benchLine(m.run) + "\n")
 	case m.refreshing:
-		b.WriteString("  " + dimStyle.Render("⏳ Обновление подписки...") + "\n")
+		b.WriteString("  " + dimStyle.Render("Обновление подписки...") + "\n")
 	default:
 		b.WriteString("  " + m.note.view() + "\n")
 	}

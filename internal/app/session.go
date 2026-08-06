@@ -186,7 +186,7 @@ func (a *App) watchSession(ctx context.Context, t *target, ports sessionPorts, s
 			return action, nil
 		}
 		slog.Warn("mode switch refused", "error", switchErr)
-		note = tui.StatusUpdate{Note: "⚠ " + switchErr.Error(), Err: true}
+		note = tui.StatusUpdate{Note: switchErr.Error(), Err: true}
 	}
 }
 
@@ -475,7 +475,7 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 		// status screen used to report as connected — say so out loud.
 		if !a.testProxyConnection(ctx, ports.http) && ctx.Err() == nil {
 			a.publishStatus(tui.StatusUpdate{
-				Note: "⚠ Через прокси ничего не отвечает — сервер принял подключение, но трафик не идёт",
+				Note: "Через прокси ничего не отвечает — сервер принял подключение, но трафик не идёт",
 				Err:  true,
 			})
 		}
@@ -502,9 +502,9 @@ func (a *App) bringUpSplit() {
 		if splitNeedsRoot(err) {
 			// Same wording TUN refuses with; the mode row already says PROXY, so
 			// the note does not repeat it.
-			a.pendingNote = "⚠ режим SPLIT требует прав root — запустите через sudo"
+			a.pendingNote = "режим SPLIT требует прав root — запустите через sudo"
 		} else {
-			a.pendingNote = "⚠ Маршрутизация по процессам не включена: " + err.Error()
+			a.pendingNote = "Маршрутизация по процессам не включена: " + err.Error()
 		}
 		return
 	}
@@ -627,7 +627,7 @@ func (a *App) bringUpTun(ctx context.Context, t *target) error {
 		if len(endpoints) == 0 {
 			slog.Warn("kill switch skipped: no server endpoint resolved")
 			a.publishStatus(tui.StatusUpdate{
-				Note: "⚠ Kill switch выключен: не удалось определить IP серверов.",
+				Note: "Kill switch выключен: не удалось определить IP серверов.",
 				Err:  true,
 			})
 		} else if err := system.EnableKillSwitch(system.KillSwitchConfig{
@@ -635,7 +635,7 @@ func (a *App) bringUpTun(ctx context.Context, t *target) error {
 			XrayPath:  a.binary,
 		}); err != nil {
 			slog.Warn("kill switch failed", "error", err)
-			a.publishStatus(tui.StatusUpdate{Note: "⚠ Kill switch не включился: " + err.Error(), Err: true})
+			a.publishStatus(tui.StatusUpdate{Note: "Kill switch не включился: " + err.Error(), Err: true})
 		} else {
 			a.killSwitchOn = true
 			slog.Info("kill switch enabled", "endpoints", len(endpoints))

@@ -111,7 +111,7 @@ func renderMarkdown(subURL string, entries []subscription.SubEntry, now time.Tim
 		for i, e := range byProto[p] {
 			link, err := subscription.EncodeURL(&e)
 			if err != nil {
-				fmt.Fprintf(&b, "%d. ⚠️ %v\n\n", i+1, err)
+				fmt.Fprintf(&b, "%d. %v\n\n", i+1, err)
 				continue
 			}
 			if e.Remarks != "" {

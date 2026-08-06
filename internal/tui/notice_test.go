@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // Task #5: a success shows, dims one rung per tick and goes. The ticks are fed
@@ -39,29 +41,31 @@ func TestNotice_SuccessFadesOut(t *testing.T) {
 	}
 }
 
-// Errors stay: losing the reason a subscription would not load after three
-// seconds is worse than a line left on screen.
-func TestNotice_FailureDoesNotFade(t *testing.T) {
+// Failures go too (audit #2/#3): the screen stays minimal and the reason is in
+// the log, so a warning about a cooldown does not sit there until the next key.
+func TestNotice_FailureFadesOut(t *testing.T) {
 	for _, c := range []struct {
 		name string
-		set  func(n *notice)
+		set  func(n *notice) tea.Cmd
 	}{
-		{"fail", func(n *notice) { n.fail("Ошибка обновления: нет сети") }},
-		{"warn", func(n *notice) { n.warn("Протокол ssr не поддерживается") }},
+		{"fail", func(n *notice) tea.Cmd { return n.fail("Не удалось обновить подписку") }},
+		{"warn", func(n *notice) tea.Cmd { return n.warn("Протокол ssr не поддерживается") }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var n notice
-			c.set(&n)
-			before := n.view()
-			if before == "" {
+			cmd := c.set(&n)
+			if cmd == nil {
+				t.Fatal("a failure scheduled no fade")
+			}
+			if n.view() == "" {
 				t.Fatal("notice is blank the moment it is set")
 			}
-			// Even handed a tick, it stays put and schedules nothing further.
-			if cmd := n.tick(noticeTickMsg{gen: n.gen}); cmd != nil {
-				t.Error("a failure scheduled a fade")
+			// Walk the whole ramp: one tick to start it, one per rung, one to blank.
+			for range len(noticeFade) + 2 {
+				n.tick(noticeTickMsg{gen: n.gen})
 			}
-			if n.view() != before {
-				t.Errorf("failure changed on a tick: %q -> %q", before, n.view())
+			if n.view() != "" {
+				t.Errorf("failure still on screen after the whole ramp: %q", n.view())
 			}
 		})
 	}

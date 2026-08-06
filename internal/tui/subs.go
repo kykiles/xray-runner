@@ -111,8 +111,7 @@ func (m subsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if lm, ok := msg.(loadedMsg); ok {
 		if lm.err != nil {
 			m.mode = subsList
-			m.note.fail(lm.err.Error())
-			return m, nil
+			return m, m.note.failErr("Не удалось загрузить подписку — подробности в логе", lm.err)
 		}
 		m.action = SubsSelected
 		return m, tea.Quit
@@ -120,7 +119,7 @@ func (m subsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width, m.height = ws.Width, ws.Height
-		return m, nil
+		return m, onResize()
 	}
 
 	if tick, ok := msg.(noticeTickMsg); ok {
@@ -132,16 +131,14 @@ func (m subsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Back to the prompt with the typed URL intact, so a typo can be fixed
 			// instead of retyped.
 			m.mode = subsAdding
-			m.note.fail(am.err.Error())
-			return m, nil
+			return m, m.note.failErr("Подписка не добавлена — подробности в логе", am.err)
 		}
 		m.mode = subsList
 		// M-1: a stale list is worse than a visible error — the new subscription
 		// would be missing while the notice claimed it was added.
 		subs, err := m.cb.Reload()
 		if err != nil {
-			m.note.fail(fmt.Sprintf("Список подписок не перечитан: %v", err))
-			return m, nil
+			return m, m.note.failErr("Список подписок не перечитан", err)
 		}
 		m.subs = subs
 		m.cursor = len(m.subs) - 1
@@ -211,8 +208,7 @@ func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.note.clear()
 	case "d", "в":
 		if len(m.subs) == 0 {
-			m.note.fail("Нет подписок для удаления")
-			return m, nil
+			return m, m.note.fail("Нет подписок для удаления")
 		}
 		m.mode = subsConfirmDelete
 	case "u", "г":
@@ -238,8 +234,7 @@ func (m subsModel) updateAdding(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		rawURL := strings.TrimSpace(m.input.Value())
 		if rawURL == "" {
-			m.note.fail("URL не может быть пустым")
-			return m, nil
+			return m, m.note.fail("URL не может быть пустым")
 		}
 		// Saving is instant; asking the panel what it calls itself is not, so the
 		// wait happens here in the loading state rather than behind a frozen screen.
@@ -261,14 +256,14 @@ func (m subsModel) updateConfirmDelete(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		name := m.subs[m.cursor].Name
 		switch err := m.cb.Delete(m.cursor); {
 		case err != nil:
-			m.note.fail(fmt.Sprintf("Ошибка удаления: %v", err))
+			cmd = m.note.failErr("Подписка не удалена", err)
 		default:
 			// M-1: without the reloaded list the deleted subscription stays on
 			// screen and can still be opened, so report the failure instead of
 			// claiming success.
 			subs, rerr := m.cb.Reload()
 			if rerr != nil {
-				m.note.fail(fmt.Sprintf("Список подписок не перечитан: %v", rerr))
+				cmd = m.note.failErr("Список подписок не перечитан", rerr)
 				break
 			}
 			m.subs = subs
@@ -313,7 +308,13 @@ func (m subsModel) View() string {
 	// however many the legend wraps to.
 	rows := len(m.subs)
 	if m.height > 0 {
-		rows = max(1, m.height-(lipgloss.Height(logo)+4+legendHeight(m.width, keys)))
+		// A revealed URL unfolds as a line of its own under the cursor's row, so
+		// the window gives one row back to it.
+		reveal := 0
+		if m.reveal {
+			reveal = 1
+		}
+		rows = max(1, m.height-(lipgloss.Height(logo)+4+reveal+legendHeight(m.width, keys)))
 	}
 	start, end, above, below := window(len(m.subs), m.cursor, rows)
 
@@ -330,12 +331,13 @@ func (m subsModel) View() string {
 			cursor = cursorStyle.Render("▸ ")
 			line = selectedStyle.Render(name)
 		}
-		// s reveals the full URL in place — same row, running off to the right
-		// untruncated so it stays a working link.
-		if m.reveal && i == m.cursor {
-			line = selectedStyle.Render(name) + " " + urlStyle.Render(s.URL)
-		}
 		b.WriteString("  " + cursor + line + "\n")
+		// s unfolds the full URL as a child row under the subscription it belongs
+		// to, so scrolling shows each one's link in turn. Untruncated, running off
+		// to the right if it has to, so it stays a working link.
+		if m.reveal && i == m.cursor {
+			b.WriteString("      " + dimStyle.Render("└─ ") + urlStyle.Render(s.URL) + "\n")
+		}
 	}
 	// moreDown always occupies its line, so the notice below keeps its place
 	// instead of jumping as the window scrolls past the end of the list — and it
@@ -343,7 +345,7 @@ func (m subsModel) View() string {
 	b.WriteString(moreDown(below))
 
 	if m.mode == subsLoading {
-		b.WriteString("  " + dimStyle.Render("⏳ "+m.busy) + "\n")
+		b.WriteString("  " + dimStyle.Render(m.busy) + "\n")
 		return b.String()
 	}
 

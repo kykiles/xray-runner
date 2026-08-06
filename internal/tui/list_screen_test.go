@@ -457,11 +457,13 @@ func TestList_RefreshCooldown(t *testing.T) {
 	done, _ := next.(listModel).Update(cmd())
 	m = done.(listModel)
 
-	if _, cmd := m.updateKey(r); cmd != nil {
+	// The refused press still returns a command — the cooldown warning fades on
+	// its own now — so `refreshing` is what says whether the panel was hit.
+	if next, _ := m.updateKey(r); next.(listModel).refreshing {
 		t.Error("r inside the cooldown fetched again")
 	}
 	m.lastRefresh = time.Now().Add(-refreshCooldown)
-	if _, cmd := m.updateKey(r); cmd == nil {
+	if next, cmd := m.updateKey(r); cmd == nil || !next.(listModel).refreshing {
 		t.Error("r after the cooldown must fetch again")
 	}
 }
@@ -474,7 +476,7 @@ func TestList_RefreshCooldownStartsAtOpen(t *testing.T) {
 	m.refresh = func() ([]subscription.Profile, error) { return flatFixture(), nil }
 	m.lastRefresh = time.Now()
 
-	if _, cmd := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}); cmd != nil {
+	if next, _ := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}); next.(listModel).refreshing {
 		t.Error("r right after opening a freshly fetched subscription fetched it again")
 	}
 }
