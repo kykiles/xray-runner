@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"xray-runner/internal/xraycfg"
 )
@@ -52,6 +53,11 @@ func DirectBind() (xraycfg.DirectBind, error) {
 	if alias == "" {
 		return xraycfg.DirectBind{}, fmt.Errorf("физический адаптер не найден")
 	}
+	// A mangled alias is worse than none: xray fails net.InterfaceByName, logs it
+	// at Info, and dials through the routing table — straight back into the tun.
+	if !utf8.ValidString(alias) {
+		return xraycfg.DirectBind{}, fmt.Errorf("имя физического адаптера пришло в неверной кодировке: %q", alias)
+	}
 	return xraycfg.DirectBind{Interface: alias}, nil
 }
 
@@ -65,8 +71,12 @@ func parseFindNetRoute(out string) (nextHop, ifIndex string, err error) {
 	return fields[0], fields[1], nil
 }
 
+// powershell runs a script and reads its output as UTF-8. Without the encoding
+// line the pipe carries the console OEM codepage (cp866 on a Russian Windows),
+// so any localized adapter alias arrives as mojibake.
 func powershell(script string) ([]byte, error) {
-	return ipCmd.run("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	return ipCmd.run("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		"[Console]::OutputEncoding=[Text.Encoding]::UTF8; "+script)
 }
 
 // routeReplace installs a route the way `ip route replace` does on Linux.

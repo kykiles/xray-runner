@@ -17,6 +17,7 @@ type fakeIP struct {
 	tunIndexErr error
 	bindAlias   string
 	bindErr     error
+	bindScript  string
 	findScript  string
 	cmds        []string
 	// existing models the routing table. route.exe refuses to add a
@@ -31,6 +32,7 @@ func (f *fakeIP) run(bin string, args ...string) ([]byte, error) {
 	joined := strings.Join(args, " ")
 	// Checked first: the DirectBind script names both cmdlets.
 	if strings.Contains(joined, "InterfaceAlias") {
+		f.bindScript = joined
 		return []byte(f.bindAlias), f.bindErr
 	}
 	if strings.Contains(joined, "Find-NetRoute") {
@@ -279,6 +281,31 @@ func TestDirectBind_FailsWhenAdapterIsUnknown(t *testing.T) {
 
 	if _, err := DirectBind(); err == nil {
 		t.Fatal("expected an error when the physical adapter cannot be named")
+	}
+}
+
+// A localized alias read in the console codepage reaches xray as mojibake,
+// net.InterfaceByName misses, and the direct traffic loops back into the tun —
+// the failure seen on the 2026-08-12 diagnostic.
+func TestDirectBind_FailsWhenAliasIsMojibake(t *testing.T) {
+	// "Беспроводная сеть" as cp866 bytes.
+	f := &fakeIP{bindAlias: "\x81\xa5\xe1\xaf\xe0\xae\xa2\xae\xa4\xad\xa0\xef \xe1\xa5\xe2\xec\r\n"}
+	withFakeIP(t, f)
+
+	if _, err := DirectBind(); err == nil {
+		t.Fatal("expected an error when the adapter alias is not valid UTF-8")
+	}
+}
+
+func TestDirectBind_RequestsUTF8Output(t *testing.T) {
+	f := &fakeIP{bindAlias: "Ethernet\r\n"}
+	withFakeIP(t, f)
+
+	if _, err := DirectBind(); err != nil {
+		t.Fatalf("DirectBind: %v", err)
+	}
+	if !strings.Contains(f.bindScript, "OutputEncoding") {
+		t.Errorf("script must set the output encoding, got: %s", f.bindScript)
 	}
 }
 
