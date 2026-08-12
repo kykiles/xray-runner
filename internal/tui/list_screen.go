@@ -276,12 +276,14 @@ func (m listModel) visibleRows() []listRow {
 	return out
 }
 
-// profileName is the profile's display name, with a placeholder for an empty one.
+// profileName is the profile's name as it goes on screen — see mark for why the
+// emoji go here. A name made of nothing but emoji is left nameless rather than
+// blank.
 func profileName(p subscription.Profile) string {
-	if p.Name == "" {
-		return "(без имени)"
+	if name := stripEmoji(p.Name); name != "" {
+		return name
 	}
-	return p.Name
+	return "(без имени)"
 }
 
 // restoreCursor unfolds the profile holding the last connected server, then

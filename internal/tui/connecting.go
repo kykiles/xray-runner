@@ -37,7 +37,7 @@ type connectingModel struct {
 // and the caller must tear the session down.
 func ShowConnecting(title string, connect func() error, cancel func()) error {
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(cursorStyle))
-	m := connectingModel{title: title, connect: connect, cancel: cancel, spinner: sp}
+	m := connectingModel{title: stripEmoji(title), connect: connect, cancel: cancel, spinner: sp}
 	res, err := runScreen(m)
 	if err != nil {
 		return err

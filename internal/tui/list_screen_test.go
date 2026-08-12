@@ -19,8 +19,8 @@ const validUUID = "123e4567-e89b-12d3-a456-426614174000"
 func balancerFixture() []subscription.Profile {
 	return []subscription.Profile{
 		{Name: "Германия", Balancer: &subscription.BalancerInfo{Strategy: "leastPing"}, Entries: []subscription.SubEntry{
-			{Remarks: "🇩🇪 DE-1", Address: "de1.example.ru", Port: 443, Protocol: "vless", Network: "ws", UUID: validUUID},
-			{Remarks: "🇩🇪 DE-2", Address: "de2.example.ru", Port: 443, Protocol: "vless", Network: "ws", UUID: validUUID},
+			{Remarks: "DE-1", Address: "de1.example.ru", Port: 443, Protocol: "vless", Network: "ws", UUID: validUUID},
+			{Remarks: "DE-2", Address: "de2.example.ru", Port: 443, Protocol: "vless", Network: "ws", UUID: validUUID},
 		}},
 		{Name: "США", Entries: []subscription.SubEntry{
 			{Remarks: "US", Address: "us1.example.com", Port: 443, Protocol: "vmess", Network: "tcp", UUID: validUUID},
@@ -566,11 +566,11 @@ func TestList_FilterWalksTheTree(t *testing.T) {
 		want  []string
 	}{
 		{"parent matched brings its servers", "нидер", []string{"Нидерланды", "NL-1"}},
-		{"child matched brings its parent", "de-2", []string{"Германия", "🇩🇪 DE-2"}},
+		{"child matched brings its parent", "de-2", []string{"Германия", "DE-2"}},
 		{"child match narrows to that child", "nl1.example.ru", []string{"Нидерланды", "NL-1"}},
 		{"single-server profile stands alone", "сша", []string{"США"}},
 		{"a column other than the name", "vmess", []string{"США"}},
-		{"transport matches inside a balancer", "ws", []string{"Германия", "🇩🇪 DE-1", "🇩🇪 DE-2"}},
+		{"transport matches inside a balancer", "ws", []string{"Германия", "DE-1", "DE-2"}},
 		{"nothing matched", "исландия", nil},
 	}
 	for _, c := range cases {
@@ -592,14 +592,14 @@ func TestList_FilterIgnoresFoldsAndDisablesS(t *testing.T) {
 		t.Fatal("fixture should start folded")
 	}
 	m.filter.input.SetValue("de-1")
-	if got := rowNames(m.visibleRows()); !equal(got, []string{"Германия", "🇩🇪 DE-1"}) {
+	if got := rowNames(m.visibleRows()); !equal(got, []string{"Германия", "DE-1"}) {
 		t.Fatalf("folded balancer hid its matching server: %v", got)
 	}
 
 	// s on the balancer head must not fold the match away.
 	m.cursor = 0
 	m = press(m, "s")
-	if got := rowNames(m.visibleRows()); !equal(got, []string{"Германия", "🇩🇪 DE-1"}) {
+	if got := rowNames(m.visibleRows()); !equal(got, []string{"Германия", "DE-1"}) {
 		t.Errorf("s changed a filtered list: %v", got)
 	}
 	if strings.Contains(m.keys(), "s серверы") {

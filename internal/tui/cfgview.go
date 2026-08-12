@@ -27,7 +27,7 @@ func saver(save SaveConfigFunc, name, text string) func() (string, error) {
 
 func (v *cfgView) show(title, text string, save func() (string, error)) {
 	v.lines = strings.Split(text, "\n")
-	v.title = title
+	v.title = stripEmoji(title)
 	v.top = 0
 	v.save = save
 	v.status = ""
@@ -80,7 +80,7 @@ func (v cfgView) budget(height, width int) int {
 
 func (v cfgView) view(width, height int) string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("  "+stripEmoji(v.title)+" · конфиг") + "\n\n")
+	b.WriteString(titleStyle.Render("  "+v.title+" · конфиг") + "\n\n")
 
 	end := min(v.top+v.budget(height, width), len(v.lines))
 	b.WriteString(moreUp(v.top))

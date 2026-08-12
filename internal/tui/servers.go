@@ -77,12 +77,14 @@ func entryHaystack(e subscription.SubEntry) string {
 		e.Remarks, e.Address, e.Port, e.Protocol, e.Network))
 }
 
-// mark is the server's name from the subscription. Xray-config subscriptions
+// mark is the server's name as it goes on screen. Xray-config subscriptions
 // carry no per-server name, so the parser falls back to the address — repeating
-// it in the NAME column would just duplicate HOST.
+// it in the NAME column would just duplicate HOST. Emoji are stripped here,
+// once, rather than at every place that draws a name: the console font cannot
+// draw them, and a screen added later would have to remember the call.
 func mark(e subscription.SubEntry) string {
 	if e.Remarks == e.Address {
 		return ""
 	}
-	return e.Remarks
+	return stripEmoji(e.Remarks)
 }

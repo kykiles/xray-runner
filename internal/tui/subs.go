@@ -71,6 +71,19 @@ type subsModel struct {
 	height int // terminal height; 0 until the first WindowSizeMsg
 }
 
+// setSubs takes a freshly read list and keeps it display-ready: a panel names
+// its subscription with emoji the console font cannot draw, so they are stripped
+// once on the way in rather than at every line that prints a name — a screen
+// added later would have to remember the call. The list is copied, so the
+// caller's slice keeps the names storage writes back.
+func (m *subsModel) setSubs(subs []subscription.NamedSubscription) {
+	m.subs = make([]subscription.NamedSubscription, len(subs))
+	for i, s := range subs {
+		s.Name = stripEmoji(s.Name)
+		m.subs[i] = s
+	}
+}
+
 // newSubsInput builds the add-subscription field. No CharLimit: a happ://crypt5
 // link runs well past 800 characters, and a truncated one fails to decrypt.
 func newSubsInput() textinput.Model {
@@ -84,13 +97,15 @@ func newSubsInput() textinput.Model {
 // index points into the (possibly reloaded) list, which is also returned.
 // cursor is where the highlight starts: coming back from a subscription lands
 // on the one just used, so the last-used one is visible at a glance. An index
-// past the end (the list shrank) falls back to the top.
+// past the end (the list shrank) falls back to the top. The returned list is the
+// display copy — see setSubs — so it is not what storage should be written from.
 func SelectSubscription(subs []subscription.NamedSubscription, cursor int, cb SubsCallbacks) ([]subscription.NamedSubscription, int, SubsAction, error) {
 	ti := newSubsInput()
 	if cursor < 0 || cursor >= len(subs) {
 		cursor = 0
 	}
-	m := subsModel{subs: subs, cb: cb, cursor: cursor, input: ti, action: SubsQuit, choice: -1}
+	m := subsModel{cb: cb, cursor: cursor, input: ti, action: SubsQuit, choice: -1}
+	m.setSubs(subs)
 	// Nothing to select yet — go straight to the add prompt.
 	if len(subs) == 0 {
 		m.mode = subsAdding
@@ -140,7 +155,7 @@ func (m subsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err != nil {
 			return m, m.note.failErr("Список подписок не перечитан", err)
 		}
-		m.subs = subs
+		m.setSubs(subs)
 		m.cursor = len(m.subs) - 1
 		return m, m.note.ok("Подписка добавлена")
 	}
@@ -266,7 +281,7 @@ func (m subsModel) updateConfirmDelete(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				cmd = m.note.failErr("Список подписок не перечитан", rerr)
 				break
 			}
-			m.subs = subs
+			m.setSubs(subs)
 			if m.cursor >= len(m.subs) && m.cursor > 0 {
 				m.cursor--
 			}
@@ -325,7 +340,7 @@ func (m subsModel) View() string {
 		// Task #1: the list shows only the panel name, never the URL — the token
 		// stays off screen until asked for with s. The panel writes its name with
 		// emoji; they are stripped here so the revealed URL stays in line.
-		name := pad(stripEmoji(s.Name), 28)
+		name := pad(s.Name, 28)
 		line := textStyle.Render(name)
 		if i == m.cursor {
 			cursor = cursorStyle.Render("▸ ")
@@ -350,7 +365,7 @@ func (m subsModel) View() string {
 	}
 
 	if m.mode == subsConfirmDelete {
-		b.WriteString("  " + warnStyle.Render(fmt.Sprintf("Удалить «%s»? (y/n)", stripEmoji(m.subs[m.cursor].Name))) + "\n")
+		b.WriteString("  " + warnStyle.Render(fmt.Sprintf("Удалить «%s»? (y/n)", m.subs[m.cursor].Name)) + "\n")
 	} else {
 		b.WriteString("  " + m.note.view() + "\n")
 	}

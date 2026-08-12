@@ -71,6 +71,7 @@ func ShowStatus(info StatusInfo, updates <-chan StatusUpdate) (StatusAction, err
 	// started stays zero until the first successful health check — see health().
 	// A reconnect or a mode switch builds a new screen, so the counter restarts
 	// with the connection rather than carrying the old one's age over.
+	info.Title = stripEmoji(info.Title)
 	m := statusModel{
 		info:    info,
 		updates: updates,
@@ -172,7 +173,7 @@ func (m statusModel) View() string {
 		b.WriteString("  " + dimStyle.Render(pad(label, labelWidth)) + textStyle.Render(value) + "\n")
 	}
 
-	row("Сервер", stripEmoji(m.info.Title))
+	row("Сервер", m.info.Title)
 	if m.info.Endpoint != "" {
 		row("Адрес", m.info.Endpoint)
 	}

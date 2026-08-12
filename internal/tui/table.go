@@ -57,7 +57,7 @@ func tableRow(name string, e subscription.SubEntry, showPing bool) string {
 		host = pad(host, hostWidth)
 	}
 	return fmt.Sprintf("%s %s %s %s",
-		pad(truncate(stripEmoji(name), nameWidth), nameWidth),
+		pad(truncate(name, nameWidth), nameWidth),
 		pad(orDash(e.Protocol), protoWidth),
 		pad(orDash(e.Network), netWidth),
 		host)
