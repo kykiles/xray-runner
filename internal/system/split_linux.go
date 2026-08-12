@@ -25,6 +25,10 @@ import (
 
 const splitTable = "xray_split"
 
+// SplitOverTUN says how per-process routing is built here: on Linux it is the
+// cgroup + nft redirect below, riding on proxy mode rather than on the tunnel.
+const SplitOverTUN = false
+
 // Overridable in tests: the real paths need root and a live nft.
 var (
 	procRoot              = "/proc"

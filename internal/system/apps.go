@@ -51,7 +51,7 @@ func LoadApps(path string) ([]string, error) {
 // names the user has not started yet, so it is written even when empty.
 func SaveApps(path string, names []string) error {
 	var b strings.Builder
-	b.WriteString("# Процессы, чей трафик идёт через VPN в режиме proxy.\n")
+	b.WriteString("# Процессы, чей трафик идёт через VPN в режиме SPLIT.\n")
 	b.WriteString("# Одно имя в строке, '#' — комментарий.\n")
 	for _, n := range names {
 		b.WriteString(n)

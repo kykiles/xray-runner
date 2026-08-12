@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -80,6 +81,21 @@ func Version(binary string) (string, error) {
 	}
 	line := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
 	return line, nil
+}
+
+// SupportsProcessRouting reports whether a version line names a core that
+// understands the "process" routing rule — matching a connection's owning
+// process by name, which the split mode is built on. It arrived in 26.0.
+// An unreadable line is taken as supported: refusing to start over a version
+// string we failed to parse is worse than letting the core answer.
+func SupportsProcessRouting(version string) bool {
+	for f := range strings.FieldsSeq(version) {
+		major, _, _ := strings.Cut(f, ".")
+		if n, err := strconv.Atoi(major); err == nil {
+			return n >= 26
+		}
+	}
+	return true
 }
 
 func (r *Runner) Start(ctx context.Context) error {

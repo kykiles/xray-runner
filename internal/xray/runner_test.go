@@ -390,3 +390,21 @@ func TestRunnerDrainsOutputBeforeWaitReturns(t *testing.T) {
 		t.Errorf("logged %d of %d lines by the time Wait returned; the rest was lost when Wait closed the pipes", got, lines*2)
 	}
 }
+
+// The split mode is built on the "process" routing rule, which arrived in
+// xray-core 26.0; an older core would ignore it and tunnel everything.
+func TestSupportsProcessRouting(t *testing.T) {
+	cases := map[string]bool{
+		"Xray 26.7.28 (Xray, Penetrates Everything.) 5ca6f4b (go1.26.5 linux/amd64)": true,
+		"Xray 26.0.0 (Xray, Penetrates Everything.) abc (go1.26 windows/amd64)":      true,
+		"Xray 25.12.8 (Xray, Penetrates Everything.) abc (go1.24 windows/amd64)":     false,
+		"Xray 1.8.4 (Xray, Penetrates Everything.) abc":                              false,
+		// Unparseable: let the core answer rather than refuse over a version line.
+		"something else entirely": true,
+	}
+	for version, want := range cases {
+		if got := SupportsProcessRouting(version); got != want {
+			t.Errorf("SupportsProcessRouting(%q) = %v, want %v", version, got, want)
+		}
+	}
+}

@@ -29,6 +29,16 @@ var ipCmd commander = execCommander{}
 // the teardown deletes the destination outright instead of restoring it.
 var installed *TunRouteConfig
 
+// installedV6 holds the netsh argument lists that undo the IPv6 routes. They
+// are recorded rather than rebuilt because deleting an IPv6 route needs the
+// interface index it was added on, and by teardown time the adapter may already
+// be gone — Find-NetRoute would have nothing left to answer with.
+var installedV6 [][]string
+
+// splitDefault6 is the IPv6 counterpart of splitDefault: two halves that beat
+// the existing ::/0 on prefix length without deleting it.
+var splitDefault6 = []string{"::/1", "8000::/1"}
+
 // bindProbe is the destination used to learn which adapter carries the host's
 // internet traffic. The VPN servers cannot stand in for it: a server on the
 // local link says nothing about the physical default path.
@@ -89,6 +99,28 @@ func routeReplace(dest, mask, gateway, ifIndex string) ([]byte, error) {
 	return ipCmd.run("route", "add", dest, "mask", mask, gateway, "if", ifIndex)
 }
 
+// netshRoute6 installs an IPv6 route the way routeReplace does for IPv4: the
+// delete first, because a session killed before its teardown leaves its routes
+// behind and netsh refuses a duplicate prefix on the same interface.
+//
+// An on-link destination has no next hop (Find-NetRoute answers "::"), and
+// netsh wants the parameter left out rather than set to the unspecified
+// address. Every added route is recorded for the teardown.
+func netshRoute6(prefix, ifIndex, nextHop string) ([]byte, error) {
+	del := []string{"interface", "ipv6", "delete", "route", "prefix=" + prefix, "interface=" + ifIndex, "store=active"}
+	_, _ = ipCmd.run("netsh", del...)
+
+	add := []string{"interface", "ipv6", "add", "route", "prefix=" + prefix, "interface=" + ifIndex, "store=active"}
+	if nextHop != "" && nextHop != "::" {
+		add = append(add, "nexthop="+nextHop)
+	}
+	out, err := ipCmd.run("netsh", add...)
+	if err == nil {
+		installedV6 = append(installedV6, del)
+	}
+	return out, err
+}
+
 // EnableTunRouting points the system's default traffic at the TUN adapter and
 // pins the VPN server to the physical adapter.
 func EnableTunRouting(cfg TunRouteConfig) error {
@@ -143,7 +175,43 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 		}
 	}
 
-	slog.Info("tun routing enabled", "iface", cfg.Iface, "excluded_servers", len(exceptions), "tun_if", tunIndex)
+	if cfg.Addr6 != "" {
+		if err := enableTunRouting6(cfg, tunIndex); err != nil {
+			_ = DisableTunRouting()
+			return err
+		}
+	}
+
+	slog.Info("tun routing enabled", "iface", cfg.Iface, "excluded_servers", len(exceptions), "tun_if", tunIndex, "ipv6", cfg.Addr6 != "")
+	return nil
+}
+
+// enableTunRouting6 pulls IPv6 into the tunnel: the server exceptions first,
+// then the two default halves. Without it a v6-capable app prefers the AAAA
+// record and leaves with its real address while the screen says the tunnel is
+// up — the leak the split mode exists to prevent.
+func enableTunRouting6(cfg TunRouteConfig, tunIndex string) error {
+	for _, ip := range cfg.ServerIPs6 {
+		out, err := powershell(fmt.Sprintf(
+			`$r = Find-NetRoute -RemoteIPAddress '%s' -ErrorAction Stop | Where-Object NextHop | Select-Object -First 1; "$($r.NextHop) $($r.InterfaceIndex)"`,
+			ip))
+		if err != nil {
+			return fmt.Errorf("определить маршрут до сервера %s: %w\n%s", ip, err, out)
+		}
+		nextHop, physIndex, err := parseFindNetRoute(string(out))
+		if err != nil {
+			return fmt.Errorf("разобрать маршрут до сервера %s: %w", ip, err)
+		}
+		if out, err := netshRoute6(ip+"/128", physIndex, nextHop); err != nil {
+			return fmt.Errorf("исключить сервер %s из туннеля: %w\n%s", ip, err, out)
+		}
+	}
+
+	for _, half := range splitDefault6 {
+		if out, err := netshRoute6(half, tunIndex, cfg.Addr6); err != nil {
+			return fmt.Errorf("направить IPv6-трафик в %s: %w\n%s", cfg.Iface, err, out)
+		}
+	}
 	return nil
 }
 
@@ -162,6 +230,12 @@ func DisableTunRouting() error {
 	for _, ip := range installed.ServerIPs {
 		_, _ = ipCmd.run("route", "delete", ip, "mask", "255.255.255.255")
 	}
+	// Newest first, so the default halves go before the server exceptions they
+	// were added after — the same order the IPv4 teardown above walks.
+	for i := len(installedV6) - 1; i >= 0; i-- {
+		_, _ = ipCmd.run("netsh", installedV6[i]...)
+	}
+	installedV6 = nil
 	installed = nil
 
 	slog.Info("tun routing disabled")

@@ -8,6 +8,11 @@ const TunInterfaceName = "xray-tun"
 // hop when pointing the system's default traffic at the tunnel.
 const TunAddr = "10.0.0.1"
 
+// TunAddr6 is the IPv6 counterpart, a ULA prefix: without an address of its own
+// the interface takes no IPv6 at all, and every v6-capable app walks past the
+// tunnel with its real address. Only the split mode claims it — see ADR-0003.
+const TunAddr6 = "fdfe:dcba:9876::1"
+
 type XrayConfig struct {
 	Log       *LogConfig        `json:"log,omitempty"`
 	DNS       json.RawMessage   `json:"dns,omitempty"`
@@ -192,19 +197,28 @@ type TrojanServer struct {
 	Password string `json:"password"`
 }
 
+// TUNSettings is the tun inbound's settings block. The addresses go in
+// "gateway": xray drops keys it does not know, and the "address"/"networks"
+// pair this used to send was among them — the interface came up on xray's own
+// default, which happens to be TunAddr. That coincidence held for IPv4 and
+// would have quietly left IPv6 unassigned.
 type TUNSettings struct {
 	MTU           int      `json:"mtu"`
-	Address       []string `json:"address"`
-	Networks      []string `json:"networks"`
+	Gateway       []string `json:"gateway"`
 	InterfaceName string   `json:"name"`
 }
 
-func BuildTUNInbound() Inbound {
+// BuildTUNInbound builds the tun inbound. With ipv6 the interface also takes a
+// v6 address, which is what lets the routing layer pull IPv6 into the tunnel.
+func BuildTUNInbound(ipv6 bool) Inbound {
+	gateway := []string{TunAddr + "/24"}
+	if ipv6 {
+		gateway = append(gateway, TunAddr6+"/126")
+	}
 	// The settings are a fixed struct, so marshalling cannot fail.
 	settings, _ := json.Marshal(TUNSettings{
 		MTU:           9000,
-		Address:       []string{TunAddr + "/24"},
-		Networks:      []string{"tcp", "udp"},
+		Gateway:       gateway,
 		InterfaceName: TunInterfaceName,
 	})
 	return Inbound{

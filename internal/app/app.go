@@ -147,10 +147,18 @@ func (a *App) Run(ctx context.Context) error {
 	xraycfg.SetGeoAssets(filepath.Dir(binary))
 
 	// X-4: log the xray version; incompatibility is diagnosed here, not via retries.
-	if v, err := xray.Version(binary); err == nil {
+	v, err := xray.Version(binary)
+	if err == nil {
 		slog.Info("xray version", "version", v)
 	} else {
 		slog.Warn("could not determine xray version", "error", err)
+	}
+
+	// The split mode is a routing rule the core has to understand. An older core
+	// starts on the config and quietly ignores the rule, which would put every
+	// process in the tunnel — the opposite of what the mode promises.
+	if a.splitMode() && system.SplitOverTUN && err == nil && !xray.SupportsProcessRouting(v) {
+		return fmt.Errorf("режим SPLIT требует xray-core 26.0 или новее, установлен: %s", v)
 	}
 
 	// R-3: refuse to start a second instance racing over the same config/ports.
@@ -187,7 +195,7 @@ func (a *App) Run(ctx context.Context) error {
 // of letting xray retry for 30 seconds.
 func (a *App) resolveMode() error {
 	a.applySavedMode()
-	if a.mode != "tun" {
+	if !a.tunMode() {
 		return nil
 	}
 	err := a.checkPrivileges()
@@ -200,11 +208,24 @@ func (a *App) resolveMode() error {
 	if !a.modeFromState {
 		return err
 	}
-	slog.Warn("saved tun mode unavailable, falling back to proxy", "error", err)
-	a.pendingNote = "Прошлый режим TUN недоступен: " + err.Error() + ". Работаем в PROXY."
+	slog.Warn("saved mode unavailable, falling back to proxy", "mode", a.mode, "error", err)
+	a.pendingNote = "Прошлый режим " + strings.ToUpper(a.mode) + " недоступен: " + err.Error() + ". Работаем в PROXY."
 	a.mode = "proxy"
 	return nil
 }
+
+// tunMode reports whether this session is built on the TUN interface: the tun
+// mode itself, and — where per-process routing is done by xray's own process
+// matching rather than by the firewall — the split mode too (ADR-0003).
+func (a *App) tunMode() bool { return tunBased(a.mode) }
+
+// tunBased answers the same question for a mode the app has not switched to yet.
+func tunBased(mode string) bool {
+	return mode == "tun" || (mode == "split" && system.SplitOverTUN)
+}
+
+// splitMode reports whether only the listed processes travel the tunnel.
+func (a *App) splitMode() bool { return a.mode == "split" }
 
 // applySavedMode brings the app up in the mode the user last switched to,
 // overriding cfg.Mode: MODE in .env seeds the first run, after that the m key is
@@ -216,8 +237,8 @@ func (a *App) applySavedMode() {
 	if err != nil || s.Mode == "" {
 		return
 	}
-	if s.Mode != "proxy" && s.Mode != "tun" {
-		slog.Warn("saved mode is not proxy/tun, ignoring", "mode", s.Mode)
+	if !config.ValidMode(s.Mode) {
+		slog.Warn("saved mode is not a known mode, ignoring", "mode", s.Mode)
 		return
 	}
 	if s.Mode != a.mode {
@@ -369,15 +390,29 @@ func parseCoreVersion(line string) string {
 // would route the tunnel's own uplink back into the tunnel — or, for the kill
 // switch, see it dropped. It must run before the routes are installed, while
 // DNS still takes the physical path.
-func resolveAllIPs(hosts []string) []string {
+func resolveAllIPs(hosts []string) []string { return resolveIPs(hosts, false) }
+
+// resolveAllIPs6 is the same for IPv6, used where the tunnel claims that family
+// too. The two are kept apart because an exception route belongs to exactly one
+// of them: a v6 address handed to route.exe is an error, and a v4 one handed to
+// netsh interface ipv6 is another.
+func resolveAllIPs6(hosts []string) []string { return resolveIPs(hosts, true) }
+
+func resolveIPs(hosts []string, v6 bool) []string {
 	var ips []string
 	seen := map[string]bool{}
+	// A literal address is filtered by family exactly like a resolved one: an
+	// entry of the wrong family is not an exception the routing layer can write.
+	wanted := func(addr string) bool {
+		ip := net.ParseIP(addr)
+		return ip != nil && (ip.To4() == nil) == v6 && !seen[addr]
+	}
 	for _, host := range hosts {
 		if host == "" {
 			continue
 		}
-		if ip := net.ParseIP(host); ip != nil {
-			if !seen[host] {
+		if net.ParseIP(host) != nil {
+			if wanted(host) {
 				seen[host] = true
 				ips = append(ips, host)
 			}
@@ -389,9 +424,7 @@ func resolveAllIPs(hosts []string) []string {
 			continue
 		}
 		for _, a := range addrs {
-			// An IPv6 exception can't be expressed with the IPv4 routes we
-			// install; skipping it is safe because the tunnel only claims IPv4.
-			if ip := net.ParseIP(a); ip == nil || ip.To4() == nil || seen[a] {
+			if !wanted(a) {
 				continue
 			}
 			seen[a] = true

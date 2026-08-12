@@ -209,7 +209,7 @@ cp .env.example .env
 |---|---|---|
 | `VLESS_URL` | — | VLESS или `ss://` ссылка (fallback, если нет `subscriptions.txt`) |
 | `SUBSCRIPTION_URL` | — | URL подписки (приоритет выше, чем `VLESS_URL`) |
-| `MODE` | `proxy` | `proxy` (HTTP+SOCKS5) или `tun` (VPN) |
+| `MODE` | `proxy` | `proxy` (HTTP+SOCKS5), `tun` (VPN) или `split` (только процессы из `apps.txt`) |
 | `LOG_ENABLED` | `false` | Писать лог в файл |
 | `LOG_FILE` | `xray-runner.log` | Путь к лог-файлу |
 | `LOG_LEVEL` | `info` | Уровень файлового лога: `debug`, `info`, `warn`, `error` |

@@ -158,3 +158,15 @@ func TestStatusInfo_SplitRowOnlyWhenEnabled(t *testing.T) {
 		t.Errorf("enabled split → %+v, want the row and a SPLIT label", info)
 	}
 }
+
+// The m key walks proxy → tun → split → proxy, so every mode is reachable
+// without editing .env.
+func TestNextModeCycle(t *testing.T) {
+	want := []string{"tun", "split", "proxy"}
+	mode := "proxy"
+	for i, w := range want {
+		if mode = nextMode(mode); mode != w {
+			t.Fatalf("step %d: got %q, want %q", i, mode, w)
+		}
+	}
+}

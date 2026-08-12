@@ -24,5 +24,5 @@ func checkTunPrivileges() error {
 	if err != nil || elevated {
 		return nil
 	}
-	return fmt.Errorf("режим TUN требует прав администратора — запустите от имени администратора")
+	return fmt.Errorf("режим требует прав администратора — запустите от имени администратора")
 }

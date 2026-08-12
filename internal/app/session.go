@@ -38,13 +38,20 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	}
 	a.splitApps = apps
 
+	// Split mode with an empty list would tunnel nothing at all. Refusing is the
+	// honest answer: silently behaving like a direct connection looks exactly
+	// like a broken tunnel from the status screen.
+	if a.splitMode() && len(a.splitApps) == 0 {
+		return tui.StatusQuit, fmt.Errorf("режим SPLIT: список процессов пуст — выберите процессы клавишей p в меню подписок")
+	}
+
 	cfgJSON, ports, err := a.buildSessionConfig(t)
 	if err != nil {
 		return tui.StatusQuit, err
 	}
 	// R-3: our own previous session is already stopped here, so anything still
 	// listening is a foreign process.
-	if a.mode != "tun" {
+	if !a.tunMode() {
 		for _, p := range []int{ports.socks, ports.http} {
 			if portInUse(p) {
 				return tui.StatusQuit, fmt.Errorf("порт %d уже занят другим процессом — возможно, запущен второй экземпляр", p)
@@ -139,7 +146,7 @@ func (a *App) startHealth(ctx context.Context, ports sessionPorts) func() {
 		switch {
 		case a.healthLoop != nil:
 			a.healthLoop(hctx, ports)
-		case a.mode == "tun":
+		case a.tunMode():
 			a.healthCheckLoopConnectivity(hctx)
 		default:
 			a.healthCheckLoopPorts(hctx, ports.socks, ports.http)
@@ -257,17 +264,30 @@ func (a *App) headless() bool {
 // switchMode flips proxy⇄tun for the next session. TUN needs privileges, so the
 // check happens before the current session is torn down.
 func (a *App) switchMode() error {
-	if a.mode == "tun" {
-		a.mode = "proxy"
-		a.rememberMode()
-		return nil
+	next := nextMode(a.mode)
+	// Only the TUN-based modes need elevation. Where split rides on the firewall
+	// instead, an unprivileged binary carrying CAP_NET_ADMIN can still do it, and
+	// refusing the switch here would hide a mode that works.
+	if tunBased(next) {
+		if err := a.checkPrivileges(); err != nil {
+			return err
+		}
 	}
-	if err := a.checkPrivileges(); err != nil {
-		return err
-	}
-	a.mode = "tun"
+	a.mode = next
 	a.rememberMode()
 	return nil
+}
+
+// nextMode is the cycle the m key walks: proxy → tun → split → proxy.
+func nextMode(mode string) string {
+	switch mode {
+	case "proxy":
+		return "tun"
+	case "tun":
+		return "split"
+	default:
+		return "proxy"
+	}
 }
 
 // rememberMode persists the switch so the next start comes up the same way. A
@@ -314,7 +334,7 @@ type sessionPorts struct {
 // packets fall back into the tunnel they left and loop.
 func (a *App) buildSessionConfig(t *target) (json.RawMessage, sessionPorts, error) {
 	raw, ports, err := a.buildModeConfig(t)
-	if err != nil || a.mode != "tun" {
+	if err != nil || !a.tunMode() {
 		return raw, ports, err
 	}
 	bind, err := system.DirectBind()
@@ -332,8 +352,8 @@ func (a *App) buildSessionConfig(t *target) (json.RawMessage, sessionPorts, erro
 // single server under its profile's routing, or template.json.
 func (a *App) buildModeConfig(t *target) (json.RawMessage, sessionPorts, error) {
 	inbounds := a.template.Inbounds
-	if a.mode == "tun" {
-		inbounds = []xraycfg.Inbound{xraycfg.BuildTUNInbound()}
+	if a.tunMode() {
+		inbounds = []xraycfg.Inbound{xraycfg.BuildTUNInbound(a.splitMode())}
 	} else if len(a.splitApps) > 0 {
 		// The listeners the split-tunnel nft rules redirect into. They are added,
 		// not substituted: the SOCKS/HTTP pair still serves the system proxy, and
@@ -347,6 +367,9 @@ func (a *App) buildModeConfig(t *target) (json.RawMessage, sessionPorts, error) 
 		if err != nil {
 			return nil, sessionPorts{}, err
 		}
+		if raw, err = a.withSplitRouting(raw); err != nil {
+			return nil, sessionPorts{}, err
+		}
 		// The health check must travel the tunnel it reports on: the panel's own
 		// rules send the check hosts out direct, which is how the screen showed
 		// "ок" while nothing was going through the proxy (ADR-0002).
@@ -354,7 +377,7 @@ func (a *App) buildModeConfig(t *target) (json.RawMessage, sessionPorts, error) 
 		if err != nil {
 			return nil, sessionPorts{}, err
 		}
-		ports, err := portsFromInbounds(inbounds, a.mode)
+		ports, err := portsFromInbounds(inbounds, a.tunMode())
 		return raw, ports, err
 	}
 
@@ -362,7 +385,7 @@ func (a *App) buildModeConfig(t *target) (json.RawMessage, sessionPorts, error) 
 	// routing and dns: those rules (direct .ru, blocked hosts) are the point of
 	// the subscription, and rebuilding from template.json would drop them.
 	if raw, ok := a.singleServerFromProfile(t, inbounds); ok {
-		ports, err := portsFromInbounds(inbounds, a.mode)
+		ports, err := portsFromInbounds(inbounds, a.tunMode())
 		return raw, ports, err
 	}
 
@@ -379,8 +402,31 @@ func (a *App) buildModeConfig(t *target) (json.RawMessage, sessionPorts, error) 
 	if err != nil {
 		return nil, sessionPorts{}, fmt.Errorf("marshal config: %w", err)
 	}
-	ports, err := portsFromInbounds(inbounds, a.mode)
+	if raw, err = a.withSplitRouting(raw); err != nil {
+		return nil, sessionPorts{}, err
+	}
+	if a.splitMode() {
+		// The other two branches prepend it themselves. Here it matters only in
+		// split mode: the probe leaves our own process, which is not in the list,
+		// so without this rule it would go direct and report the tunnel healthy
+		// while nothing at all goes through it (ADR-0002).
+		if raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs())); err != nil {
+			return nil, sessionPorts{}, err
+		}
+	}
+	ports, err := portsFromInbounds(inbounds, a.tunMode())
 	return raw, ports, err
+}
+
+// withSplitRouting rewrites a finished config so that only the processes from
+// apps.txt travel the tunnel and everything else goes out directly. A no-op
+// outside split mode, and outside the platforms where the mode is implemented
+// by xray's own process matching rather than by the firewall (ADR-0003).
+func (a *App) withSplitRouting(raw json.RawMessage) (json.RawMessage, error) {
+	if !a.splitMode() || !system.SplitOverTUN {
+		return raw, nil
+	}
+	return xraycfg.ApplySplitRouting(raw, a.splitApps)
 }
 
 // singleServerFromProfile builds the session from the profile the chosen server
@@ -398,6 +444,9 @@ func (a *App) singleServerFromProfile(t *target, inbounds []xraycfg.Inbound) (js
 
 	raw, err := xraycfg.MergeProfileSingle(t.profileRaw, tag, inbounds, a.cfg.XrayLogLvl)
 	if err == nil {
+		raw, err = a.withSplitRouting(raw)
+	}
+	if err == nil {
 		raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs()))
 	}
 	if err != nil {
@@ -413,8 +462,8 @@ func (a *App) singleServerFromProfile(t *target, inbounds []xraycfg.Inbound) (js
 
 // portsFromInbounds finds the SOCKS/HTTP ports by protocol/tag rather than by
 // position, so reordering inbounds cannot silently swap them (Q-2).
-func portsFromInbounds(inbounds []xraycfg.Inbound, mode string) (sessionPorts, error) {
-	if mode == "tun" {
+func portsFromInbounds(inbounds []xraycfg.Inbound, tun bool) (sessionPorts, error) {
+	if tun {
 		return sessionPorts{}, nil
 	}
 	var p sessionPorts
@@ -434,7 +483,7 @@ func portsFromInbounds(inbounds []xraycfg.Inbound, mode string) (sessionPorts, e
 
 // bringUp waits for xray to listen and enables proxy/kill switch.
 func (a *App) bringUp(ctx context.Context, t *target, ports sessionPorts) error {
-	if a.mode == "tun" {
+	if a.tunMode() {
 		return a.bringUpTun(ctx, t)
 	}
 	return a.bringUpProxy(ctx, ports)
@@ -454,6 +503,11 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 
 	// PROXY_SYSTEM=false is the "only the listed apps" case: the system proxy
 	// stays untouched, so the browser and everything else keep going direct.
+	// Split mode is that case by definition, whatever PROXY_SYSTEM says.
+	if a.splitMode() {
+		slog.Info("system proxy left alone", "reason", "mode=split")
+		return nil
+	}
 	if !a.cfg.ProxySystem {
 		slog.Info("system proxy left alone", "reason", "PROXY_SYSTEM=false")
 		return nil
@@ -611,6 +665,13 @@ func (a *App) bringUpTun(ctx context.Context, t *target) error {
 		Addr:      xraycfg.TunAddr,
 		ServerIPs: resolveAllIPs(t.serverHosts()),
 	}
+	// Only split mode claims IPv6, and only there is the server's v6 address
+	// worth resolving: an exception route for an address family the tunnel does
+	// not touch would be a route added for nothing.
+	if a.splitMode() {
+		routeCfg.Addr6 = xraycfg.TunAddr6
+		routeCfg.ServerIPs6 = resolveAllIPs6(t.serverHosts())
+	}
 	if len(routeCfg.ServerIPs) == 0 {
 		return fmt.Errorf("не удалось определить IP VPN-сервера — без него маршрутизация TUN оставит машину без сети")
 	}
@@ -619,7 +680,14 @@ func (a *App) bringUpTun(ctx context.Context, t *target) error {
 	}
 	a.tunRouted = true
 
-	if a.cfg.KillSwitch {
+	if a.cfg.KillSwitch && a.splitMode() {
+		// Kill switch cuts everything that does not go through the tunnel, which
+		// in split mode is most of the system working as intended (ADR-0003).
+		slog.Info("kill switch skipped", "reason", "mode=split")
+		a.publishStatus(tui.StatusUpdate{
+			Note: "Kill switch не работает в режиме SPLIT: трафик мимо туннеля здесь — норма.",
+		})
+	} else if a.cfg.KillSwitch {
 		// A balancer profile rotates across many servers, and the whitelist holds
 		// all of them — a single-endpoint whitelist used to make this case unsafe,
 		// which is why it was skipped before.
@@ -741,10 +809,21 @@ func (a *App) statusInfo(t *target, ports sessionPorts) tui.StatusInfo {
 		info.Protocol = entryProtocol(*e)
 	}
 
-	if a.mode == "tun" {
+	info.NextMode = strings.ToUpper(nextMode(a.mode))
+
+	switch {
+	case a.splitMode() && system.SplitOverTUN:
+		// No "captured N of M" here: xray matches the process when the connection
+		// is opened, so there is nothing standing to count (ADR-0003).
+		// The DNS caveat is on the screen because it is the one place the mode
+		// does not do what its name says: Windows resolves through svchost.exe,
+		// so DNS cannot be told apart by process (ADR-0003).
+		info.Mode = "SPLIT (только выбранные процессы · DNS системы через VPN)"
+		info.Split = true
+		info.Apps = a.splitApps
+	case a.mode == "tun":
 		info.Mode = "TUN (весь трафик через VPN)"
-		info.NextMode = "PROXY"
-	} else {
+	default:
 		addr := "127.0.0.1:" + strconv.Itoa(ports.http)
 		info.Mode = "PROXY (" + addr + ")"
 		// proxyTouched, not cfg.ProxySystem: it reports what actually happened,
@@ -761,7 +840,6 @@ func (a *App) statusInfo(t *target, ports sessionPorts) tui.StatusInfo {
 		} else {
 			info.SplitMode += " · только выбранные процессы"
 		}
-		info.NextMode = "TUN"
 		// splitState, not the apps list: a split that refused to start (no root)
 		// must not draw a process row claiming nothing is running.
 		info.Split = a.splitState()

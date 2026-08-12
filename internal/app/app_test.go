@@ -15,7 +15,7 @@ func TestPortsFromInbounds(t *testing.T) {
 			{Tag: "http", Protocol: "http", Port: 10809},
 			{Tag: "socks", Protocol: "socks", Port: 10808},
 		}
-		p, err := portsFromInbounds(inbounds, "proxy")
+		p, err := portsFromInbounds(inbounds, false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -26,13 +26,13 @@ func TestPortsFromInbounds(t *testing.T) {
 
 	t.Run("missing http is an error", func(t *testing.T) {
 		inbounds := []xraycfg.Inbound{{Tag: "socks", Protocol: "socks", Port: 10808}}
-		if _, err := portsFromInbounds(inbounds, "proxy"); err == nil {
+		if _, err := portsFromInbounds(inbounds, false); err == nil {
 			t.Error("expected error when http inbound is missing")
 		}
 	})
 
 	t.Run("tun mode needs no local ports", func(t *testing.T) {
-		if _, err := portsFromInbounds(nil, "tun"); err != nil {
+		if _, err := portsFromInbounds(nil, true); err != nil {
 			t.Errorf("tun mode should not require socks/http ports: %v", err)
 		}
 	})

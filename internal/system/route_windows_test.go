@@ -317,3 +317,72 @@ func TestDirectBind_FailsWhenLookupFails(t *testing.T) {
 		t.Fatal("expected an error when the route lookup fails")
 	}
 }
+
+// Split mode claims IPv6 as well: without these routes a v6-capable app prefers
+// the AAAA record and leaves the machine with its real address while the status
+// screen reports a healthy tunnel.
+var tunCfg6 = TunRouteConfig{
+	Iface: "xray-tun", Addr: "10.0.0.1", ServerIPs: []string{"45.150.32.235"},
+	Addr6: "fdfe:dcba:9876::1", ServerIPs6: []string{"2a00:1450::64"},
+}
+
+func TestEnableTunRouting_SendsIPv6IntoTunAndExcludesServer(t *testing.T) {
+	f := newFakeIP()
+	f.findRoute = "fe80::1 12\r\n"
+	withFakeIP(t, f)
+
+	if err := EnableTunRouting(tunCfg6); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+
+	// The server's exception goes on the physical interface, the two default
+	// halves on the tun — and the exception first, so the uplink is never
+	// blackholed in between.
+	if !f.has("netsh interface ipv6 add route prefix=2a00:1450::64/128 interface=12 store=active nexthop=fe80::1") {
+		t.Errorf("missing IPv6 server exclusion, got: %v", f.cmds)
+	}
+	for _, half := range []string{"::/1", "8000::/1"} {
+		want := "netsh interface ipv6 add route prefix=" + half + " interface=27 store=active nexthop=fdfe:dcba:9876::1"
+		if !f.has(want) {
+			t.Errorf("missing IPv6 default half %q, got: %v", half, f.cmds)
+		}
+	}
+}
+
+// Tun mode leaves IPv6 alone, so an empty Addr6 must not produce a single netsh
+// call: the mode's behaviour is unchanged by the split work.
+func TestEnableTunRouting_WithoutIPv6TouchesNoIPv6Routes(t *testing.T) {
+	f := newFakeIP()
+	withFakeIP(t, f)
+
+	if err := EnableTunRouting(tunCfg); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	if f.has("interface ipv6") {
+		t.Errorf("ipv6 routes installed in tun mode, got: %v", f.cmds)
+	}
+}
+
+// Teardown must remove exactly what it added, including the IPv6 half — a
+// leftover ::/1 through a dead adapter takes the machine's IPv6 with it.
+func TestDisableTunRouting_RemovesIPv6Routes(t *testing.T) {
+	f := newFakeIP()
+	f.findRoute = "fe80::1 12\r\n"
+	withFakeIP(t, f)
+
+	if err := EnableTunRouting(tunCfg6); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	if err := DisableTunRouting(); err != nil {
+		t.Fatalf("DisableTunRouting: %v", err)
+	}
+
+	for _, prefix := range []string{"::/1", "8000::/1", "2a00:1450::64/128"} {
+		if !f.has("netsh interface ipv6 delete route prefix=" + prefix) {
+			t.Errorf("IPv6 route %q not removed, got: %v", prefix, f.cmds)
+		}
+	}
+	if installedV6 != nil {
+		t.Errorf("installedV6 not cleared: %v", installedV6)
+	}
+}
