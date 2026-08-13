@@ -65,6 +65,7 @@ func TestBuildSessionConfig_NoSplitAppsKeepsInbounds(t *testing.T) {
 func TestBuildSessionConfig_SplitAppsAddRedirectInbounds(t *testing.T) {
 	a := newTemplateApp(t)
 	a.splitApps = []string{"code"}
+	a.resolveSplit()
 
 	raw, ports, err := a.buildSessionConfig(splitTarget())
 	if err != nil {
@@ -159,14 +160,35 @@ func TestStatusInfo_SplitRowOnlyWhenEnabled(t *testing.T) {
 	}
 }
 
-// The m key walks proxy → tun → split → proxy, so every mode is reachable
-// without editing .env.
+// The m key walks proxy ⇄ tun. Split is off the cycle: it is what proxy mode
+// does when there are processes to route, not a mode to switch into.
 func TestNextModeCycle(t *testing.T) {
-	want := []string{"tun", "split", "proxy"}
-	mode := "proxy"
-	for i, w := range want {
-		if mode = nextMode(mode); mode != w {
-			t.Fatalf("step %d: got %q, want %q", i, mode, w)
+	if got := nextMode("proxy"); got != "tun" {
+		t.Errorf("nextMode(proxy) = %q, want tun", got)
+	}
+	if got := nextMode("tun"); got != "proxy" {
+		t.Errorf("nextMode(tun) = %q, want proxy", got)
+	}
+}
+
+// Split turns itself on: proxy mode plus a non-empty list, and nothing else.
+// TUN already carries everything, so a list there changes nothing.
+func TestResolveSplit(t *testing.T) {
+	cases := []struct {
+		mode string
+		apps []string
+		want bool
+	}{
+		{"proxy", []string{"code"}, true},
+		{"proxy", nil, false},
+		{"tun", []string{"code"}, false},
+	}
+	for _, c := range cases {
+		a := newTemplateApp(t)
+		a.mode, a.splitApps = c.mode, c.apps
+		a.resolveSplit()
+		if a.split != c.want {
+			t.Errorf("mode=%s apps=%v: split = %v, want %v", c.mode, c.apps, a.split, c.want)
 		}
 	}
 }

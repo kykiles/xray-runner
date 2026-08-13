@@ -55,8 +55,7 @@ type statusModel struct {
 
 	started  time.Time
 	last     *StatusUpdate
-	note     string
-	noteErr  bool
+	note     notice
 	appsOpen bool // the split-tunnel list is expanded to one process per line
 	action   StatusAction
 	width    int // terminal width; 0 until the first WindowSizeMsg
@@ -112,6 +111,8 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, onResize()
 	case statusTickMsg:
 		return m, statusTick()
+	case noticeTickMsg:
+		return m, m.note.tick(msg)
 	case sessionEndedMsg:
 		m.action = StatusQuit
 		return m, tea.Quit
@@ -120,7 +121,13 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.Apps != nil:
 			m.info.Apps = msg.Apps
 		case msg.Note != "":
-			m.note, m.noteErr = msg.Note, msg.Err
+			// The same fading line every other screen uses (notice.go): read once,
+			// then out of the way — the detail stays in the log.
+			style := warnStyle
+			if msg.Err {
+				style = errStyle
+			}
+			return m, tea.Batch(m.note.set(msg.Note, style), m.waitUpdate())
 		default:
 			u := msg
 			m.last = &u
@@ -188,12 +195,8 @@ func (m statusModel) View() string {
 	// The status row carries its own health colors, so it is written raw.
 	b.WriteString("  " + dimStyle.Render(pad("Статус", labelWidth)) + m.health() + "\n")
 
-	if m.note != "" {
-		style := warnStyle
-		if m.noteErr {
-			style = errStyle
-		}
-		b.WriteString("\n  " + style.Render(m.note) + "\n")
+	if !m.note.empty() {
+		b.WriteString("\n  " + m.note.view() + "\n")
 	}
 
 	keys := fmt.Sprintf("  ← назад к серверам · m режим %s · r перезапуск · q выход", m.info.NextMode)

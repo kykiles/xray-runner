@@ -16,11 +16,6 @@ import (
 // routing rule, and this package has nothing to install or tear down.
 const SplitOverTUN = true
 
-// ErrSplitUnsupported is returned when per-process routing is asked for in
-// proxy mode, where Windows has no mechanism for it: redirecting a chosen
-// process into a local listener needs a WFP callout driver.
-var ErrSplitUnsupported = errors.New("маршрутизация по процессам на Windows работает в режиме SPLIT (MODE=split)")
-
 // ListProcesses returns the distinct names of the running processes, sorted, as
 // the picker shows them — with the .exe suffix, which is what xray matches
 // against.
@@ -54,12 +49,10 @@ func ListProcesses() ([]Process, error) {
 	return out, nil
 }
 
-func EnableSplit(names []string, tcpPort, dnsPort int) ([]string, error) {
-	if len(names) == 0 {
-		return nil, nil
-	}
-	return nil, ErrSplitUnsupported
-}
+// EnableSplit/RefreshSplit/DisableSplit have nothing to do here: the tunnel
+// carries the traffic and xray matches the process, so there is no ruleset to
+// install, rescan or tear down (ADR-0003).
+func EnableSplit(names []string, tcpPort, dnsPort int) ([]string, error) { return nil, nil }
 
 func RefreshSplit(names []string) ([]string, error) { return nil, nil }
 

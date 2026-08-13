@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -106,8 +107,15 @@ func Load(filenames ...string) (*Config, error) {
 		BenchTimeout:     durationOr("BENCH_TIMEOUT", 8*time.Second),
 	}
 
+	// split used to be a mode of its own. It is now what proxy mode does when
+	// apps.txt is not empty, so the old value keeps working instead of stopping
+	// a start over a word.
+	if cfg.Mode == "split" {
+		slog.Warn("MODE=split is gone: per-process routing now turns itself on in proxy mode when apps.txt is not empty")
+		cfg.Mode = "proxy"
+	}
 	if !ValidMode(cfg.Mode) {
-		return nil, fmt.Errorf("MODE must be 'proxy', 'tun' or 'split', got %q", cfg.Mode)
+		return nil, fmt.Errorf("MODE must be 'proxy' or 'tun', got %q", cfg.Mode)
 	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
@@ -165,5 +173,5 @@ func parseBool(key string, def bool) (bool, error) {
 // ValidMode reports whether a string names a connection mode. Shared with the
 // saved-state loader, which restores a mode written by an older build.
 func ValidMode(mode string) bool {
-	return mode == "proxy" || mode == "tun" || mode == "split"
+	return mode == "proxy" || mode == "tun"
 }

@@ -53,8 +53,10 @@ type App struct {
 	lockHeld      bool
 	binary        string
 	template      *xraycfg.XrayConfig
-	mode          string // active mode; starts at cfg.Mode or the saved mode, toggled by the m key
+	mode          string // active mode (proxy/tun); starts at cfg.Mode or the saved mode, toggled by the m key
 	modeFromState bool   // mode came from the saved state, not from cfg.Mode
+	split         bool   // this session routes only the processes from apps.txt (derived, see resolveSplit)
+	coreVer       string // xray version string, empty when it could not be read
 	pendingNote   string // shown on the next status screen (e.g. a mode fallback)
 	noTTY         bool   // stdin is not a terminal (systemd, pipe): no screen to draw on
 	nav           nav    // menu position, kept across sessions
@@ -150,15 +152,9 @@ func (a *App) Run(ctx context.Context) error {
 	v, err := xray.Version(binary)
 	if err == nil {
 		slog.Info("xray version", "version", v)
+		a.coreVer = v
 	} else {
 		slog.Warn("could not determine xray version", "error", err)
-	}
-
-	// The split mode is a routing rule the core has to understand. An older core
-	// starts on the config and quietly ignores the rule, which would put every
-	// process in the tunnel — the opposite of what the mode promises.
-	if a.splitMode() && system.SplitOverTUN && err == nil && !xray.SupportsProcessRouting(v) {
-		return fmt.Errorf("режим SPLIT требует xray-core 26.0 или новее, установлен: %s", v)
 	}
 
 	// R-3: refuse to start a second instance racing over the same config/ports.
@@ -216,16 +212,40 @@ func (a *App) resolveMode() error {
 
 // tunMode reports whether this session is built on the TUN interface: the tun
 // mode itself, and — where per-process routing is done by xray's own process
-// matching rather than by the firewall — the split mode too (ADR-0003).
-func (a *App) tunMode() bool { return tunBased(a.mode) }
+// matching rather than by the firewall — split routing too (ADR-0003).
+func (a *App) tunMode() bool { return a.mode == "tun" || (a.split && system.SplitOverTUN) }
 
-// tunBased answers the same question for a mode the app has not switched to yet.
-func tunBased(mode string) bool {
-	return mode == "tun" || (mode == "split" && system.SplitOverTUN)
+// resolveSplit decides whether this session routes only the processes from
+// apps.txt. Split is not a mode the user picks: it is what proxy mode does when
+// there is a list to route and the platform can route it — the same rule on
+// both systems, so there is no third MODE value to know about.
+//
+// Anything missing degrades to plain proxy with a note: refusing to connect
+// over a routing extra would cost the user the working connection too.
+func (a *App) resolveSplit() {
+	a.split = a.mode == "proxy" && len(a.splitApps) > 0
+	if !a.split || !system.SplitOverTUN {
+		return
+	}
+	// Where split rides on the tunnel it needs the elevation TUN needs, and a
+	// core that understands the "process" routing rule: an older core starts on
+	// the config and quietly ignores it, putting the whole system in the tunnel.
+	if err := a.checkPrivileges(); err != nil {
+		a.splitOff(err.Error())
+		return
+	}
+	if a.coreVer != "" && !xray.SupportsProcessRouting(a.coreVer) {
+		a.splitOff("нужен xray-core 26.0 или новее, установлен " + a.coreVer)
+	}
 }
 
-// splitMode reports whether only the listed processes travel the tunnel.
-func (a *App) splitMode() bool { return a.mode == "split" }
+// splitOff drops back to plain proxy and says why — on screen once, in the log
+// for good.
+func (a *App) splitOff(reason string) {
+	a.split = false
+	slog.Warn("split routing off, staying in proxy", "reason", reason, "apps", len(a.splitApps))
+	a.pendingNote = "Маршрутизация по процессам выключена: " + reason
+}
 
 // applySavedMode brings the app up in the mode the user last switched to,
 // overriding cfg.Mode: MODE in .env seeds the first run, after that the m key is
