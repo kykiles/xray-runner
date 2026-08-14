@@ -301,9 +301,7 @@ func (m subsModel) View() string {
 		b.WriteString("  " + textStyle.Render("Вставьте URL подписки (http/https) или ссылку на сервер") + "\n")
 		b.WriteString("  " + textStyle.Render("(vless/vmess/ss/hysteria2):") + "\n")
 		b.WriteString("  " + m.input.View() + "\n")
-		if !m.note.empty() {
-			b.WriteString("\n  " + m.note.view() + "\n")
-		}
+		b.WriteString("\n  " + m.note.view() + "\n")
 		b.WriteString(legend(m.width, "  enter добавить · esc назад · ctrl+c выход"))
 		return b.String()
 	}

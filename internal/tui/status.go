@@ -195,9 +195,9 @@ func (m statusModel) View() string {
 	// The status row carries its own health colors, so it is written raw.
 	b.WriteString("  " + dimStyle.Render(pad("Статус", labelWidth)) + m.health() + "\n")
 
-	if !m.note.empty() {
-		b.WriteString("\n  " + m.note.view() + "\n")
-	}
+	// The notice keeps its two lines, empty or not — same as the list screens:
+	// otherwise the legend jumps up the moment a message fades out.
+	b.WriteString("\n  " + m.note.view() + "\n")
 
 	keys := fmt.Sprintf("  ← назад к серверам · m режим %s · r перезапуск · q выход", m.info.NextMode)
 	if len(m.info.Apps) > appsPreview {

@@ -118,3 +118,15 @@ func TestUptimeStartsOnFirstOK(t *testing.T) {
 		t.Errorf("health() = %q, want an uptime once connected", got)
 	}
 }
+
+// The legend used to jump up a line when a notice faded out: the notice block
+// was only drawn while it had text.
+func TestStatus_LegendStaysPutWhenNoticeFades(t *testing.T) {
+	m := statusModel{info: StatusInfo{Title: "s", Protocol: "vless", Mode: "PROXY"}, width: 80}
+	withNote := m
+	withNote.note.set("что-то пошло не так", warnStyle)
+
+	if a, b := strings.Count(m.View(), "\n"), strings.Count(withNote.View(), "\n"); a != b {
+		t.Errorf("screen height changes with the notice: %d vs %d lines", a, b)
+	}
+}
