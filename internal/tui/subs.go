@@ -301,7 +301,7 @@ func (m subsModel) View() string {
 		b.WriteString("  " + textStyle.Render("Вставьте URL подписки (http/https) или ссылку на сервер") + "\n")
 		b.WriteString("  " + textStyle.Render("(vless/vmess/ss/hysteria2):") + "\n")
 		b.WriteString("  " + m.input.View() + "\n")
-		b.WriteString("\n  " + m.note.view() + "\n")
+		b.WriteString("\n  " + clip(m.note.view(), m.width-2) + "\n")
 		b.WriteString(legend(m.width, "  enter добавить · esc назад · ctrl+c выход"))
 		return b.String()
 	}
@@ -365,7 +365,7 @@ func (m subsModel) View() string {
 	if m.mode == subsConfirmDelete {
 		b.WriteString("  " + warnStyle.Render(fmt.Sprintf("Удалить «%s»? (y/n)", m.subs[m.cursor].Name)) + "\n")
 	} else {
-		b.WriteString("  " + m.note.view() + "\n")
+		b.WriteString("  " + clip(m.note.view(), m.width-2) + "\n")
 	}
 
 	b.WriteString(legend(m.width, keys))

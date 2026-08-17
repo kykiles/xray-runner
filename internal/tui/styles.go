@@ -5,10 +5,23 @@ package tui
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// newSpinner is the spinner every waiting screen uses. The braille dots of
+// spinner.Dot are not in the Windows console fonts, so conhost draws them as
+// "?"; there the plain ASCII bars spin just as well.
+func newSpinner() spinner.Model {
+	s := spinner.Dot
+	if runtime.GOOS == "windows" {
+		s = spinner.Line
+	}
+	return spinner.New(spinner.WithSpinner(s), spinner.WithStyle(cursorStyle))
+}
 
 // Grey ramp (docs/colors.jpg): a monochrome scale where prominence is lightness,
 // brightest for titles and the selected/best rows, mid-grey for body text, dim

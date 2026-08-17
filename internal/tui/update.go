@@ -72,7 +72,7 @@ var updateMenu = []string{"Обновить ядро xray", "Обновить г
 // updating from.
 func RunUpdate(ctx context.Context, xrayPath, installed string) error {
 	dir := filepath.Dir(xrayPath)
-	sp := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(cursorStyle))
+	sp := newSpinner()
 	m := updateModel{ctx: ctx, xrayPath: xrayPath, dir: dir, installed: installed, geoDate: geoDate(dir), spinner: sp}
 	_, err := runScreen(m)
 	return err

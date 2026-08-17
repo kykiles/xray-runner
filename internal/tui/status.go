@@ -196,8 +196,11 @@ func (m statusModel) View() string {
 	b.WriteString("  " + dimStyle.Render(pad("Статус", labelWidth)) + m.health() + "\n")
 
 	// The notice keeps its two lines, empty or not — same as the list screens:
-	// otherwise the legend jumps up the moment a message fades out.
-	b.WriteString("\n  " + m.note.view() + "\n")
+	// otherwise the legend jumps up the moment a message fades out. It is cut to
+	// the terminal width for the same reason: a long message (the tun→proxy
+	// fallback runs past 100 columns) wrapped onto a second line on an 80-column
+	// console and gave it back when it faded, jumping the legend up a row.
+	b.WriteString("\n  " + clip(m.note.view(), m.width-2) + "\n")
 
 	keys := fmt.Sprintf("  ← назад к серверам · m режим %s · r перезапуск · q выход", m.info.NextMode)
 	if len(m.info.Apps) > appsPreview {

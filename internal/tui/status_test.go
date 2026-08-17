@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestFmtDuration(t *testing.T) {
@@ -128,5 +129,17 @@ func TestStatus_LegendStaysPutWhenNoticeFades(t *testing.T) {
 
 	if a, b := strings.Count(m.View(), "\n"), strings.Count(withNote.View(), "\n"); a != b {
 		t.Errorf("screen height changes with the notice: %d vs %d lines", a, b)
+	}
+}
+
+// A notice longer than the terminal is cut to one line, so the legend keeps its
+// place when the message fades out (Windows console at 80 columns).
+func TestStatusLongNoticeKeepsHeight(t *testing.T) {
+	m := statusModel{width: 80, info: StatusInfo{Title: "s", Protocol: "vless", Mode: "PROXY"}}
+	m.note.set(strings.Repeat("длинное предупреждение ", 8), errStyle)
+	for _, line := range strings.Split(m.View(), "\n") {
+		if w := lipgloss.Width(line); w > m.width {
+			t.Fatalf("строка шириной %d колонок при терминале в %d: %q", w, m.width, line)
+		}
 	}
 }

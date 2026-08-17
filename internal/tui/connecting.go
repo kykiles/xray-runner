@@ -36,7 +36,7 @@ type connectingModel struct {
 // returned — a Ctrl+C landing exactly as connect succeeded still means "cancel",
 // and the caller must tear the session down.
 func ShowConnecting(title string, connect func() error, cancel func()) error {
-	sp := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(cursorStyle))
+	sp := newSpinner()
 	m := connectingModel{title: stripEmoji(title), connect: connect, cancel: cancel, spinner: sp}
 	res, err := runScreen(m)
 	if err != nil {

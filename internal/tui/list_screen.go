@@ -710,7 +710,7 @@ func (m listModel) View() string {
 	case m.refreshing:
 		b.WriteString("  " + dimStyle.Render("Обновление подписки...") + "\n")
 	default:
-		b.WriteString("  " + m.note.view() + "\n")
+		b.WriteString("  " + clip(m.note.view(), m.width-2) + "\n")
 	}
 
 	b.WriteString(legend(m.width, keys))
