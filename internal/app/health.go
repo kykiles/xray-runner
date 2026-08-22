@@ -299,14 +299,17 @@ func (a *App) recordHealth(ok bool, latency time.Duration) {
 // (scripted runs have none) and must never block a health loop, so a full or
 // absent channel simply drops the update.
 func (a *App) publishStatus(u tui.StatusUpdate) {
+	// Held across the send, not just the read: closeStatusCh closes the channel
+	// under this same lock, and releasing it first leaves a window where a
+	// publisher sends into a channel that has just been closed. Safe to hold,
+	// since the send below never blocks.
 	a.statusMu.Lock()
-	ch := a.statusCh
-	a.statusMu.Unlock()
-	if ch == nil {
+	defer a.statusMu.Unlock()
+	if a.statusCh == nil {
 		return
 	}
 	select {
-	case ch <- u:
+	case a.statusCh <- u:
 	default:
 	}
 }

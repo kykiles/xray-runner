@@ -152,8 +152,8 @@ func (a *App) startHealth(ctx context.Context, ports sessionPorts) func() {
 	}
 }
 
-// watchSession shows the status screen. The update channel is closed only after
-// every publisher has stopped, so no health loop can send on a closed channel.
+// watchSession shows the status screen. The update channel is closed under the
+// lock publishers send under, so no publisher can send on a closed channel.
 func (a *App) watchSession(ctx context.Context, t *target, ports sessionPorts, stopHealth func()) (tui.StatusAction, error) {
 	// U-2/U-3: a scripted or systemd run has no screen to draw on — keep the
 	// session up until the context ends, with progress going to the log.
@@ -193,9 +193,8 @@ func (a *App) watchSession(ctx context.Context, t *target, ports sessionPorts, s
 
 // showStatusScreen draws one status screen with its own update channel. The
 // channel is closed when the session context ends — a dead core takes the screen
-// down with it instead of leaving the user staring at a dead session — and only
-// after every publisher has stopped, so no health loop can send on a closed
-// channel.
+// down with it instead of leaving the user staring at a dead session — under the
+// lock publishers send under, so no publisher can send on a closed channel.
 func (a *App) showStatusScreen(ctx context.Context, t *target, ports sessionPorts, stopHealth func(), note tui.StatusUpdate) (tui.StatusAction, error) {
 	ch := make(chan tui.StatusUpdate, 8)
 	a.setStatusCh(ch)
@@ -207,8 +206,7 @@ func (a *App) showStatusScreen(ctx context.Context, t *target, ports sessionPort
 	go func() {
 		<-ctx.Done()
 		stopHealth()
-		a.clearStatusCh(ch)
-		close(ch)
+		a.closeStatusCh(ch)
 	}()
 
 	action, err := a.showStatus(a.statusInfo(t, ports), ch)
@@ -225,6 +223,19 @@ func (a *App) showStatusScreen(ctx context.Context, t *target, ports sessionPort
 func (a *App) setStatusCh(ch chan tui.StatusUpdate) {
 	a.statusMu.Lock()
 	a.statusCh = ch
+	a.statusMu.Unlock()
+}
+
+// closeStatusCh detaches and closes the given channel under the same lock
+// publishStatus sends under. stopHealth does not cover every publisher — the
+// bring-up goroutine (verifySystemProxy, the proxy test) is nobody's to wait on
+// — so the lock, not the waiting, is what keeps a send off a closed channel.
+func (a *App) closeStatusCh(ch chan tui.StatusUpdate) {
+	a.statusMu.Lock()
+	if a.statusCh == ch {
+		a.statusCh = nil
+	}
+	close(ch)
 	a.statusMu.Unlock()
 }
 

@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"xray-runner/internal/config"
+	"xray-runner/internal/system"
 )
 
 // Running under sudo makes every file the app writes — apps.txt, the generated
@@ -29,45 +30,53 @@ func sudoOwner() (uid, gid int, ok bool) {
 	return uid, gid, true
 }
 
-// safeToReclaim guards against walking somewhere enormous. The app keeps its
-// files next to the binary and is launched from there, so a working directory
-// that is the home directory or a filesystem root means the launch was unusual
-// and a recursive chown is not what the user asked for.
-func safeToReclaim(dir string) bool {
-	if dir == "" || dir == "/" || dir == filepath.Dir(dir) {
-		return false
-	}
-	if home := os.Getenv("HOME"); home != "" && dir == home {
-		return false
-	}
-	return true
+// reclaimedFiles are the state files the app writes, by name; config.Path finds
+// each one wherever it lives (next to the binary for an older install, in the
+// data dir otherwise).
+var reclaimedFiles = []string{
+	system.AppsFile,
+	"subscriptions.txt",
+	"last_server.json",
+	"hwid.txt",
+	"xray_config.json",
+	"xray_config.json.lock",
+	"xray-runner.log",
 }
 
-// reclaimFiles restores ownership of the working directory to the sudo user.
+// reclaimedDirs are the directories the app creates whole, walked recursively.
+// The data dir is ours by construction; configs/ and keys/ are written into the
+// working directory by the config viewer and by -dump-links.
+func reclaimedDirs() []string {
+	return []string{config.DataDir(), "configs", "keys"}
+}
+
+// reclaimFiles restores ownership of the app's own files to the sudo user.
 // It runs at startup (clearing what an earlier sudo run left behind) as well as
 // at exit, and stays silent throughout: this is a convenience, and a session
 // must not fail because one chown did not take.
+//
+// Only files the app itself writes are touched. An earlier version walked the
+// working directory, which hands over whatever tree the user happened to launch
+// from — /etc for a binary on PATH — and that is a privilege escalation, not a
+// convenience.
 func reclaimFiles() {
 	uid, gid, ok := sudoOwner()
 	if !ok {
 		return
 	}
-	// The working directory still holds the files of an older install, and the
-	// data dir holds everything written since — both need handing back.
-	dirs := []string{config.DataDir()}
-	if wd, err := os.Getwd(); err == nil {
-		dirs = append(dirs, wd)
+	for _, name := range reclaimedFiles {
+		// Lchown, not Chown: a symlink here should change hands itself rather
+		// than redirect the call at whatever it points to.
+		_ = os.Lchown(config.Path(name), uid, gid)
 	}
-	for _, dir := range dirs {
-		if !safeToReclaim(dir) {
+	for _, dir := range reclaimedDirs() {
+		if dir == "" {
 			continue
 		}
 		_ = filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
-			// Lchown, not Chown: a symlink here should change hands itself rather
-			// than redirect the call at whatever it points to.
 			_ = os.Lchown(path, uid, gid)
 			return nil
 		})

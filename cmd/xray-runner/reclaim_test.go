@@ -2,7 +2,10 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"xray-runner/internal/config"
 )
 
 func TestSudoOwnerAbsentWithoutSudo(t *testing.T) {
@@ -26,18 +29,16 @@ func TestSudoOwnerAbsentWithoutSudo(t *testing.T) {
 	}
 }
 
-// The guard is the load-bearing part: a recursive chown of $HOME or / is far
-// worse than the permission error it is meant to prevent.
-func TestSafeToReclaimRefusesHugeTrees(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	for _, dir := range []string{"", "/", home} {
-		if safeToReclaim(dir) {
-			t.Errorf("safeToReclaim(%q) = true, want false", dir)
+// The regression this guards: reclaim used to walk the working directory, which
+// under sudo hands over whatever tree the user launched from — /etc for a binary
+// on PATH. Nothing outside the app's own data dir may be walked.
+func TestReclaimWalksOnlyOwnDirs(t *testing.T) {
+	data := config.DataDir()
+	for _, dir := range reclaimedDirs() {
+		switch {
+		case dir == "" || dir == data:
+		case filepath.IsAbs(dir) || dir == "." || strings.Contains(dir, ".."):
+			t.Errorf("reclaimedDirs contains %q, which is not the app's own directory", dir)
 		}
-	}
-	if work := filepath.Join(home, "xray_linux"); !safeToReclaim(work) {
-		t.Errorf("safeToReclaim(%q) = false, want true", work)
 	}
 }
