@@ -154,6 +154,20 @@ func TestApplySplitRoutingWithoutTunnelTarget(t *testing.T) {
 	}
 }
 
+// A rule with neither balancerTag nor outboundTag rides the default outbound.
+// It used to slip past the guard and emit "outboundTag": null, which xray
+// rejects — the user saw an opaque config error instead of the proxy fallback.
+func TestApplySplitRoutingWithUntaggedRule(t *testing.T) {
+	cfg := `{
+      "outbounds": [{"tag": "direct", "protocol": "freedom"}],
+      "routing": {"rules": [{"domain": ["geosite:ru"]}]}
+    }`
+	_, err := ApplySplitRouting(json.RawMessage(cfg), []string{"chrome.exe"})
+	if !errors.Is(err, ErrNoTunnelTarget) {
+		t.Fatalf("err = %v, want ErrNoTunnelTarget", err)
+	}
+}
+
 func TestApplySplitRoutingWithoutProcesses(t *testing.T) {
 	if _, err := ApplySplitRouting(json.RawMessage(panelConfig), nil); err == nil {
 		t.Fatal("an empty process list must be refused: it would tunnel nothing")

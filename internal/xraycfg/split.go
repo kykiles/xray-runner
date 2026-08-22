@@ -83,7 +83,12 @@ func ApplySplitRouting(raw json.RawMessage, processes []string) (json.RawMessage
 			kept = append(kept, r)
 			continue
 		}
-		tunnelKey, tunnelTag = "outboundTag", r["outboundTag"]
+		// A rule with no tag at all rides the default outbound: there is nothing
+		// to point the split rule at, and taking it anyway emits
+		// "outboundTag": null, which xray rejects outright.
+		if out := r["outboundTag"]; len(out) > 0 {
+			tunnelKey, tunnelTag = "outboundTag", out
+		}
 	}
 	if tunnelKey == "" {
 		return nil, ErrNoTunnelTarget
