@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -92,6 +93,12 @@ var hwidHeaders = []string{"x-hwid", "x-device-os", "x-device-model"}
 // from carrying the HWID headers off the original host. Panels redirect
 // legitimately, so redirects themselves stay allowed.
 func checkRedirect(req *http.Request, via []*http.Request) error {
+	// Supplying CheckRedirect replaces Go's default policy, cap included, so the
+	// cap has to be restored by hand — a panel redirecting in a loop would
+	// otherwise be chased until the client timeout.
+	if len(via) >= 10 {
+		return errors.New("подписка перенаправлена больше 10 раз — отказ")
+	}
 	prev := via[len(via)-1]
 	if prev.URL.Scheme == "https" && req.URL.Scheme != "https" {
 		return fmt.Errorf("подписка перенаправлена с https на %s://%s — отказ, токен и заголовки устройства ушли бы открытым текстом",

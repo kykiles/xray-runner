@@ -163,6 +163,24 @@ func TestCheckRedirect_AllowsSameSchemeRedirect(t *testing.T) {
 	}
 }
 
+// Supplying CheckRedirect drops Go's own 10-redirect cap, so a panel looping
+// redirects would be chased until the client timeout.
+func TestCheckRedirect_StopsAfterTenHops(t *testing.T) {
+	from, _ := http.NewRequest("GET", "https://panel.example.com/sub", nil)
+	to, _ := http.NewRequest("GET", "https://panel.example.com/sub", nil)
+
+	via := make([]*http.Request, 9)
+	for i := range via {
+		via[i] = from
+	}
+	if err := checkRedirect(to, via); err != nil {
+		t.Fatalf("9 hops must still be allowed: %v", err)
+	}
+	if err := checkRedirect(to, append(via, from)); err == nil {
+		t.Error("10 hops returned no error")
+	}
+}
+
 // x-hwid identifies the user's device. Go strips only Authorization/Cookie on a
 // cross-host redirect, so the HWID headers would otherwise reach a third party.
 func TestFetchBody_DropsHWIDHeadersOnCrossHostRedirect(t *testing.T) {

@@ -5,11 +5,14 @@ import (
 	"path/filepath"
 	"testing"
 
+	"xray-runner/internal/config"
 	"xray-runner/internal/subscription"
 )
 
-// Saving lands under configs/<subscription>/<name>.json, recreates the directory
-// if it is gone, and overwrites an earlier copy of the same server.
+// Saving lands under <configs>/<subscription>/<name>.json, recreates the
+// directory if it is gone, and overwrites an earlier copy of the same server.
+// The configs root follows config.Path, so with no ./configs in the working
+// directory it is the data dir.
 func TestSaveConfig(t *testing.T) {
 	isolateState(t)
 
@@ -20,12 +23,13 @@ func TestSaveConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("saveConfig: %v", err)
 	}
-	want := filepath.Join("configs", "panel.example.com", "DE___Frankfurt.json")
+	root := config.Path("configs")
+	want := filepath.Join(root, "panel.example.com", "DE___Frankfurt.json")
 	if path != want {
 		t.Errorf("path = %q, want %q", path, want)
 	}
 
-	os.RemoveAll("configs")
+	os.RemoveAll(root)
 	if _, err := a.saveConfig("DE · Frankfurt", `{"a":2}`); err != nil {
 		t.Fatalf("saveConfig after the directory was deleted: %v", err)
 	}

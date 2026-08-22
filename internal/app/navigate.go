@@ -19,6 +19,7 @@ import (
 	"xray-runner/internal/system"
 	"xray-runner/internal/tui"
 	"xray-runner/internal/ui"
+	"xray-runner/internal/xray"
 )
 
 // target is what a session runs: either a single server or a whole balancer
@@ -232,6 +233,12 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				if err := tui.RunUpdate(ctx, a.binary, coreVersion(a.binary)); err != nil {
 					tui.ReleaseScreen() // readable on the normal buffer, see menuLoop
 					ui.Error(err.Error())
+				}
+				// The core may be a different version now, and resolveSplit
+				// decides on it: a stale value keeps refusing split routing on a
+				// core that just gained support for it.
+				if v, err := xray.Version(a.binary); err == nil {
+					a.coreVer = v
 				}
 				continue
 			}

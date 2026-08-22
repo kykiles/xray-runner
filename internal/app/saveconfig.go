@@ -7,11 +7,14 @@ import (
 	"strings"
 	"unicode"
 
+	"xray-runner/internal/config"
 	"xray-runner/internal/system"
 )
 
 // configsDir is where the config viewer writes what it shows, one directory per
 // subscription so configs of the same name from different panels do not collide.
+// Resolved through config.Path: an existing ./configs wins, otherwise it lands
+// in the data dir — an install under Program Files cannot write next to itself.
 const configsDir = "configs"
 
 // saveConfig writes the shown config to configs/<subscription>/<name>.json,
@@ -22,7 +25,7 @@ func (a *App) saveConfig(name, text string) (string, error) {
 	if a.nav.subIdx < len(a.nav.subs) {
 		sub = a.nav.subs[a.nav.subIdx].Name
 	}
-	dir := filepath.Join(configsDir, safeName(sub))
+	dir := filepath.Join(config.Path(configsDir), safeName(sub))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("создать %s: %w", dir, err)
 	}

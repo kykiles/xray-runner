@@ -414,8 +414,10 @@ func InstallCore(ctx context.Context, a Asset, xrayPath string) error {
 }
 
 // InstallGeo downloads both databases into dir, replacing the existing files.
-// Both are fetched and verified before either is swapped in, so a failure on the
-// second one leaves the previous pair intact instead of a half-updated mix.
+// Both are fetched and verified before either is swapped in, and a replaced file
+// is kept until both are in, so a failure at any point leaves the previous pair
+// intact instead of a half-updated mix — a mismatched geoip/geosite is exactly
+// what dropUnknownGeo then has to paper over.
 func InstallGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
 	staged := make(map[string]string, 2) // dst -> staged .new path
 	cleanup := func() {
@@ -452,15 +454,33 @@ func InstallGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
 		}
 		staged[dst] = newPath
 	}
+	// The second rename can still fail — a database held open by a running core
+	// on Windows — so the file it replaces is moved aside rather than
+	// overwritten, and put back if anything goes wrong.
+	backups := make(map[string]string, 2) // dst -> .old path
+	restore := func() {
+		for dst, old := range backups {
+			_ = os.Rename(old, dst)
+		}
+	}
 	for dst, newPath := range staged {
+		old := dst + ".old"
+		if err := os.Rename(dst, old); err == nil {
+			backups[dst] = old
+		}
 		if err := swap(newPath, dst); err != nil {
+			restore()
 			cleanup()
 			return err
 		}
 		if err := finalizeFile(dst, 0o644); err != nil {
+			restore()
 			cleanup()
 			return err
 		}
+	}
+	for _, old := range backups {
+		_ = os.Remove(old)
 	}
 	return nil
 }
