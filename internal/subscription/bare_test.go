@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -61,7 +62,7 @@ func TestParseBareLink_RejectsSubscriptionURL(t *testing.T) {
 // A bare link must never trigger an HTTP request: the test URL points at a host
 // that does not resolve, so a fetch attempt would fail the test.
 func TestFetchProfiles_BareLinkNoNetwork(t *testing.T) {
-	profiles, _, err := FetchProfiles("vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@nonexistent.invalid:8080?type=ws#solo")
+	profiles, _, err := FetchProfiles(context.Background(), "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@nonexistent.invalid:8080?type=ws#solo")
 	if err != nil {
 		t.Fatalf("FetchProfiles: %v", err)
 	}
@@ -83,7 +84,7 @@ func TestFetchProfiles_BareLinkNoNetwork(t *testing.T) {
 }
 
 func TestFetch_BareLinkNoNetwork(t *testing.T) {
-	entries, err := Fetch("ss://YWVzLTI1Ni1nY206c2VjcmV0@nonexistent.invalid:8443#myserver")
+	entries, err := Fetch(context.Background(), "ss://YWVzLTI1Ni1nY206c2VjcmV0@nonexistent.invalid:8443#myserver")
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}

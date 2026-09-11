@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -213,7 +214,7 @@ func TestResolveScriptedTarget_KeepsPanelRouting(t *testing.T) {
 	a := New(&config.Config{Mode: "proxy", XrayLogLvl: "warning"}, Options{Server: "2", NonInteractive: true})
 	a.template = tc
 
-	tgt, err := a.resolveScriptedTarget()
+	tgt, err := a.resolveScriptedTarget(context.Background())
 	if err != nil {
 		t.Fatalf("resolveScriptedTarget: %v", err)
 	}

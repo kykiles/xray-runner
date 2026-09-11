@@ -572,9 +572,11 @@ func (m listModel) startRefresh() (tea.Model, tea.Cmd) {
 	}
 	m.refreshing = true
 	m.note.clear()
-	refresh := m.refresh
+	// On the screen's context: leaving the screen stops the panel request
+	// instead of letting it run out its timeout (A08).
+	refresh, ctx := m.refresh, m.ctx
 	return m, func() tea.Msg {
-		profiles, err := refresh()
+		profiles, err := refresh(ctx)
 		return listRefreshDoneMsg{profiles: profiles, err: err}
 	}
 }

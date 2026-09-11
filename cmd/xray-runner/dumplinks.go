@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -23,7 +24,7 @@ func dumpLinks(cfg *config.Config, subURL string) (string, error) {
 	}
 
 	hwid := config.GetOrCreateHWID(cfg.HWID)
-	entries, err := subscription.FetchWithHWID(subURL, hwid, runtime.GOOS, cfg.HWIDDeviceModel)
+	entries, err := subscription.FetchWithHWID(context.Background(), subURL, hwid, runtime.GOOS, cfg.HWIDDeviceModel)
 	if err != nil {
 		return "", fmt.Errorf("fetch subscription: %w", err)
 	}

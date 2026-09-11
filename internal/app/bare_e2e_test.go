@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,7 +36,7 @@ func TestBareLink_ScriptedTargetToConfig(t *testing.T) {
 	a := New(&config.Config{Mode: "proxy", XrayLogLvl: "warning"}, Options{Server: "1", NonInteractive: true})
 	a.template = tc
 
-	target, err := a.resolveScriptedTarget()
+	target, err := a.resolveScriptedTarget(context.Background())
 	if err != nil {
 		t.Fatalf("resolveScriptedTarget: %v", err)
 	}

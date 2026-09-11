@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -30,8 +31,9 @@ type SubsCallbacks struct {
 	// next screen. Running it here, still inside the alt-screen, keeps the shell
 	// from flashing between menus during the network fetch (task #3). It takes the
 	// URL rather than an index so it reads the model's live list, which may have
-	// grown or shrunk (add/delete) since the caller's copy was captured.
-	Load func(rawURL string) error
+	// grown or shrunk (add/delete) since the caller's copy was captured. ctx is
+	// cancelled when the user backs out of the wait with Esc (A08).
+	Load func(ctx context.Context, rawURL string) error
 }
 
 type subsMode int
@@ -43,8 +45,13 @@ const (
 	subsLoading
 )
 
-// loadedMsg carries the result of SubsCallbacks.Load back into the model.
-type loadedMsg struct{ err error }
+// loadedMsg carries the result of SubsCallbacks.Load back into the model. gen
+// names the load it answers, so a cancelled one reporting in late is not taken
+// for the load opened after it.
+type loadedMsg struct {
+	gen int
+	err error
+}
 
 // addedMsg carries the result of SubsCallbacks.Add back into the model. Adding
 // now goes to the panel for the subscription's name, so it cannot run inside
@@ -60,9 +67,13 @@ type subsModel struct {
 	note   notice
 	// busy is what the waiting line says while a callback is in flight. Both
 	// waits look the same on screen and differ only in wording.
-	busy   string
-	action SubsAction
-	choice int
+	busy string
+	// cancelLoad stops the Load in flight; nil when none is. Esc during the wait
+	// calls it rather than leaving the user to sit out the fetch timeout.
+	cancelLoad context.CancelFunc
+	loadGen    int // the load in flight, see loadedMsg
+	action     SubsAction
+	choice     int
 	// reveal shows the selected subscription's full URL. Masking stays on by
 	// default so the personal token does not sit on screen (S-3); revealing is
 	// per-row and deliberate.
@@ -117,6 +128,10 @@ func SelectSubscription(subs []subscription.NamedSubscription, cursor int, cb Su
 		return subs, -1, SubsQuit, err
 	}
 	final := res.(subsModel)
+	// Ctrl+C during the wait leaves a fetch behind; it has nothing to report to.
+	if final.cancelLoad != nil {
+		final.cancelLoad()
+	}
 	return final.subs, final.choice, final.action, nil
 }
 
@@ -124,6 +139,12 @@ func (m subsModel) Init() tea.Cmd { return nil }
 
 func (m subsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if lm, ok := msg.(loadedMsg); ok {
+		// A load the user backed out of still reports in; the screen has moved on.
+		if m.cancelLoad == nil || lm.gen != m.loadGen {
+			return m, nil
+		}
+		m.cancelLoad()
+		m.cancelLoad = nil
 		if lm.err != nil {
 			m.mode = subsList
 			return m, m.note.failErr("Не удалось загрузить подписку — подробности в логе", lm.err)
@@ -177,7 +198,14 @@ func (m subsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case subsConfirmDelete:
 		return m.updateConfirmDelete(key)
 	case subsLoading:
-		// Ignore input while the subscription is being fetched.
+		// Esc backs out of opening a subscription and stops its fetch. Adding has
+		// no cancel: the subscription is already saved, only its name is pending.
+		if key.Type == tea.KeyEsc && m.cancelLoad != nil {
+			m.cancelLoad()
+			m.cancelLoad = nil
+			m.mode = subsList
+			return m, m.note.warn("Загрузка отменена")
+		}
 		return m, nil
 	}
 	return m.updateList(key)
@@ -209,11 +237,15 @@ func (m subsModel) updateList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// stays up and the shell does not flash before the next menu (task #3).
 		m.choice = m.cursor
 		m.mode = subsLoading
-		m.busy = "Загрузка серверов…"
+		m.busy = "Загрузка серверов… (esc — отмена)"
 		m.note.clear()
 		url := m.subs[m.cursor].URL
 		load := m.cb.Load
-		return m, func() tea.Msg { return loadedMsg{err: load(url)} }
+		ctx, cancel := context.WithCancel(context.Background())
+		m.cancelLoad = cancel
+		m.loadGen++
+		gen := m.loadGen
+		return m, func() tea.Msg { return loadedMsg{gen: gen, err: load(ctx, url)} }
 	case "s", "ы":
 		m.reveal = !m.reveal
 	case "+", "a", "ф":

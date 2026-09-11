@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 )
@@ -38,7 +39,7 @@ func (p Profile) Mode() string {
 // selection).
 // It also reports what the response headers say about the subscription — its
 // name and geo databases, see PanelInfo.
-func FetchProfiles(rawURL string, opts ...FetchOption) ([]Profile, PanelInfo, error) {
+func FetchProfiles(ctx context.Context, rawURL string, opts ...FetchOption) ([]Profile, PanelInfo, error) {
 	rawURL, err := unwrapHapp(rawURL)
 	if err != nil {
 		return nil, PanelInfo{}, err
@@ -56,7 +57,7 @@ func FetchProfiles(rawURL string, opts ...FetchOption) ([]Profile, PanelInfo, er
 		return []Profile{{Entries: []SubEntry{*e}}}, PanelInfo{}, nil
 	}
 
-	body, header, err := fetchBody(rawURL, opts...)
+	body, header, err := fetchBody(ctx, rawURL, opts...)
 	if err != nil {
 		return nil, PanelInfo{}, err
 	}
@@ -65,8 +66,8 @@ func FetchProfiles(rawURL string, opts ...FetchOption) ([]Profile, PanelInfo, er
 }
 
 // FetchProfilesWithHWID mirrors FetchWithHWID for the profile-aware path.
-func FetchProfilesWithHWID(rawURL, hwid, deviceOS, deviceModel string) ([]Profile, PanelInfo, error) {
-	return FetchProfiles(rawURL, WithHWID(hwid, deviceOS, deviceModel))
+func FetchProfilesWithHWID(ctx context.Context, rawURL, hwid, deviceOS, deviceModel string) ([]Profile, PanelInfo, error) {
+	return FetchProfiles(ctx, rawURL, WithHWID(hwid, deviceOS, deviceModel))
 }
 
 func parseProfiles(raw []byte) ([]Profile, error) {

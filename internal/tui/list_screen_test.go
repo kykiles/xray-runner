@@ -424,7 +424,7 @@ func TestList_RefreshReplacesAndDropsCaches(t *testing.T) {
 	m := newList(balancerFixture())
 	m.pings["de1.example.ru:443"] = subscription.BenchmarkResult{Latency: time.Millisecond}
 	m.profPings["Германия|de1.example.ru:443"] = subscription.BenchmarkResult{Latency: time.Millisecond}
-	m.refresh = func() ([]subscription.Profile, error) { return fresh, nil }
+	m.refresh = func(context.Context) ([]subscription.Profile, error) { return fresh, nil }
 
 	next, cmd := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
 	if cmd == nil {
@@ -447,7 +447,7 @@ func TestList_RefreshReplacesAndDropsCaches(t *testing.T) {
 // must not turn into a request per keypress.
 func TestList_RefreshCooldown(t *testing.T) {
 	m := newList(flatFixture())
-	m.refresh = func() ([]subscription.Profile, error) { return flatFixture(), nil }
+	m.refresh = func(context.Context) ([]subscription.Profile, error) { return flatFixture(), nil }
 
 	r := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}
 	next, cmd := m.updateKey(r)
@@ -468,12 +468,32 @@ func TestList_RefreshCooldown(t *testing.T) {
 	}
 }
 
+// A08: the refresh runs on the screen's context, so leaving the screen stops the
+// panel request instead of letting it run out its timeout.
+func TestList_RefreshRunsOnScreenContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	m := newList(flatFixture())
+	m.ctx = ctx
+	var got context.Context
+	m.refresh = func(c context.Context) ([]subscription.Profile, error) { got = c; return nil, c.Err() }
+
+	_, cmd := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd == nil {
+		t.Fatal("r produced no refresh")
+	}
+	cancel() // the screen closes
+	cmd()
+	if got == nil || got.Err() == nil {
+		t.Error("refresh did not run on the screen's context")
+	}
+}
+
 // A list that just came from the panel is already fresh: SelectList stamps
 // lastRefresh at open, so `r` pressed a second later is refused instead of
 // fetching the same subscription twice.
 func TestList_RefreshCooldownStartsAtOpen(t *testing.T) {
 	m := newList(flatFixture())
-	m.refresh = func() ([]subscription.Profile, error) { return flatFixture(), nil }
+	m.refresh = func(context.Context) ([]subscription.Profile, error) { return flatFixture(), nil }
 	m.lastRefresh = time.Now()
 
 	if next, _ := m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}); next.(listModel).refreshing {

@@ -3,6 +3,7 @@ package app
 // Subscription/server selection flow, extracted from app.go (A-1).
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -20,7 +21,7 @@ import (
 // or SUBSCRIPTION_URL; the server from --server (1-based index or name match)
 // or the saved state. Failures wrap ErrSelection for a distinct exit code.
 // Profiles are flattened here — a script names one server, not a balancer group.
-func (a *App) resolveScriptedTarget() (*target, error) {
+func (a *App) resolveScriptedTarget(ctx context.Context) (*target, error) {
 	subs, err := subscription.LoadSubscriptions()
 	if err != nil {
 		return nil, fmt.Errorf("load subscriptions: %w", err)
@@ -48,7 +49,7 @@ func (a *App) resolveScriptedTarget() (*target, error) {
 	// Fetched profile-aware so the chosen server can run under its profile's
 	// routing, exactly like the menu does. FlattenUnique reproduces the flat list
 	// the scripted path has always indexed, so --server N keeps its meaning.
-	profiles, geo, err := subscription.FetchProfilesWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
+	profiles, geo, err := subscription.FetchProfilesWithHWID(ctx, subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
 	if err != nil {
 		return nil, fmt.Errorf("загрузка подписки: %w", err)
 	}
@@ -219,7 +220,7 @@ func (a *App) addAndName(rawURL string) error {
 		return nil
 	}
 	hwid := config.GetOrCreateHWID(a.cfg.HWID)
-	_, info, err := subscription.FetchProfilesWithHWID(stored, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
+	_, info, err := subscription.FetchProfilesWithHWID(context.Background(), stored, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
 	if err != nil {
 		slog.Warn("название подписки не получено, останется адрес", "error", err)
 		return nil

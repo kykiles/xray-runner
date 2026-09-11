@@ -16,8 +16,9 @@ import (
 type ProfileBenchmarkFunc func(ctx context.Context, profiles []subscription.Profile, onResult func(subscription.BenchmarkResult)) []subscription.BenchmarkResult
 
 // ProfileRefreshFunc re-fetches the subscription past the menu's cache, exactly
-// as `r` does on the list screen.
-type ProfileRefreshFunc func() ([]subscription.Profile, error)
+// as `r` does on the list screen. ctx is the screen's: it ends when the screen
+// closes.
+type ProfileRefreshFunc func(ctx context.Context) ([]subscription.Profile, error)
 
 // ProfileConfigFunc renders the full xray config running the profile would
 // produce: its outbounds, balancer, dns and routing rules.

@@ -1,10 +1,8 @@
 package subscription
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,7 +41,7 @@ func TestFetchBody_ErrorsHideToken(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, _, err := fetchBody(c.url)
+			_, _, err := fetchBody(context.Background(), c.url)
 			if err == nil {
 				t.Fatal("fetchBody succeeded")
 			}
@@ -52,20 +50,6 @@ func TestFetchBody_ErrorsHideToken(t *testing.T) {
 				t.Errorf("error %q lost the host %s", err, c.host)
 			}
 		})
-	}
-}
-
-func TestFetchBody_HTTPWarningHidesToken(t *testing.T) {
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(orig) })
-
-	_, _, _ = fetchBody("http://127.0.0.1:1" + secretPath)
-
-	assertNoToken(t, "log", buf.String())
-	if !strings.Contains(buf.String(), "127.0.0.1:1") {
-		t.Errorf("warning lost the host: %s", buf.String())
 	}
 }
 

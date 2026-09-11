@@ -176,7 +176,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 		// Load fetches the chosen subscription's profiles from inside the
 		// subscription screen, so the shell does not flash during the network
 		// fetch (task #3). Results are stashed in a.nav for the next level.
-		Load: func(rawURL string) error {
+		Load: func(loadCtx context.Context, rawURL string) error {
 			if a.nav.fresh(rawURL) {
 				// Cached profiles skip the fetch, but the databases in use are
 				// global: another subscription opened in between has left its own
@@ -184,7 +184,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 				a.useGeoAssets(rawURL, a.nav.geo)
 				return nil
 			}
-			profiles, geo, err := a.loadProfiles(rawURL, "open")
+			profiles, geo, err := a.loadProfiles(loadCtx, rawURL, "open")
 			if err != nil {
 				return err
 			}
@@ -307,8 +307,8 @@ func (a *App) selectFromList(ctx context.Context) (*target, error) {
 
 	// A-4: `r` re-fetches with the same HWID headers as the initial load, keeping
 	// the profile structure so the same list is shown again.
-	refresh := func() ([]subscription.Profile, error) {
-		profiles, info, err := a.loadProfiles(subURL, "refresh")
+	refresh := func(screenCtx context.Context) ([]subscription.Profile, error) {
+		profiles, info, err := a.loadProfiles(screenCtx, subURL, "refresh")
 		if err != nil {
 			return nil, err
 		}
@@ -405,9 +405,9 @@ func (a *App) profileConfig(p subscription.Profile) (string, error) {
 // next screen would overwrite a progress line anyway. why names what asked for
 // the fetch: two "subscription loaded" lines in a row are only diagnosable if
 // the log says which of them was the user pressing `r`.
-func (a *App) loadProfiles(subURL, why string) ([]subscription.Profile, subscription.PanelInfo, error) {
+func (a *App) loadProfiles(ctx context.Context, subURL, why string) ([]subscription.Profile, subscription.PanelInfo, error) {
 	hwid := config.GetOrCreateHWID(a.cfg.HWID)
-	profiles, info, err := subscription.FetchProfilesWithHWID(subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
+	profiles, info, err := subscription.FetchProfilesWithHWID(ctx, subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
 	if err != nil {
 		return nil, info, fmt.Errorf("загрузка подписки: %w", err)
 	}

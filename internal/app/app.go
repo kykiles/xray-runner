@@ -174,7 +174,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	// U-2: scripted selection runs exactly one session and never shows a menu.
 	if a.opts.Server != "" || a.opts.UseLast || a.opts.NonInteractive {
-		t, err := a.resolveScriptedTarget()
+		t, err := a.resolveScriptedTarget(ctx)
 		if err != nil {
 			return err
 		}

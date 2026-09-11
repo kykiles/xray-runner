@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,7 +17,7 @@ func TestFetchWithHWID_SetsHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, _ = FetchWithHWID(server.URL, "test-hwid-123", "windows", "xray-runner")
+	_, _ = FetchWithHWID(context.Background(), server.URL, "test-hwid-123", "windows", "xray-runner")
 
 	if capturedHeaders == nil {
 		t.Fatal("no headers captured")
@@ -40,7 +41,7 @@ func TestFetch_SetsClientUserAgent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, _ = Fetch(server.URL)
+	_, _ = Fetch(context.Background(), server.URL)
 
 	// Some subscription panels return an empty body unless a recognized client
 	// User-Agent is sent; the Go default ("Go-http-client/...") must not leak.
@@ -65,7 +66,7 @@ func TestFetch_RetriesWithNextUserAgent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := Fetch(server.URL)
+	entries, err := Fetch(context.Background(), server.URL)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestFetchWithHWID_ParsesSubscription(t *testing.T) {
 	}))
 	defer server.Close()
 
-	entries, err := FetchWithHWID(server.URL, "test-hwid", "linux", "xray-runner")
+	entries, err := FetchWithHWID(context.Background(), server.URL, "test-hwid", "linux", "xray-runner")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -106,14 +107,14 @@ func TestFetchWithHWID_404Error(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := FetchWithHWID(server.URL, "hwid", "linux", "xray-runner")
+	_, err := FetchWithHWID(context.Background(), server.URL, "hwid", "linux", "xray-runner")
 	if err == nil {
 		t.Fatal("expected error for HTTP 404")
 	}
 }
 
 func TestFetchWithHWID_TransportError(t *testing.T) {
-	_, err := FetchWithHWID("http://127.0.0.1:1", "hwid", "linux", "xray-runner")
+	_, err := FetchWithHWID(context.Background(), "http://127.0.0.1:1", "hwid", "linux", "xray-runner")
 	if err == nil {
 		t.Fatal("expected error for unreachable server")
 	}
@@ -130,7 +131,7 @@ func TestFetch_RejectsOversizedBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if _, err := Fetch(server.URL); err == nil {
+	if _, err := Fetch(context.Background(), server.URL); err == nil {
 		t.Fatal("expected error for a body over the size cap")
 	}
 }
@@ -196,7 +197,7 @@ func TestFetchBody_DropsHWIDHeadersOnCrossHostRedirect(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	if _, _, err := fetchBody(origin.URL, WithHWID("dev-hwid", "linux", "pc")); err != nil {
+	if _, _, err := fetchBody(context.Background(), origin.URL, WithHWID("dev-hwid", "linux", "pc")); err != nil {
 		t.Fatalf("fetchBody: %v", err)
 	}
 	for _, h := range []string{"X-Hwid", "X-Device-Os", "X-Device-Model"} {
@@ -219,7 +220,7 @@ func TestFetchBody_KeepsHWIDHeadersOnSameHostRedirect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, _, err := fetchBody(srv.URL, WithHWID("dev-hwid", "linux", "pc")); err != nil {
+	if _, _, err := fetchBody(context.Background(), srv.URL, WithHWID("dev-hwid", "linux", "pc")); err != nil {
 		t.Fatalf("fetchBody: %v", err)
 	}
 	if got.Get("X-Hwid") != "dev-hwid" {

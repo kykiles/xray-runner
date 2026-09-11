@@ -1,14 +1,31 @@
 package subscription
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
+
+// fetchTransport is the subscription client's transport; nil is Go's default.
+// Overridable in tests.
+var fetchTransport http.RoundTripper
+
+// isLoopbackHost reports whether a URL host never leaves the machine: a plain
+// http request to it has no wire for the token to cross.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
 
 // maxSubscriptionBody caps how much of a subscription response we read, so a
 // broken or hostile server can't exhaust memory. Real subscriptions are a few KB.
@@ -112,7 +129,7 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
-func Fetch(rawURL string, opts ...FetchOption) ([]SubEntry, error) {
+func Fetch(ctx context.Context, rawURL string, opts ...FetchOption) ([]SubEntry, error) {
 	rawURL, err := unwrapHapp(rawURL)
 	if err != nil {
 		return nil, err
@@ -129,7 +146,7 @@ func Fetch(rawURL string, opts ...FetchOption) ([]SubEntry, error) {
 		return []SubEntry{*e}, nil
 	}
 
-	body, _, err := fetchBody(rawURL, opts...)
+	body, _, err := fetchBody(ctx, rawURL, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -139,18 +156,22 @@ func Fetch(rawURL string, opts ...FetchOption) ([]SubEntry, error) {
 // fetchBody performs the HTTP GET; parsing is left to the caller so that both
 // the flat and the profile-aware paths share one request. The response headers
 // come back with the body — the panel names its geo databases there.
-func fetchBody(rawURL string, opts ...FetchOption) ([]byte, http.Header, error) {
-	// A plain-http subscription sends the token and the x-hwid headers in the
-	// clear. We still allow it (self-hosted panels exist) but warn loudly.
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rawURL)), "http://") {
-		slog.Warn("подписка запрашивается по незашифрованному http:// — токен и заголовки устройства идут открытым текстом", "url", RedactURL(rawURL))
+//
+// ctx lets the caller stop a fetch short of the client timeout (A08).
+func fetchBody(ctx context.Context, rawURL string, opts ...FetchOption) ([]byte, http.Header, error) {
+	// A08: plain http sends the token in the URL and the x-hwid headers in the
+	// clear, so it is refused before any request goes out. Loopback stays open:
+	// there is no wire to cross, and tests and a panel on the same machine use it.
+	if u, err := url.Parse(strings.TrimSpace(rawURL)); err == nil &&
+		strings.EqualFold(u.Scheme, "http") && !isLoopbackHost(u.Hostname()) {
+		return nil, nil, fmt.Errorf("подписка по http:// отклонена — токен ушёл бы открытым текстом (%s)", RedactURL(rawURL))
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: checkRedirect}
+	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: checkRedirect, Transport: fetchTransport}
 
 	var resp *http.Response
 	for i, ua := range userAgents {
-		req, err := http.NewRequest("GET", rawURL, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
 		if err != nil {
 			return nil, nil, fmt.Errorf("subscription request: %w", RedactURLError(err))
 		}
@@ -190,8 +211,8 @@ func fetchBody(rawURL string, opts ...FetchOption) ([]byte, http.Header, error) 
 }
 
 // FetchWithHWID is a thin wrapper kept for existing callers.
-func FetchWithHWID(rawURL, hwid, deviceOS, deviceModel string) ([]SubEntry, error) {
-	return Fetch(rawURL, WithHWID(hwid, deviceOS, deviceModel))
+func FetchWithHWID(ctx context.Context, rawURL, hwid, deviceOS, deviceModel string) ([]SubEntry, error) {
+	return Fetch(ctx, rawURL, WithHWID(hwid, deviceOS, deviceModel))
 }
 
 func parse(raw []byte) ([]SubEntry, error) {

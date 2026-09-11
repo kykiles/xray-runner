@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -27,7 +29,7 @@ func TestSubs_LoadUsesLiveListAfterAdd(t *testing.T) {
 		Reload: func() ([]subscription.NamedSubscription, error) {
 			return append([]subscription.NamedSubscription(nil), stored...), nil
 		},
-		Load: func(rawURL string) error { loadedURL = rawURL; return nil },
+		Load: func(_ context.Context, rawURL string) error { loadedURL = rawURL; return nil },
 	}
 
 	var m tea.Model = subsModel{subs: stored, cb: cb, choice: -1, input: textinput.New()}
@@ -225,7 +227,7 @@ func TestSubs_AddShowsTheWaitAndKeepsTheUrlOnFailure(t *testing.T) {
 // Opening a subscription and adding one both wait on the network, and the two
 // waits must not describe each other.
 func TestSubs_WaitLinesAreDistinct(t *testing.T) {
-	cb := SubsCallbacks{Load: func(string) error { return nil }}
+	cb := SubsCallbacks{Load: func(context.Context, string) error { return nil }}
 	m := subsModel{
 		subs:   []subscription.NamedSubscription{{Name: "панель", URL: "https://x.example/sub"}},
 		cb:     cb,
@@ -235,6 +237,46 @@ func TestSubs_WaitLinesAreDistinct(t *testing.T) {
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if view := next.(subsModel).View(); !strings.Contains(view, "Загрузка серверов") {
 		t.Errorf("opening a subscription shows the wrong wait:\n%s", view)
+	}
+}
+
+// A08: Esc during "Загрузка серверов…" backs out and stops the fetch instead of
+// leaving the user to sit out its timeout, and the late result is ignored.
+func TestSubs_EscCancelsLoad(t *testing.T) {
+	started := make(chan context.Context, 1)
+	cb := SubsCallbacks{Load: func(ctx context.Context, _ string) error {
+		started <- ctx
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	var m tea.Model = subsModel{
+		subs:   []subscription.NamedSubscription{{Name: "панель", URL: "https://x.example/sub"}},
+		cb:     cb,
+		action: SubsQuit, // as SelectSubscription starts it; the zero value is SubsSelected
+		choice: -1,
+		input:  textinput.New(),
+	}
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	ctx := <-started
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Esc did not stop the fetch")
+	}
+	if got := m.(subsModel).mode; got != subsList {
+		t.Errorf("mode = %v after Esc, want back at the list", got)
+	}
+
+	// The user opens it again at once; the cancelled load reports in only now
+	// and must not be taken for the new one.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	final := feed(m, <-done).(subsModel)
+	if final.action == SubsSelected || final.mode != subsLoading {
+		t.Errorf("a cancelled load answered for the new one: action=%v mode=%v", final.action, final.mode)
 	}
 }
 
