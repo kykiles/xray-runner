@@ -22,7 +22,9 @@ func BuildTrojanOutbound(u *url.URL) (*TrojanOutbound, error) {
 
 	ss := &StreamSettings{Network: network}
 	setTransportSettings(ss, network, q)
-	setSecuritySettings(ss, q)
+	if err := setSecuritySettings(ss, q); err != nil {
+		return nil, err
+	}
 
 	return &TrojanOutbound{
 		Tag:      "proxy",

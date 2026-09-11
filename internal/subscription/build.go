@@ -167,9 +167,13 @@ func buildTrojan(e *SubEntry) (json.RawMessage, error) {
 }
 
 func buildVMess(e *SubEntry) (json.RawMessage, error) {
+	sec, err := xraycfg.NormalizeSecurity(e.Security)
+	if err != nil {
+		return nil, fmt.Errorf("build vmess: %w", err)
+	}
 	ss := &xraycfg.StreamSettings{
 		Network:  orDefault(e.Network, "tcp"),
-		Security: e.Security,
+		Security: sec,
 	}
 
 	switch e.Network {
@@ -190,7 +194,7 @@ func buildVMess(e *SubEntry) (json.RawMessage, error) {
 		ss.GRPCSettings = grpc
 	}
 
-	switch e.Security {
+	switch sec {
 	case "tls":
 		tls := &xraycfg.TLSSettings{}
 		sni := e.SNI

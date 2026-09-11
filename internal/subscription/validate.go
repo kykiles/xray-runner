@@ -1,6 +1,10 @@
 package subscription
 
-import "fmt"
+import (
+	"fmt"
+
+	"xray-runner/internal/xraycfg"
+)
 
 // Validate checks that a subscription entry has the fields its protocol needs
 // before it reaches BuildOutboundJSON, so bad panel data fails with a clear
@@ -32,6 +36,16 @@ func (e *SubEntry) Validate() error {
 		}
 	default:
 		return fmt.Errorf("неподдерживаемый протокол: %s", e.Protocol)
+	}
+
+	// The same rule the builders apply, so the list marks the entry and refuses
+	// to connect instead of failing (or, before A07, silently losing
+	// protection) at build time.
+	switch e.Protocol {
+	case "vless", "vmess", "trojan":
+		if _, err := xraycfg.NormalizeSecurity(e.Security); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -52,7 +52,9 @@ func BuildVLESSOutbound(u *url.URL) (*VLESSOutbound, error) {
 
 	ss := &StreamSettings{Network: network}
 	setTransportSettings(ss, network, q)
-	setSecuritySettings(ss, q)
+	if err := setSecuritySettings(ss, q); err != nil {
+		return nil, err
+	}
 
 	return &VLESSOutbound{
 		Tag:      "proxy",
@@ -117,8 +119,28 @@ func setTransportSettings(ss *StreamSettings, network string, q url.Values) {
 	}
 }
 
-func setSecuritySettings(ss *StreamSettings, q url.Values) {
-	security := q.Get("security")
+// NormalizeSecurity is the one rule for a link's security value (A07): case and
+// spaces do not matter, empty and "none" both mean no security layer — there
+// are working subscriptions without one — and tls/reality are the only layers
+// the builders know. Anything else is refused: a value that matched no case
+// used to build an outbound with no protection at all, reality keys dropped
+// and the credentials sent in the clear, without a word.
+func NormalizeSecurity(v string) (string, error) {
+	switch s := strings.ToLower(strings.TrimSpace(v)); s {
+	case "", "none":
+		return "", nil
+	case "tls", "reality":
+		return s, nil
+	default:
+		return "", fmt.Errorf("не поддерживается: security=%s", v)
+	}
+}
+
+func setSecuritySettings(ss *StreamSettings, q url.Values) error {
+	security, err := NormalizeSecurity(q.Get("security"))
+	if err != nil {
+		return err
+	}
 	switch security {
 	case "reality":
 		ss.Security = "reality"
@@ -152,4 +174,5 @@ func setSecuritySettings(ss *StreamSettings, q url.Values) {
 		}
 		ss.TLSSettings = tls
 	}
+	return nil
 }
