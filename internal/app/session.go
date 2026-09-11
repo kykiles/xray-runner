@@ -266,12 +266,12 @@ func (a *App) headless() bool {
 	return a.opts.Server != "" || a.opts.UseLast || a.opts.NonInteractive || a.noTTY
 }
 
-// switchMode flips proxy⇄tun for the next session. TUN needs privileges, so the
-// check happens before the current session is torn down.
+// switchMode flips proxy⇄tun for the next session. TUN needs privileges and a
+// recent core, so the check happens before the current session is torn down.
 func (a *App) switchMode() error {
 	next := nextMode(a.mode)
 	if next == "tun" {
-		if err := a.checkPrivileges(); err != nil {
+		if err := a.tunReady(); err != nil {
 			return err
 		}
 	}

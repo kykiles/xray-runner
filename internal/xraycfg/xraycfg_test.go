@@ -450,7 +450,7 @@ func TestBuildTUNInboundSettings(t *testing.T) {
 		t.Fatalf("unmarshal tun settings: %v", err)
 	}
 	want := TUNSettings{
-		MTU:           9000,
+		MTU:           1500,
 		Gateway:       []string{TunAddr + "/24"},
 		InterfaceName: TunInterfaceName,
 	}

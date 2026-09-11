@@ -126,10 +126,6 @@ func New(cfg *config.Config, opts Options) *App {
 func (a *App) Run(ctx context.Context) error {
 	defer a.cleanup()
 
-	if err := a.resolveMode(); err != nil {
-		return err
-	}
-
 	tc, err := xraycfg.LoadTemplate("template.json")
 	if err != nil {
 		return fmt.Errorf("load template: %w", err)
@@ -155,6 +151,12 @@ func (a *App) Run(ctx context.Context) error {
 		a.coreVer = v
 	} else {
 		slog.Warn("could not determine xray version", "error", err)
+	}
+
+	// Whether TUN can run depends on the core's version, so the mode is settled
+	// only once that is known.
+	if err := a.resolveMode(); err != nil {
+		return err
 	}
 
 	// R-3: refuse to start a second instance racing over the same config/ports.
@@ -194,7 +196,7 @@ func (a *App) resolveMode() error {
 	if !a.tunMode() {
 		return nil
 	}
-	err := a.checkPrivileges()
+	err := a.tunReady()
 	if err == nil {
 		return nil
 	}
@@ -227,16 +229,23 @@ func (a *App) resolveSplit() {
 	if !a.split || !system.SplitOverTUN {
 		return
 	}
-	// Where split rides on the tunnel it needs the elevation TUN needs, and a
-	// core that understands the "process" routing rule: an older core starts on
-	// the config and quietly ignores it, putting the whole system in the tunnel.
-	if err := a.checkPrivileges(); err != nil {
+	// Where split rides on the tunnel it needs everything TUN needs.
+	if err := a.tunReady(); err != nil {
 		a.splitOff(err.Error())
-		return
 	}
-	if a.coreVer != "" && !xray.SupportsProcessRouting(a.coreVer) {
-		a.splitOff("нужен xray-core 26.0 или новее, установлен " + a.coreVer)
+}
+
+// tunReady reports whether a session built on the TUN interface may start: it
+// needs elevation and a core at xray.MinVersion or newer. An unknown version is
+// let through, the same as an unreadable one.
+func (a *App) tunReady() error {
+	if err := a.checkPrivileges(); err != nil {
+		return err
 	}
+	if a.coreVer != "" && !xray.MeetsMinVersion(a.coreVer) {
+		return fmt.Errorf("нужен xray-core %s или новее, установлен %s", xray.MinVersion, parseCoreVersion(a.coreVer))
+	}
+	return nil
 }
 
 // splitOff drops back to plain proxy and says why — on screen once, in the log

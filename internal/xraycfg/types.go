@@ -217,7 +217,7 @@ func BuildTUNInbound(ipv6 bool) Inbound {
 	}
 	// The settings are a fixed struct, so marshalling cannot fail.
 	settings, _ := json.Marshal(TUNSettings{
-		MTU:           9000,
+		MTU:           1500,
 		Gateway:       gateway,
 		InterfaceName: TunInterfaceName,
 	})

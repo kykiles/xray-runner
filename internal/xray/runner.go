@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,19 +84,41 @@ func Version(binary string) (string, error) {
 	return line, nil
 }
 
-// SupportsProcessRouting reports whether a version line names a core that
-// understands the "process" routing rule — matching a connection's owning
-// process by name, which the split mode is built on. It arrived in 26.0.
-// An unreadable line is taken as supported: refusing to start over a version
-// string we failed to parse is worse than letting the core answer.
-func SupportsProcessRouting(version string) bool {
+// MinVersion is the oldest core TUN and split routing run on, and the core
+// scripts/deploy.sh pins into bundles — it reads this line, so keep its shape.
+// 26.3.27, which releases/latest still names, has no TUN "gateway" and loops
+// the tunnel into itself.
+const MinVersion = "26.7.28"
+
+// MeetsMinVersion reports whether a version line names a core at MinVersion or
+// newer, comparing the full major.minor.patch triple. An unreadable line is
+// taken as new enough: refusing to start over a version string we failed to
+// parse is worse than letting the core answer.
+func MeetsMinVersion(version string) bool {
+	minV, _ := parseTriple(MinVersion)
 	for f := range strings.FieldsSeq(version) {
-		major, _, _ := strings.Cut(f, ".")
-		if n, err := strconv.Atoi(major); err == nil {
-			return n >= 26
+		if v, ok := parseTriple(f); ok {
+			return slices.Compare(v, minV) >= 0
 		}
 	}
 	return true
+}
+
+// parseTriple reads "26.7.28" into its three numbers.
+func parseTriple(s string) ([]int, bool) {
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return nil, false
+	}
+	v := make([]int, len(parts))
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, false
+		}
+		v[i] = n
+	}
+	return v, true
 }
 
 func (r *Runner) Start(ctx context.Context) error {
