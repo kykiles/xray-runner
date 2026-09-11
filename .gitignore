@@ -48,12 +48,12 @@ PROJECT.md
 .claude
 .superpowers/
 
-# Working specs / audit notes — kept locally, not published
-docs/*
-# ...except the agent-skills config, which the whole repo needs
-!docs/agents/
-# ...and the ADRs: they record why the code is the way it is
-!docs/adr/
+# Working specs, audit notes, ADRs and agent config — kept locally, not published
+docs/
+AUDIT.md
+SPEC.md
+CLAUDE.md
+CONTEXT.md
 
 # Subscription URLs
 subscriptions.txt
