@@ -45,7 +45,7 @@ func TestBringUpTun_KillSwitchFailureFailsSession(t *testing.T) {
 	a := newKillSwitchApp(&spy, func(system.KillSwitchConfig) error { return errors.New("iptables: permission denied") })
 	a.serverHost, a.serverPort = "203.0.113.5", 443
 
-	if err := a.bringUpTun(context.Background(), killSwitchTarget()); err == nil {
+	if err := a.bringUpTun(context.Background(), killSwitchTarget(), sessionPorts{}); err == nil {
 		t.Fatal("bringUpTun succeeded with the kill switch down")
 	}
 	if a.killSwitchOn {
@@ -69,7 +69,7 @@ func TestBringUpTun_KillSwitchWithoutEndpointsFailsSession(t *testing.T) {
 	a := newKillSwitchApp(&spy, func(system.KillSwitchConfig) error { enabled = true; return nil })
 	// No endpoint recorded: the whitelist would be empty and cut xray's uplink.
 
-	if err := a.bringUpTun(context.Background(), killSwitchTarget()); err == nil {
+	if err := a.bringUpTun(context.Background(), killSwitchTarget(), sessionPorts{}); err == nil {
 		t.Fatal("bringUpTun succeeded with no server to whitelist")
 	}
 	if enabled {

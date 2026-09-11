@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"xray-runner/internal/config"
@@ -182,12 +183,21 @@ func (a *App) healthCheckLoopPorts(ctx context.Context, socksPort, httpPort int)
 	}
 }
 
-func (a *App) healthCheckLoopConnectivity(ctx context.Context) {
+// tunProbeClient sends a probe through the tun session's loopback inbound, so
+// it travels the server's outbound whatever the system routes and the profile's
+// direct rules say (A10). A dead inbound fails the probe, however well the
+// plain internet answers.
+func tunProbeClient(port int, timeout time.Duration) *http.Client {
+	proxy := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
+	return &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}}
+}
+
+func (a *App) healthCheckLoopConnectivity(ctx context.Context, probePort int) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	consecutiveFails := 0
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := tunProbeClient(probePort, 10*time.Second)
 	// The whole list, not just the first URL: one blocked probe host would
 	// otherwise show the session as down while everything else works.
 	checkURLs := a.cfg.CheckURLs()

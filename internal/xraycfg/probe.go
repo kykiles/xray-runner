@@ -62,6 +62,25 @@ func PrependProbeRule(raw json.RawMessage, hosts []string) (json.RawMessage, err
 	return json.Marshal(cfg)
 }
 
+// ProbeInboundTag names the loopback inbound a tun session's probes go through.
+const ProbeInboundTag = "probe"
+
+// BuildProbeInbound is the HTTP listener a tun session's probes use (A10). A tun
+// session has no local proxy of its own, and a probe sent down the system
+// routes follows whatever they and the profile's direct rules say — a wrong
+// route or a direct rule for the probe host reads "ок" in front of a dead
+// tunnel. Through this inbound the probe meets PrependProbeRule and takes the
+// server's outbound, the same as the proxy-mode check.
+func BuildProbeInbound(port int) Inbound {
+	return Inbound{
+		Tag:      ProbeInboundTag,
+		Port:     port,
+		Listen:   "127.0.0.1",
+		Protocol: "http",
+		Settings: json.RawMessage(`{"allowTransparent":false}`),
+	}
+}
+
 // firstTag reads the tag of the first element of a named array inside routing.
 func firstTag(routing json.RawMessage, field string) string {
 	if len(routing) == 0 {

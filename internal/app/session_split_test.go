@@ -89,7 +89,7 @@ func TestBuildSessionConfig_SplitAppsAddRedirectInbounds(t *testing.T) {
 }
 
 // TUN already carries the whole system; adding a redirect there would be a
-// second path to the same place.
+// second path to the same place. The probe inbound is the one listener tun has.
 func TestBuildSessionConfig_TunIgnoresSplitApps(t *testing.T) {
 	a := newTemplateApp(t)
 	a.mode = "tun"
@@ -100,8 +100,8 @@ func TestBuildSessionConfig_TunIgnoresSplitApps(t *testing.T) {
 		t.Fatalf("buildSessionConfig: %v", err)
 	}
 	tags := inboundTags(t, raw)
-	if len(tags) != 1 || tags[0] != "tun" {
-		t.Errorf("inbounds = %v, want just the tun inbound", tags)
+	if !slices.Equal(tags, []string{"tun", "probe"}) {
+		t.Errorf("inbounds = %v, want the tun and probe inbounds only", tags)
 	}
 }
 

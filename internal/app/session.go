@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"slices"
 	"strconv"
@@ -155,7 +154,7 @@ func (a *App) startHealth(ctx context.Context, ports sessionPorts) func() {
 		case a.healthLoop != nil:
 			a.healthLoop(hctx, ports)
 		case a.tunMode():
-			a.healthCheckLoopConnectivity(hctx)
+			a.healthCheckLoopConnectivity(hctx, ports.probe)
 		default:
 			a.healthCheckLoopPorts(hctx, ports.socks, ports.http)
 		}
@@ -339,6 +338,8 @@ func (a *App) previewConfig(t *target) (string, error) {
 type sessionPorts struct {
 	socks int
 	http  int
+	// probe is the loopback inbound a tun session's probes go through (A10).
+	probe int
 }
 
 // buildSessionConfig produces the xray config for the target in the active
@@ -366,7 +367,14 @@ func (a *App) buildSessionConfig(t *target) (json.RawMessage, sessionPorts, erro
 func (a *App) buildModeConfig(t *target) (json.RawMessage, sessionPorts, error) {
 	inbounds := a.template.Inbounds
 	if a.tunMode() {
-		inbounds = []xraycfg.Inbound{xraycfg.BuildTUNInbound()}
+		// A10: the probe goes through a loopback inbound of its own rather than
+		// the system routes, so it travels the server's outbound whatever the
+		// routes and the profile's direct rules say.
+		pp, err := freePortPair()
+		if err != nil {
+			return nil, sessionPorts{}, fmt.Errorf("найти порт для проверки связи: %w", err)
+		}
+		inbounds = []xraycfg.Inbound{xraycfg.BuildTUNInbound(), xraycfg.BuildProbeInbound(pp.http)}
 	} else if a.split {
 		// The listeners the split-tunnel nft rules redirect into. They are added,
 		// not substituted: the SOCKS/HTTP pair still serves the system proxy, and
@@ -418,11 +426,12 @@ func (a *App) buildModeConfig(t *target) (json.RawMessage, sessionPorts, error) 
 	if raw, err = a.withSplitRouting(raw); err != nil {
 		return nil, sessionPorts{}, err
 	}
-	if a.split {
-		// The other two branches prepend it themselves. Here it matters only in
-		// split mode: the probe leaves our own process, which is not in the list,
-		// so without this rule it would go direct and report the tunnel healthy
-		// while nothing at all goes through it (ADR-0002).
+	if a.split || a.tunMode() {
+		// The other two branches prepend it themselves. Here it matters in split
+		// mode — the probe leaves our own process, which is not in the list — and
+		// in tun, where the probe inbound's traffic meets the template's rules:
+		// without this rule either would go direct and report the tunnel healthy
+		// while nothing at all goes through it (ADR-0002, A10).
 		if raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs())); err != nil {
 			return nil, sessionPorts{}, err
 		}
@@ -477,6 +486,11 @@ func (a *App) singleServerFromProfile(t *target, inbounds []xraycfg.Inbound) (js
 // position, so reordering inbounds cannot silently swap them (Q-2).
 func portsFromInbounds(inbounds []xraycfg.Inbound, tun bool) (sessionPorts, error) {
 	if tun {
+		for _, in := range inbounds {
+			if in.Tag == xraycfg.ProbeInboundTag {
+				return sessionPorts{probe: in.Port}, nil
+			}
+		}
 		return sessionPorts{}, nil
 	}
 	var p sessionPorts
@@ -497,7 +511,7 @@ func portsFromInbounds(inbounds []xraycfg.Inbound, tun bool) (sessionPorts, erro
 // bringUp waits for xray to listen and enables proxy/kill switch.
 func (a *App) bringUp(ctx context.Context, t *target, ports sessionPorts) error {
 	if a.tunMode() {
-		return a.bringUpTun(ctx, t)
+		return a.bringUpTun(ctx, t, ports)
 	}
 	if a.cfg.KillSwitch {
 		// Not a failure: proxy mode has no system-wide traffic for a kill switch
@@ -671,7 +685,7 @@ func (a *App) refreshSplit() {
 	a.publishStatus(tui.StatusUpdate{Apps: matched})
 }
 
-func (a *App) bringUpTun(ctx context.Context, t *target) error {
+func (a *App) bringUpTun(ctx context.Context, t *target, ports sessionPorts) error {
 	if !a.awaitTUNInterface(ctx, xraycfg.TunInterfaceName, 10*time.Second) {
 		slog.Error("tun interface did not come up")
 		return fmt.Errorf("TUN-интерфейс %s не поднялся за 10с", xraycfg.TunInterfaceName)
@@ -725,7 +739,7 @@ func (a *App) bringUpTun(ctx context.Context, t *target) error {
 		slog.Info("kill switch enabled", "endpoints", len(endpoints))
 	}
 
-	go reachCheck(ctx, &http.Client{Timeout: 10 * time.Second}, a.cfg.CheckURLs(), "connectivity check")
+	go reachCheck(ctx, tunProbeClient(ports.probe, 10*time.Second), a.cfg.CheckURLs(), "connectivity check")
 	return nil
 }
 
