@@ -69,6 +69,11 @@ fi
 [ "$GOOS" = "windows" ] && [ ! -f "$DEPLOY_DIR/wintun.dll" ] && [ -f wintun.dll ] && cp wintun.dll "$DEPLOY_DIR/"
 # template.json is embedded in the binary; a copy next to the app is optional.
 
+# The docs and licenses travel with the binaries: wintun.dll may only be
+# redistributed together with its license.
+cp README.md LICENSE "$DEPLOY_DIR/"
+[ "$GOOS" = "windows" ] && cp LICENSE-wintun.txt "$DEPLOY_DIR/"
+
 # Ship the config from the tracked template, never the working .env — the local
 # .env / subscriptions.txt hold real tokens and must not leak into a bundle.
 cp .env.example "$DEPLOY_DIR/.env"
