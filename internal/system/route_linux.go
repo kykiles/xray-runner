@@ -5,6 +5,7 @@ package system
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 
@@ -27,6 +28,21 @@ const directTable = "8888"
 // server exceptions cannot stand in for it: a server on the local link has no
 // gateway, which says nothing about how the host reaches the internet.
 const markProbe = "1.1.1.1"
+
+// blockDefault6 covers the whole IPv6 space in two halves, the same way
+// splitDefault does for IPv4.
+var blockDefault6 = []string{"::/1", "8000::/1"}
+
+// ifInet6 lists the host's IPv6 addresses and is missing when the kernel runs
+// without IPv6 at all. Overridable in tests.
+var ifInet6 = "/proc/net/if_inet6"
+
+// hasIPv6Stack reports whether the kernel has IPv6: without it there is nothing
+// to leak and no table to write the block into.
+func hasIPv6Stack() bool {
+	_, err := os.Stat(ifInet6)
+	return err == nil
+}
 
 // ipCmd is overridable in tests.
 var ipCmd commander = execCommander{}
@@ -147,6 +163,20 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 		return fmt.Errorf("вывести прямой трафик из туннеля: %w\n%s", err, out)
 	}
 
+	// A11: the VPN runs without IPv6, so tun does not route it into the tunnel —
+	// it refuses it, before IPv4 is captured. Unreachable rather than blackhole:
+	// the app hears at once and falls back to IPv4, which the tunnel carries,
+	// instead of hanging until a timeout. Link-local and LAN prefixes have
+	// routes of their own, more specific than these halves, and keep working.
+	if cfg.Addr6 != "" && hasIPv6Stack() {
+		for _, half := range blockDefault6 {
+			if out, err := ipCmd.run("ip", "-6", "route", "replace", "unreachable", half); err != nil {
+				_ = DisableTunRouting()
+				return fmt.Errorf("закрыть IPv6 мимо туннеля: %w\n%s", err, out)
+			}
+		}
+	}
+
 	for _, half := range splitDefault {
 		if out, err := ipCmd.run("ip", "route", "replace", half, "dev", cfg.Iface); err != nil {
 			_ = DisableTunRouting()
@@ -170,6 +200,11 @@ func DisableTunRouting() error {
 
 	for _, half := range splitDefault {
 		_, _ = ipCmd.run("ip", "route", "del", half, "dev", installed.Iface)
+	}
+	if installed.Addr6 != "" && hasIPv6Stack() {
+		for _, half := range blockDefault6 {
+			_, _ = ipCmd.run("ip", "-6", "route", "del", "unreachable", half)
+		}
 	}
 	_, _ = ipCmd.run("ip", "rule", "del", "fwmark", strconv.Itoa(xraycfg.DirectFwMark), "lookup", directTable)
 	_, _ = ipCmd.run("ip", "route", "flush", "table", directTable)

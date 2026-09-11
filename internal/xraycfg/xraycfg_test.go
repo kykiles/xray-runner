@@ -434,7 +434,7 @@ func TestBuildTUNInboundInterfaceName(t *testing.T) {
 	var settings struct {
 		Name string `json:"name"`
 	}
-	if err := json.Unmarshal(BuildTUNInbound(false).Settings, &settings); err != nil {
+	if err := json.Unmarshal(BuildTUNInbound().Settings, &settings); err != nil {
 		t.Fatalf("unmarshal tun settings: %v", err)
 	}
 	if settings.Name != TunInterfaceName {
@@ -446,12 +446,12 @@ func TestBuildTUNInboundInterfaceName(t *testing.T) {
 // from the TUNSettings struct instead of a format string) cannot drift.
 func TestBuildTUNInboundSettings(t *testing.T) {
 	var got TUNSettings
-	if err := json.Unmarshal(BuildTUNInbound(false).Settings, &got); err != nil {
+	if err := json.Unmarshal(BuildTUNInbound().Settings, &got); err != nil {
 		t.Fatalf("unmarshal tun settings: %v", err)
 	}
 	want := TUNSettings{
 		MTU:           1500,
-		Gateway:       []string{TunAddr + "/24"},
+		Gateway:       []string{TunAddr + "/24", TunAddr6 + "/126"},
 		InterfaceName: TunInterfaceName,
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -459,11 +459,11 @@ func TestBuildTUNInboundSettings(t *testing.T) {
 	}
 }
 
-// Split mode pulls IPv6 into the tunnel too, which the interface can only do
+// Tun claims IPv6 too (split and plain alike), which the interface can only do
 // with a v6 address of its own.
 func TestBuildTUNInboundIPv6(t *testing.T) {
 	var got TUNSettings
-	if err := json.Unmarshal(BuildTUNInbound(true).Settings, &got); err != nil {
+	if err := json.Unmarshal(BuildTUNInbound().Settings, &got); err != nil {
 		t.Fatalf("unmarshal tun settings: %v", err)
 	}
 	want := []string{TunAddr + "/24", TunAddr6 + "/126"}

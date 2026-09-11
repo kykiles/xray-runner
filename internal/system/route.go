@@ -11,10 +11,11 @@ type TunRouteConfig struct {
 	// profile rotates across several servers, and every one of them needs an
 	// exception — a server left inside the tunnel deadlocks xray's uplink.
 	ServerIPs []string
-	// Addr6 and ServerIPs6 are the IPv6 half, and empty Addr6 means the tunnel
-	// claims IPv4 only — which is what tun mode still does. Split mode fills
-	// them in: there a v6-capable app would otherwise prefer the AAAA record and
-	// walk past the tunnel with its real address (ADR-0003).
+	// Addr6 and ServerIPs6 are the IPv6 half; empty Addr6 leaves IPv6 alone.
+	// Every tun session fills them in, since a v6-capable app would otherwise
+	// prefer the AAAA record and walk past the tunnel with its real address
+	// (A11). Windows routes IPv6 into the tunnel; Linux refuses it outright —
+	// the VPN runs without IPv6 — and has no use for ServerIPs6.
 	Addr6      string
 	ServerIPs6 []string
 }

@@ -10,7 +10,7 @@ const TunAddr = "10.0.0.1"
 
 // TunAddr6 is the IPv6 counterpart, a ULA prefix: without an address of its own
 // the interface takes no IPv6 at all, and every v6-capable app walks past the
-// tunnel with its real address. Only the split mode claims it — see ADR-0003.
+// tunnel with its real address. Every tun session claims it (A11).
 const TunAddr6 = "fdfe:dcba:9876::1"
 
 type XrayConfig struct {
@@ -208,13 +208,10 @@ type TUNSettings struct {
 	InterfaceName string   `json:"name"`
 }
 
-// BuildTUNInbound builds the tun inbound. With ipv6 the interface also takes a
-// v6 address, which is what lets the routing layer pull IPv6 into the tunnel.
-func BuildTUNInbound(ipv6 bool) Inbound {
-	gateway := []string{TunAddr + "/24"}
-	if ipv6 {
-		gateway = append(gateway, TunAddr6+"/126")
-	}
+// BuildTUNInbound builds the tun inbound. The interface takes a v6 address as
+// well, which is what lets the routing layer claim IPv6 for the tunnel.
+func BuildTUNInbound() Inbound {
+	gateway := []string{TunAddr + "/24", TunAddr6 + "/126"}
 	// The settings are a fixed struct, so marshalling cannot fail.
 	settings, _ := json.Marshal(TUNSettings{
 		MTU:           1500,

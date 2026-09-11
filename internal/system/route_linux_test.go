@@ -4,6 +4,7 @@ package system
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -253,6 +254,75 @@ func TestDisableTunRouting_NoopWhenNothingWasEnabled(t *testing.T) {
 
 	if len(f.cmds) != 0 {
 		t.Errorf("expected no commands, got: %v", f.cmds)
+	}
+}
+
+// withIPv6Stack points the stack check at a file that exists or not.
+func withIPv6Stack(t *testing.T, present bool) {
+	t.Helper()
+	orig := ifInet6
+	ifInet6 = t.TempDir() + "/if_inet6"
+	if present {
+		if err := os.WriteFile(ifInet6, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { ifInet6 = orig })
+}
+
+var tunCfg6 = TunRouteConfig{Iface: "xray-tun", Addr6: "fdfe:dcba:9876::1", ServerIPs: []string{"45.150.32.235"}}
+
+// A06/A11: the VPN runs without IPv6, and tun used to leave it alone — on a
+// dual-stack network a v6-capable app went around the tunnel with its real
+// address. Unreachable, not blackhole: the app is told at once and falls back
+// to IPv4, which the tunnel carries, instead of hanging until a timeout.
+func TestEnableTunRouting_BlocksIPv6(t *testing.T) {
+	withIPv6Stack(t, true)
+	f := &fakeIP{routeGetOut: wanRouteGet}
+	withFakeIP(t, f)
+
+	if err := EnableTunRouting(tunCfg6); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	for _, want := range []string{"-6 route replace unreachable ::/1", "-6 route replace unreachable 8000::/1"} {
+		if !f.has(want) {
+			t.Errorf("missing %q, got: %v", want, f.cmds)
+		}
+	}
+
+	f.cmds = nil
+	DisableTunRouting()
+	for _, want := range []string{"-6 route del unreachable ::/1", "-6 route del unreachable 8000::/1"} {
+		if !f.has(want) {
+			t.Errorf("teardown missing %q, got: %v", want, f.cmds)
+		}
+	}
+}
+
+// A kernel booted without IPv6 has nothing to leak and no table to write to.
+func TestEnableTunRouting_SkipsIPv6BlockWithoutStack(t *testing.T) {
+	withIPv6Stack(t, false)
+	f := &fakeIP{routeGetOut: wanRouteGet}
+	withFakeIP(t, f)
+
+	if err := EnableTunRouting(tunCfg6); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	if f.has("-6") {
+		t.Errorf("IPv6 commands on a host without IPv6: %v", f.cmds)
+	}
+}
+
+func TestEnableTunRouting_NoIPv6BlockWithoutAddr6(t *testing.T) {
+	withIPv6Stack(t, true)
+	f := &fakeIP{routeGetOut: wanRouteGet}
+	withFakeIP(t, f)
+
+	if err := EnableTunRouting(tunCfg); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	if f.has("-6") {
+		t.Errorf("IPv6 commands without Addr6: %v", f.cmds)
 	}
 }
 
