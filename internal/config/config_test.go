@@ -216,8 +216,17 @@ func TestLoad_RejectsMalformedBool(t *testing.T) {
 	}
 }
 
+// withGOOS makes Load see another platform for the duration of the test.
+func withGOOS(t *testing.T, os string) {
+	t.Helper()
+	orig := goos
+	goos = os
+	t.Cleanup(func() { goos = orig })
+}
+
 // The values ParseBool does understand keep working.
 func TestLoad_AcceptsValidBool(t *testing.T) {
+	withGOOS(t, "linux") // a kill switch is refused outright on Windows
 	for v, want := range map[string]bool{"true": true, "1": true, "false": false, "0": false, "TRUE": true} {
 		t.Run(v, func(t *testing.T) {
 			t.Setenv("KILL_SWITCH", v)
@@ -229,6 +238,23 @@ func TestLoad_AcceptsValidBool(t *testing.T) {
 				t.Errorf("KILL_SWITCH=%q → %v, want %v", v, cfg.KillSwitch, want)
 			}
 		})
+	}
+}
+
+// A02: the netsh kill switch blocked xray itself, so Windows refuses the setting
+// at start instead of promising a protection it does not deliver.
+func TestLoad_KillSwitchRefusedOnWindows(t *testing.T) {
+	withGOOS(t, "windows")
+
+	t.Setenv("KILL_SWITCH", "true")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "не поддерживается") {
+		t.Fatalf("KILL_SWITCH=true on Windows: err = %v, want a refusal", err)
+	}
+
+	t.Setenv("KILL_SWITCH", "false")
+	if _, err := Load(); err != nil {
+		t.Fatalf("KILL_SWITCH=false on Windows: %v", err)
 	}
 }
 

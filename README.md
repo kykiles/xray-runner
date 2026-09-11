@@ -120,8 +120,10 @@ dns, routing-правила и outbound-ы вашей панели — видн�
 - SOCKS5: `127.0.0.1:10808`, HTTP: `127.0.0.1:10809`
 
 **TUN (полный VPN)** — весь трафик системы идёт через VPN, как у обычного VPN-клиента.
-Требует прав root (Linux) или администратора (Windows). Можно включить «kill switch»,
-чтобы при обрыве не было утечки реального IP (`KILL_SWITCH=true` в `.env`).
+Требует прав root (Linux) или администратора (Windows). На Linux можно включить «kill switch»,
+чтобы при обрыве не было утечки реального IP (`KILL_SWITCH=true` в `.env`). Если он не
+включится, подключение не состоится. На Windows kill switch не поддерживается: с
+`KILL_SWITCH=true` программа не запустится.
 
 Переключиться между режимами можно прямо на экране статуса клавишей `m`. Выбранный режим
 запоминается до следующего запуска.
@@ -215,7 +217,7 @@ cp .env.example .env
 | `LOG_LEVEL` | `info` | Уровень файлового лога: `debug`, `info`, `warn`, `error` |
 | `MASK_CREDENTIALS` | `true` | Маскировать UUID/pbk/sid в выводе |
 | `XRAY_LOG_LEVEL` | `warning` | Уровень лога Xray: `debug`, `info`, `warning`, `error`, `none` |
-| `KILL_SWITCH` | `false` | Блокировать трафик при падении Xray (TUN) |
+| `KILL_SWITCH` | `false` | Блокировать трафик при падении Xray (только TUN на Linux; на Windows — отказ при старте) |
 | `ALLOW_INSECURE` | `false` | Уважать флаг `insecure` из подписки (отключает проверку TLS) |
 | `HEALTH_CHECK_URL` | google/gstatic/cloudflare | Адреса проверки связи (через запятую); первый же используется для замера пинга |
 | `BENCH_CONCURRENCY` | `3` | Сколько серверов пингуется одновременно (`b`) |

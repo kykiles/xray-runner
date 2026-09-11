@@ -78,6 +78,11 @@ type App struct {
 	// the machine's firewall or proxy settings.
 	disableKillSwitch func() error
 	restoreProxy      func(system.ProxyState) error
+	// enableKillSwitch / enableTunRouting / disableTunRouting are the tun
+	// bring-up's system changes, fields for the same reason.
+	enableKillSwitch  func(system.KillSwitchConfig) error
+	enableTunRouting  func(system.TunRouteConfig) error
+	disableTunRouting func() error
 	disableSplit      func() error
 	// checkPrivileges reports whether tun mode may be used; a field so tests can
 	// exercise both outcomes without being root.
@@ -117,6 +122,9 @@ func New(cfg *config.Config, opts Options) *App {
 		noTTY:             !term.IsTerminal(int(os.Stdin.Fd())),
 		disableKillSwitch: system.DisableKillSwitch,
 		restoreProxy:      proxy.Restore,
+		enableKillSwitch:  system.EnableKillSwitch,
+		enableTunRouting:  system.EnableTunRouting,
+		disableTunRouting: system.DisableTunRouting,
 		disableSplit:      system.DisableSplit,
 		showStatus:        tui.ShowStatus,
 		connectScreen:     tui.ShowConnecting,

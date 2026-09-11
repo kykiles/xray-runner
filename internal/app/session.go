@@ -485,6 +485,16 @@ func (a *App) bringUp(ctx context.Context, t *target, ports sessionPorts) error 
 	if a.tunMode() {
 		return a.bringUpTun(ctx, t)
 	}
+	if a.cfg.KillSwitch {
+		// Not a failure: proxy mode has no system-wide traffic for a kill switch
+		// to guard. No screen is up yet, so the note waits in pendingNote.
+		slog.Info("kill switch skipped", "reason", "mode=proxy")
+		note := "Kill switch действует только в TUN: в режиме PROXY он не включён."
+		if a.pendingNote != "" {
+			note = a.pendingNote + " " + note
+		}
+		a.pendingNote = note
+	}
 	return a.bringUpProxy(ctx, ports)
 }
 
@@ -672,7 +682,7 @@ func (a *App) bringUpTun(ctx context.Context, t *target) error {
 	if len(routeCfg.ServerIPs) == 0 {
 		return fmt.Errorf("не удалось определить IP VPN-сервера — без него маршрутизация TUN оставит машину без сети")
 	}
-	if err := system.EnableTunRouting(routeCfg); err != nil {
+	if err := a.enableTunRouting(routeCfg); err != nil {
 		return fmt.Errorf("настроить маршрутизацию TUN: %w", err)
 	}
 	a.tunRouted = true
@@ -685,26 +695,23 @@ func (a *App) bringUpTun(ctx context.Context, t *target) error {
 			Note: "Kill switch не работает в режиме SPLIT: трафик мимо туннеля здесь — норма.",
 		})
 	} else if a.cfg.KillSwitch {
+		// A kill switch that was asked for and is not there must not pass for a
+		// connected session (A02): the error ends bring-up, and the session's
+		// teardown takes the routes above back out.
+		//
 		// A balancer profile rotates across many servers, and the whitelist holds
 		// all of them — a single-endpoint whitelist used to make this case unsafe,
 		// which is why it was skipped before.
 		endpoints := a.killSwitchEndpoints(t)
 		if len(endpoints) == 0 {
-			slog.Warn("kill switch skipped: no server endpoint resolved")
-			a.publishStatus(tui.StatusUpdate{
-				Note: "Kill switch выключен: не удалось определить IP серверов.",
-				Err:  true,
-			})
-		} else if err := system.EnableKillSwitch(system.KillSwitchConfig{
-			Endpoints: endpoints,
-			XrayPath:  a.binary,
-		}); err != nil {
-			slog.Warn("kill switch failed", "error", err)
-			a.publishStatus(tui.StatusUpdate{Note: "Kill switch не включился: " + err.Error(), Err: true})
-		} else {
-			a.killSwitchOn = true
-			slog.Info("kill switch enabled", "endpoints", len(endpoints))
+			// An empty whitelist would cut xray's own uplink along with the leak.
+			return fmt.Errorf("kill switch не включён: не удалось определить IP серверов")
 		}
+		if err := a.enableKillSwitch(system.KillSwitchConfig{Endpoints: endpoints}); err != nil {
+			return fmt.Errorf("kill switch не включился: %w", err)
+		}
+		a.killSwitchOn = true
+		slog.Info("kill switch enabled", "endpoints", len(endpoints))
 	}
 
 	go reachCheck(ctx, &http.Client{Timeout: 10 * time.Second}, a.cfg.CheckURLs(), "connectivity check")
@@ -742,7 +749,7 @@ func (a *App) releaseSession() {
 	// Routes first: they are what stands between the user and a working
 	// network, so restore the physical path before anything else can fail.
 	if a.tunRouted {
-		if err := system.DisableTunRouting(); err != nil {
+		if err := a.disableTunRouting(); err != nil {
 			slog.Warn("failed to remove tun routes", "error", err)
 		}
 		a.tunRouted = false

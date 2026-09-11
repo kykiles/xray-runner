@@ -27,6 +27,9 @@ type fakeIPTables struct {
 	// switch is reached at all, so a plain count can't model it: an ACCEPT in
 	// an earlier rule ends traversal before ours runs.
 	output map[string][]string
+	// failNew makes -N fail for these binaries, the way a stack without
+	// the needed kernel module refuses to create the chain.
+	failNew map[string]bool
 }
 
 func newFakeIPTables(bins ...string) *fakeIPTables {
@@ -58,6 +61,9 @@ func (f *fakeIPTables) run(bin string, args ...string) ([]byte, error) {
 	}
 	switch {
 	case len(args) == 2 && args[0] == "-N":
+		if f.failNew[bin] {
+			return []byte("can't initialize ip6tables table `filter'"), fmt.Errorf("exit status 3")
+		}
 		if c.exists {
 			return []byte("iptables: Chain already exists."), fmt.Errorf("exit status 1")
 		}
@@ -120,6 +126,25 @@ func chainHasServerAccept(rules []string, ip string) bool {
 		}
 	}
 	return false
+}
+
+// A02: a failed enable is reported as "no kill switch", so teardown never
+// removes it. Whatever went in before the failure has to come out right there —
+// a working IPv4 block left behind would cut the network after exit.
+func TestEnableKillSwitchRollsBackOnFailure(t *testing.T) {
+	f := newFakeIPTables("iptables", "ip6tables")
+	f.failNew = map[string]bool{"ip6tables": true}
+	withFakeFirewall(t, f)
+
+	if err := EnableKillSwitch(ipv4Cfg); err == nil {
+		t.Fatal("EnableKillSwitch succeeded with ip6tables failing")
+	}
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		if f.jumps[bin] != 0 || f.chains[bin].exists {
+			t.Errorf("%s: jumps=%d chain=%v left behind after a failed enable",
+				bin, f.jumps[bin], f.chains[bin].exists)
+		}
+	}
 }
 
 func TestEnableKillSwitchAppliesBothStacks(t *testing.T) {

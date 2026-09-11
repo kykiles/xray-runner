@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,9 @@ type Config struct {
 	BenchConcurrency int
 	BenchTimeout     time.Duration
 }
+
+// goos is runtime.GOOS, a variable so the Windows-only rules are testable anywhere.
+var goos = runtime.GOOS
 
 // defaultHealthCheckURLs are captive-portal probes: tiny, unauthenticated, and
 // answering 204 from several independent operators.
@@ -116,6 +120,12 @@ func Load(filenames ...string) (*Config, error) {
 	}
 	if !ValidMode(cfg.Mode) {
 		return nil, fmt.Errorf("MODE must be 'proxy' or 'tun', got %q", cfg.Mode)
+	}
+	// A02: the netsh kill switch blocked xray itself and a WFP one does not exist
+	// yet. Refused at start, so no mode — not even one the m key reaches later —
+	// runs while the user believes they are protected.
+	if cfg.KillSwitch && goos == "windows" {
+		errs = append(errs, errors.New("KILL_SWITCH: kill switch на Windows не поддерживается — уберите KILL_SWITCH=true из .env"))
 	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)

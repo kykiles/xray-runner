@@ -34,6 +34,9 @@ func EnableKillSwitch(cfg KillSwitchConfig) error {
 			continue
 		}
 		if err := applyKillSwitch(bin, cfg); err != nil {
+			// The caller treats a failed enable as "no kill switch" and never
+			// tears it down, so a stack that did go in must come out here.
+			_ = DisableKillSwitch()
 			return err
 		}
 	}
