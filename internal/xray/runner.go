@@ -3,6 +3,7 @@ package xray
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -170,9 +171,9 @@ func (r *Runner) Stop() error {
 }
 
 // RequestRestart asks RunWithRetry to restart xray regardless of the exit
-// code, then stops the current process. Without this explicit flag a SIGINT
-// stop makes xray exit with code 0, which RunWithRetry would treat as a clean
-// shutdown and never restart.
+// code, then stops the current process. Without this explicit flag the SIGINT
+// stop would count as a crash: backoff and a spent attempt for a restart that
+// was asked for.
 func (r *Runner) RequestRestart() {
 	r.mu.Lock()
 	r.restart = true
@@ -232,6 +233,7 @@ func (r *Runner) PID() int {
 
 func (r *Runner) RunWithRetry(ctx context.Context, maxRetries int) error {
 	attempt := 0
+	var lastErr error
 	for attempt < maxRetries {
 		start := time.Now()
 		if err := r.Start(ctx); err != nil {
@@ -253,12 +255,12 @@ func (r *Runner) RunWithRetry(ctx context.Context, maxRetries int) error {
 			continue
 		}
 
-		// Natural exit with code 0 and no restart requested: nothing to
-		// recover. Return so the caller cancels its context and shuts down
-		// cleanly instead of hanging with a dead xray behind a live proxy.
+		// A09: an exit nobody asked for is a dead core, exit code 0 included.
+		// Returning nil for it left the session "connected" in front of nothing.
 		if err == nil {
-			return nil
+			err = errors.New("exit status 0")
 		}
+		lastErr = err
 
 		// An almost-immediate exit is a deterministic config/runtime error;
 		// retrying it just burns the budget without changing the outcome.
@@ -282,5 +284,5 @@ func (r *Runner) RunWithRetry(ctx context.Context, maxRetries int) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("xray crashed %d times, giving up", maxRetries)
+	return fmt.Errorf("xray crashed %d times, giving up: %w", maxRetries, lastErr)
 }

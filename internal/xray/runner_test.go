@@ -126,18 +126,70 @@ func TestRunnerRunWithRetry(t *testing.T) {
 	}
 }
 
-func TestRunnerRunWithRetryCleanExit(t *testing.T) {
+// A09: xray exiting 0 on its own is a dead core like any other. Returning nil
+// for it left the status screen saying "connected" in front of nothing.
+func TestRunnerRunWithRetryImmediateCleanExitFails(t *testing.T) {
 	mockBinary := buildMockXray(t, 0, 500*time.Millisecond)
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	os.WriteFile(configPath, []byte("{}"), 0644)
 
 	r := New(mockBinary, configPath)
-	ctx := context.Background()
-
-	err := r.RunWithRetry(ctx, 3)
-	if err != nil {
-		t.Fatalf("expected nil, got %v", err)
+	if err := r.RunWithRetry(context.Background(), 3); err == nil {
+		t.Fatal("a core that exited 0 by itself was taken for a clean shutdown")
 	}
+}
+
+// A clean exit after the core had been up goes through the same restart budget
+// as a crash, and ends in an error once the budget is spent.
+func TestRunnerRunWithRetryRestartsCleanExit(t *testing.T) {
+	counter := filepath.Join(t.TempDir(), "count")
+	t.Setenv("XRAY_COUNTER", counter)
+	mockBinary := buildCountingXray(t, 2100*time.Millisecond)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(configPath, []byte("{}"), 0644)
+
+	r := New(mockBinary, configPath)
+	err := r.RunWithRetry(context.Background(), 2)
+	if err == nil {
+		t.Fatal("RunWithRetry returned nil after the core kept exiting")
+	}
+	if n := startCount(t, counter); n != 2 {
+		t.Errorf("core started %d times, want 2 — a clean exit must be restarted", n)
+	}
+}
+
+// buildCountingXray builds a mock that records each start (appending to the
+// file named by env XRAY_COUNTER), stays up for sleep and exits 0.
+func buildCountingXray(t *testing.T, sleep time.Duration) string {
+	t.Helper()
+	dir := t.TempDir()
+
+	src := fmt.Sprintf(`package main
+import (
+	"os"
+	"time"
+)
+func main() {
+	if p := os.Getenv("XRAY_COUNTER"); p != "" {
+		f, _ := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		f.WriteString("x")
+		f.Close()
+	}
+	time.Sleep(time.Duration(%d))
+}`, sleep.Nanoseconds())
+	mainPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(mainPath, []byte(src), 0644); err != nil {
+		t.Fatalf("write mock source: %v", err)
+	}
+	binaryName := "xray"
+	if runtime.GOOS == "windows" {
+		binaryName = "xray.exe"
+	}
+	outPath := filepath.Join(dir, binaryName)
+	if out, err := exec.Command("go", "build", "-o", outPath, mainPath).CombinedOutput(); err != nil {
+		t.Fatalf("build mock xray: %v\n%s", err, out)
+	}
+	return outPath
 }
 
 // buildSignalXray builds a mock that records each start (appending to the file

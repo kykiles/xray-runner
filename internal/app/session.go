@@ -68,6 +68,9 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	defer sessCancel()
 
 	var xrayDone sync.WaitGroup
+	// coreErr is why the core died on its own (A09). Written before sessCancel
+	// and read only after teardown's xrayDone.Wait, which orders the two.
+	var coreErr error
 
 	// Set once the health loops are up; teardown must wait for them before
 	// releaseSession touches a.runner underneath them.
@@ -95,6 +98,7 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 			defer xrayDone.Done()
 			if err := a.runner.RunWithRetry(sessCtx, 5); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("xray runner failed", "error", err)
+				coreErr = err
 				sessCancel()
 			}
 		}()
@@ -103,6 +107,11 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 
 	if err := a.showConnecting(t, connect, sessCancel); err != nil {
 		teardown()
+		// A core that died mid bring-up is the cause; the port or interface wait
+		// that then failed is only its symptom.
+		if coreErr != nil {
+			return tui.StatusQuit, fmt.Errorf("ядро завершилось: %w", coreErr)
+		}
 		// M-2: an interrupted bring-up is a deliberate exit, not a failure — the
 		// teardown above already undid the half-built session, and Ctrl+C means
 		// "quit the app" on every other screen.
@@ -117,6 +126,11 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	teardown()
 	if ctx.Err() != nil {
 		return tui.StatusQuit, ctx.Err()
+	}
+	// The screen closed because the core died, not because the user left: an
+	// error takes the menu back with the reason instead of quitting the app.
+	if coreErr != nil {
+		return tui.StatusQuit, fmt.Errorf("ядро завершилось: %w", coreErr)
 	}
 	return action, err
 }
