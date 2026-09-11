@@ -9,11 +9,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
           check-latest: true
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # Pinned, and built with go.mod's Go: the prebuilt v1 binaries are built
+          # with go1.24 and refuse a module that targets a newer Go.
+          version: v1.64.8
+          install-mode: goinstall
 
   test-windows:
     name: Test (Windows)

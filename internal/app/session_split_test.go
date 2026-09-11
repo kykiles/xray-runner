@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"xray-runner/internal/subscription"
+	"xray-runner/internal/system"
 	"xray-runner/internal/xraycfg"
 )
 
@@ -63,6 +64,9 @@ func TestBuildSessionConfig_NoSplitAppsKeepsInbounds(t *testing.T) {
 // mistaken for them: portsFromInbounds matches by protocol and tag, and a
 // dokodemo-door picked up as the HTTP port would break the system proxy.
 func TestBuildSessionConfig_SplitAppsAddRedirectInbounds(t *testing.T) {
+	if system.SplitOverTUN {
+		t.Skip("split rides on the tunnel here; redirect listeners are the firewall-built split")
+	}
 	a := newTemplateApp(t)
 	a.splitApps = []string{"code"}
 	a.resolveSplit()

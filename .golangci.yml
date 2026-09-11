@@ -3,6 +3,8 @@ linters-settings:
     exclude-functions:
       - (io.Closer).Close
       - (*os.File).Close
+      - (io/fs.File).Close
+      - (*compress/gzip.Reader).Close
       - (net.Conn).Close
   gosec:
     # These rules don't fit this project's threat model:
