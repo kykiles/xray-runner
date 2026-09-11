@@ -38,12 +38,13 @@ func (e *SubEntry) Validate() error {
 		return fmt.Errorf("неподдерживаемый протокол: %s", e.Protocol)
 	}
 
-	// The same rule the builders apply, so the list marks the entry and refuses
+	// The same rules the builders apply, so the list marks the entry and refuses
 	// to connect instead of failing (or, before A07, silently losing
-	// protection) at build time.
+	// protection) at build time — the security value (A07) and the
+	// transport/security/flow combination (A18).
 	switch e.Protocol {
 	case "vless", "vmess", "trojan":
-		if _, err := xraycfg.NormalizeSecurity(e.Security); err != nil {
+		if err := xraycfg.CheckStream(e.Network, e.Security, e.Flow); err != nil {
 			return err
 		}
 	}

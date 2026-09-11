@@ -23,9 +23,9 @@ type testCase struct {
 func TestBuildVLESSOutbound(t *testing.T) {
 	tests := []testCase{
 		{
-			name:    "vless_ws_reality",
-			rawURL:  "vless://uuid@example.com:443?type=ws&security=reality&path=%2Fvless-ws&host=example.com&sni=example.com&pbk=publickey&sid=123456&fp=chrome",
-			golden:  "testdata/vless_ws_reality.json",
+			name:    "vless_ws_tls",
+			rawURL:  "vless://uuid@example.com:443?type=ws&security=tls&path=%2Fvless-ws&host=example.com&sni=example.com&fp=chrome",
+			golden:  "testdata/vless_ws_tls.json",
 			buildFn: func(u *url.URL) (interface{}, error) { return BuildVLESSOutbound(u) },
 		},
 		{
@@ -35,9 +35,9 @@ func TestBuildVLESSOutbound(t *testing.T) {
 			buildFn: func(u *url.URL) (interface{}, error) { return BuildVLESSOutbound(u) },
 		},
 		{
-			name:    "vless_ws_flow",
-			rawURL:  "vless://uuid-flow@flow.example.com:443?type=ws&path=%2Fflow&flow=xtls-rprx-vision",
-			golden:  "testdata/vless_ws_flow.json",
+			name:    "vless_tcp_reality_vision",
+			rawURL:  "vless://uuid-flow@flow.example.com:443?type=tcp&security=reality&flow=xtls-rprx-vision&sni=flow.example.com&pbk=Z84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw&sid=123456&fp=chrome",
+			golden:  "testdata/vless_tcp_reality_vision.json",
 			buildFn: func(u *url.URL) (interface{}, error) { return BuildVLESSOutbound(u) },
 		},
 	}

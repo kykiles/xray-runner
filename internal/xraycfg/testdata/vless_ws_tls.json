@@ -1,0 +1,32 @@
+{
+  "tag": "proxy",
+  "protocol": "vless",
+  "settings": {
+    "vnext": [
+      {
+        "address": "example.com",
+        "port": 443,
+        "users": [
+          {
+            "id": "uuid",
+            "encryption": "none"
+          }
+        ]
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "ws",
+    "security": "tls",
+    "wsSettings": {
+      "path": "/vless-ws",
+      "headers": {
+        "Host": "example.com"
+      }
+    },
+    "tlsSettings": {
+      "serverName": "example.com",
+      "fingerprint": "chrome"
+    }
+  }
+}

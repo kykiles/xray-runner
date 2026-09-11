@@ -66,8 +66,10 @@ func maskString(s string, mask bool) string {
 	if !mask || s == "" {
 		return s
 	}
+	// A16: up to 8 characters a partial mask shows the value whole (4+4 of 8),
+	// and a one-character sid from a subscription panicked on s[:2].
 	if len(s) <= 8 {
-		return s[:2] + "..." + s[len(s)-2:]
+		return "***"
 	}
 	return s[:4] + "..." + s[len(s)-4:]
 }

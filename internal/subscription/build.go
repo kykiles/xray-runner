@@ -173,6 +173,9 @@ func buildTrojan(e *SubEntry) (json.RawMessage, error) {
 }
 
 func buildVMess(e *SubEntry) (json.RawMessage, error) {
+	if err := xraycfg.CheckStream(e.Network, e.Security, ""); err != nil {
+		return nil, fmt.Errorf("build vmess: %w", err)
+	}
 	sec, err := xraycfg.NormalizeSecurity(e.Security)
 	if err != nil {
 		return nil, fmt.Errorf("build vmess: %w", err)

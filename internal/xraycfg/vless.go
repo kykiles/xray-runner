@@ -50,6 +50,10 @@ func BuildVLESSOutbound(u *url.URL) (*VLESSOutbound, error) {
 		network = "tcp"
 	}
 
+	if err := CheckStream(network, q.Get("security"), q.Get("flow")); err != nil {
+		return nil, err
+	}
+
 	ss := &StreamSettings{Network: network}
 	setTransportSettings(ss, network, q)
 	if err := setSecuritySettings(ss, q); err != nil {
@@ -134,6 +138,26 @@ func NormalizeSecurity(v string) (string, error) {
 	default:
 		return "", fmt.Errorf("не поддерживается: security=%s", v)
 	}
+}
+
+// CheckStream refuses transport, security and flow combinations the core cannot
+// run (A18). REALITY works over RAW, XHTTP and gRPC only — anything else fails
+// at xray start — and xtls-rprx-vision needs RAW under TLS or REALITY: without
+// it the core takes the config and never carries a byte. The security value
+// goes through NormalizeSecurity first, so its refusal comes out unchanged.
+func CheckStream(network, security, flow string) error {
+	sec, err := NormalizeSecurity(security)
+	if err != nil {
+		return err
+	}
+	raw := network == "" || network == "tcp" || network == "raw"
+	if sec == "reality" && !raw && network != "xhttp" && network != "splithttp" && network != "grpc" {
+		return fmt.Errorf("не поддерживается: REALITY поверх %s (только tcp, xhttp или grpc)", network)
+	}
+	if strings.HasPrefix(flow, "xtls-rprx-vision") && (!raw || sec == "") {
+		return fmt.Errorf("не поддерживается: flow=%s требует tcp с tls или reality (сейчас %s, security=%q)", flow, network, sec)
+	}
+	return nil
 }
 
 func setSecuritySettings(ss *StreamSettings, q url.Values) error {

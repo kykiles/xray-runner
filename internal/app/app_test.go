@@ -67,8 +67,12 @@ func TestMaskString(t *testing.T) {
 		want string
 	}{
 		{"masked empty", "", true, ""},
-		{"masked short", "abcd", true, "ab...cd"},
-		{"masked boundary 8", "abcdefgh", true, "ab...gh"},
+		// A16: a one-character sid from a subscription used to panic on s[:2], and
+		// up to 8 characters the "partial" mask showed the whole value.
+		{"masked one char", "a", true, "***"},
+		{"masked short", "abcd", true, "***"},
+		{"masked boundary 8", "abcdefgh", true, "***"},
+		{"masked 9", "abcdefghi", true, "abcd...fghi"},
 		{"masked long", "abcdefghijklmnop", true, "abcd...mnop"},
 		{"unmasked empty", "", false, ""},
 		{"unmasked short", "abcd", false, "abcd"},

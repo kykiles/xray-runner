@@ -4,29 +4,24 @@
   "settings": {
     "vnext": [
       {
-        "address": "example.com",
+        "address": "flow.example.com",
         "port": 443,
         "users": [
           {
-            "id": "uuid",
-            "encryption": "none"
+            "id": "uuid-flow",
+            "encryption": "none",
+            "flow": "xtls-rprx-vision"
           }
         ]
       }
     ]
   },
   "streamSettings": {
-    "network": "ws",
+    "network": "tcp",
     "security": "reality",
-    "wsSettings": {
-      "path": "/vless-ws",
-      "headers": {
-        "Host": "example.com"
-      }
-    },
     "realitySettings": {
-      "serverName": "example.com",
-      "publicKey": "publickey",
+      "serverName": "flow.example.com",
+      "publicKey": "Z84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw",
       "shortId": "123456",
       "fingerprint": "chrome"
     }

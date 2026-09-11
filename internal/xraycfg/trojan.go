@@ -20,6 +20,10 @@ func BuildTrojanOutbound(u *url.URL) (*TrojanOutbound, error) {
 		network = "tcp"
 	}
 
+	if err := CheckStream(network, q.Get("security"), ""); err != nil {
+		return nil, err
+	}
+
 	ss := &StreamSettings{Network: network}
 	setTransportSettings(ss, network, q)
 	if err := setSecuritySettings(ss, q); err != nil {
