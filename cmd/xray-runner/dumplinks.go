@@ -44,11 +44,11 @@ func dumpLinks(cfg *config.Config, subURL string) (string, error) {
 func keysFilePath(subURL string) (string, error) {
 	u, err := url.Parse(subURL)
 	if err != nil {
-		return "", fmt.Errorf("parse subscription url: %w", err)
+		return "", fmt.Errorf("parse subscription url: %w", subscription.RedactURLError(err))
 	}
 	host := u.Hostname()
 	if host == "" {
-		return "", fmt.Errorf("subscription url has no host: %q", subURL)
+		return "", fmt.Errorf("subscription url has no host: %q", subscription.RedactURL(subURL))
 	}
 	return filepath.Join("keys", strings.ToUpper(host)+".md"), nil
 }

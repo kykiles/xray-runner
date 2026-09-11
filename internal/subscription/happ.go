@@ -68,7 +68,8 @@ func DecryptHappLink(raw string) (string, error) {
 	if strings.HasPrefix(path, "crypt5/") {
 		return happDecryptCrypt5(path[len("crypt5/"):])
 	}
-	return "", fmt.Errorf("неизвестный формат happ-ссылки: %s", raw)
+	// The payload decrypts to the subscription URL with keys shipped here.
+	return "", fmt.Errorf("неизвестный формат happ-ссылки: %s", RedactURL(raw))
 }
 
 // happB64 decodes both the standard and the URL-safe alphabet, with or without

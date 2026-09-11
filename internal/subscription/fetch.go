@@ -143,7 +143,7 @@ func fetchBody(rawURL string, opts ...FetchOption) ([]byte, http.Header, error) 
 	// A plain-http subscription sends the token and the x-hwid headers in the
 	// clear. We still allow it (self-hosted panels exist) but warn loudly.
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rawURL)), "http://") {
-		slog.Warn("подписка запрашивается по незашифрованному http:// — токен и заголовки устройства идут открытым текстом", "url", rawURL)
+		slog.Warn("подписка запрашивается по незашифрованному http:// — токен и заголовки устройства идут открытым текстом", "url", RedactURL(rawURL))
 	}
 
 	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: checkRedirect}
@@ -152,7 +152,7 @@ func fetchBody(rawURL string, opts ...FetchOption) ([]byte, http.Header, error) 
 	for i, ua := range userAgents {
 		req, err := http.NewRequest("GET", rawURL, nil)
 		if err != nil {
-			return nil, nil, fmt.Errorf("subscription request: %w", err)
+			return nil, nil, fmt.Errorf("subscription request: %w", RedactURLError(err))
 		}
 		req.Header.Set("User-Agent", ua)
 		for _, opt := range opts {
@@ -161,7 +161,9 @@ func fetchBody(rawURL string, opts ...FetchOption) ([]byte, http.Header, error) 
 
 		resp, err = client.Do(req)
 		if err != nil {
-			return nil, nil, fmt.Errorf("subscription fetch: %w", err)
+			// A04: the *url.Error prints the request URL, token and all — and after
+			// a redirect, the target's URL.
+			return nil, nil, fmt.Errorf("subscription fetch: %w", RedactURLError(err))
 		}
 		if resp.StatusCode == http.StatusOK {
 			break

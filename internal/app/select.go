@@ -249,7 +249,8 @@ func validateSubscriptionInput(rawURL string) error {
 	if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
 		return nil
 	}
-	return fmt.Errorf("нужна ссылка на подписку (http/https) или на сервер (vless/vmess/ss/trojan/hysteria2), получено %q", rawURL)
+	// Only scheme and host: the rest of a mistyped subscription URL is still its token.
+	return fmt.Errorf("нужна ссылка на подписку (http/https) или на сервер (vless/vmess/ss/trojan/hysteria2), получено %q", subscription.RedactURL(rawURL))
 }
 
 // setServerEndpoint records the selected server so the kill switch can allow
