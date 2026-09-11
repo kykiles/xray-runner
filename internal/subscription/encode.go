@@ -58,6 +58,8 @@ func encodeVLESS(e *SubEntry) string {
 func encodeTransportQuery(q url.Values, e *SubEntry) {
 	setIf(q, "spx", e.SpiderX)
 	setIf(q, "mode", e.XHTTPMode)
+	setIf(q, "mode", e.GRPCMode)
+	setIf(q, "authority", e.Authority)
 }
 
 func encodeTrojan(e *SubEntry) string {

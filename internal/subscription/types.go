@@ -22,6 +22,8 @@ type SubEntry struct {
 	ShortID     string
 	ALPN        string
 	ServiceName string
+	GRPCMode    string // grpc mode: gun or multi
+	Authority   string // grpc :authority
 	SpiderX     string // reality spiderX (spx)
 	XHTTPMode   string // xhttp mode (stream-one, packet-up, ...)
 

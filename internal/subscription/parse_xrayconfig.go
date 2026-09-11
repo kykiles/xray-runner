@@ -83,6 +83,8 @@ type xrayStream struct {
 	} `json:"wsSettings"`
 	GRPC *struct {
 		ServiceName string `json:"serviceName"`
+		MultiMode   bool   `json:"multiMode"`
+		Authority   string `json:"authority"`
 	} `json:"grpcSettings"`
 	Hysteria *struct {
 		Auth string `json:"auth"`
@@ -267,5 +269,9 @@ func applyStream(e *SubEntry, s *xrayStream) {
 	}
 	if s.GRPC != nil {
 		e.ServiceName = sanitize(s.GRPC.ServiceName)
+		if s.GRPC.MultiMode {
+			e.GRPCMode = "multi"
+		}
+		e.Authority = sanitize(s.GRPC.Authority)
 	}
 }

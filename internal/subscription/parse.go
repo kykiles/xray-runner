@@ -186,6 +186,13 @@ func parseVMessJSON(obj map[string]interface{}) SubEntry {
 	if e.Network == "" {
 		e.Network = "tcp"
 	}
+	// A v2rayN gRPC link keeps serviceName in "path", the mode in "type" and the
+	// :authority in "host" (A14).
+	if e.Network == "grpc" {
+		e.ServiceName = e.Path
+		e.GRPCMode = getString(obj, "type")
+		e.Authority = e.Host
+	}
 
 	return e
 }
@@ -296,7 +303,14 @@ func parseVlessURL(u *url.URL, e *SubEntry) {
 	e.ALPN = qget(q, "alpn")
 	e.ServiceName = qget(q, "serviceName")
 	e.SpiderX = qget(q, "spx")
-	e.XHTTPMode = qget(q, "mode")
+	// "mode" is the gRPC mode (gun/multi) on a grpc link and the xhttp mode on
+	// any other: one query key, two different settings.
+	if e.Network == "grpc" {
+		e.GRPCMode = qget(q, "mode")
+	} else {
+		e.XHTTPMode = qget(q, "mode")
+	}
+	e.Authority = qget(q, "authority")
 
 	if e.Network == "" {
 		e.Network = "tcp"
@@ -336,7 +350,14 @@ func parseTrojanURL(u *url.URL, e *SubEntry) {
 	e.ALPN = qget(q, "alpn")
 	e.ServiceName = qget(q, "serviceName")
 	e.SpiderX = qget(q, "spx")
-	e.XHTTPMode = qget(q, "mode")
+	// "mode" is the gRPC mode (gun/multi) on a grpc link and the xhttp mode on
+	// any other: one query key, two different settings.
+	if e.Network == "grpc" {
+		e.GRPCMode = qget(q, "mode")
+	} else {
+		e.XHTTPMode = qget(q, "mode")
+	}
+	e.Authority = qget(q, "authority")
 	e.Remarks = decodeFragment(u)
 }
 

@@ -113,6 +113,12 @@ func setTransportQuery(q url.Values, e *SubEntry) {
 	if e.XHTTPMode != "" {
 		q.Set("mode", e.XHTTPMode)
 	}
+	if e.GRPCMode != "" {
+		q.Set("mode", e.GRPCMode)
+	}
+	if e.Authority != "" {
+		q.Set("authority", e.Authority)
+	}
 	// M-1/S-1: honor the subscription's insecure flag only behind the local
 	// opt-in. Without this the ALLOW_INSECURE setting reached hysteria2 alone.
 	if e.Insecure && e.AllowInsecure {
@@ -187,7 +193,10 @@ func buildVMess(e *SubEntry) (json.RawMessage, error) {
 		}
 		ss.WSSettings = ws
 	case "grpc":
-		grpc := &xraycfg.GRPCSettings{}
+		grpc := &xraycfg.GRPCSettings{
+			MultiMode: e.GRPCMode == "multi",
+			Authority: e.Authority,
+		}
 		if e.ServiceName != "" {
 			grpc.ServiceName = e.ServiceName
 		}
