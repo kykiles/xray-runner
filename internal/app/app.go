@@ -66,7 +66,11 @@ type App struct {
 	originalProxy system.ProxyState
 	proxyTouched  bool
 	tunRouted     bool // tun routes installed; teardown must remove them
-	killSwitchOn  bool // kill switch enabled; teardown must take it down
+	// The active config routes something past the tunnel — as a rule the panel
+	// profile's own direct rules. The TUN label says so instead of promising
+	// that every packet goes through the VPN (A03).
+	hasBypass    bool
+	killSwitchOn bool // kill switch enabled; teardown must take it down
 	// Split tunnelling (proxy mode): the names read from apps.txt, the ones that
 	// were actually running, and whether teardown has anything to undo.
 	splitApps    []string

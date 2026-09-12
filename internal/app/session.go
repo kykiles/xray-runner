@@ -54,6 +54,9 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	if err := a.writeConfigJSON(cfgJSON); err != nil {
 		return tui.StatusQuit, err
 	}
+	// Read off the JSON that actually went to the core, so the label reflects
+	// the panel's rules and ours alike.
+	a.hasBypass = xraycfg.HasBypassRules(cfgJSON)
 
 	a.setEndpoint(t)
 	// Bracketed so the boundary between two servers is findable by eye: one run
@@ -851,7 +854,11 @@ func (a *App) statusInfo(t *target, ports sessionPorts) tui.StatusInfo {
 		info.Split = true
 		info.Apps = a.splitApps
 	case a.mode == "tun":
-		info.Mode = "TUN (весь трафик через VPN)"
+		if a.hasBypass {
+			info.Mode = "TUN (есть исключения по профилю)"
+		} else {
+			info.Mode = "TUN (весь трафик через VPN)"
+		}
 	default:
 		addr := "127.0.0.1:" + strconv.Itoa(ports.http)
 		info.Mode = "PROXY (" + addr + ")"
