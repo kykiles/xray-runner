@@ -548,9 +548,14 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 		return nil
 	}
 
+	// One snapshot governs both ends: Enable refuses to touch settings this
+	// snapshot could not restore, and teardown restores from the very same one.
 	a.originalProxy = system.ReadProxyState()
-	if err := a.proxy.Enable(ports.http); err != nil {
+	if err := a.proxy.Enable(ports.http, a.originalProxy); err != nil {
 		slog.Warn("failed to enable system proxy", "error", err)
+		// The user has to hear this from the screen, not from the log: otherwise
+		// they only see that sites do not go through the VPN and cannot tell why.
+		a.pendingNote = "Системный прокси не включён: " + err.Error() + ". VPN работает, но браузер и программы идут напрямую."
 		return nil
 	}
 	a.proxyTouched = true

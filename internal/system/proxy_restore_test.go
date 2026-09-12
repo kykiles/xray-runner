@@ -3,6 +3,7 @@
 package system
 
 import (
+	"errors"
 	"slices"
 	"testing"
 )
@@ -63,7 +64,7 @@ func TestRestoreDeletesValuesThatDidNotExist(t *testing.T) {
 	before := ReadProxyState()
 
 	pm := New()
-	if err := pm.Enable(10809); err != nil {
+	if err := pm.Enable(10809, before); err != nil {
 		t.Fatalf("Enable: %v", err)
 	}
 	if _, ok := f.strs["ProxyServer"]; !ok {
@@ -102,7 +103,7 @@ func TestRestoreRewritesValuesThatExisted(t *testing.T) {
 	before := ReadProxyState()
 
 	pm := New()
-	if err := pm.Enable(10809); err != nil {
+	if err := pm.Enable(10809, before); err != nil {
 		t.Fatalf("Enable: %v", err)
 	}
 	if err := pm.Restore(before); err != nil {
@@ -136,5 +137,76 @@ func TestRestoreRefusesUnreadState(t *testing.T) {
 	}
 	if len(f.deleted) != 0 {
 		t.Errorf("refused Restore deleted %v", f.deleted)
+	}
+}
+
+// TestEnableRefusesWhenStateUnread: with no snapshot to restore from, enabling
+// the proxy would leave 127.0.0.1:PORT in the registry after the session —
+// WriteProxyState refuses to restore such a state, so Enable refuses too.
+func TestEnableRefusesWhenStateUnread(t *testing.T) {
+	f := useFakeRegistry(t, &fakeRegistry{
+		readErr: errors.New("доступ к ключу запрещён"),
+		ints:    map[string]uint64{"ProxyEnable": 1},
+		strs:    map[string]string{"ProxyServer": "proxy.corp.local:3128"},
+	})
+
+	saved := ReadProxyState()
+	if saved.Read {
+		t.Fatal("ReadProxyState reported a snapshot it could not take")
+	}
+
+	if err := New().Enable(10809, saved); err == nil {
+		t.Fatal("Enable accepted an unread state — the proxy would have stayed in the registry after the session")
+	}
+	if got := f.strs["ProxyServer"]; got != "proxy.corp.local:3128" {
+		t.Errorf("refused Enable still touched the registry: ProxyServer = %q", got)
+	}
+	if got := f.ints["ProxyEnable"]; got != 1 {
+		t.Errorf("refused Enable still touched the registry: ProxyEnable = %d", got)
+	}
+}
+
+// TestRestoreFallsBackToDisablingOurProxy: when the exact restore cannot run,
+// leaving our dead port in the settings would cut WinINet off from the
+// internet. Our own value goes away and the proxy is switched off.
+func TestRestoreFallsBackToDisablingOurProxy(t *testing.T) {
+	f := useFakeRegistry(t, &fakeRegistry{ints: map[string]uint64{"ProxyEnable": 0}})
+
+	pm := New()
+	if err := pm.Enable(10809, ReadProxyState()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+
+	if err := pm.Restore(ProxyState{}); err == nil {
+		t.Fatal("Restore accepted an unread state, want refusal")
+	}
+	if got := f.ints["ProxyEnable"]; got != 0 {
+		t.Errorf("ProxyEnable = %d, want 0: the proxy nobody listens on is still on", got)
+	}
+	if got, ok := f.strs["ProxyServer"]; ok {
+		t.Errorf("our ProxyServer survived the failed restore: %q", got)
+	}
+}
+
+// TestRestoreFallbackKeepsForeignProxyServer: the fallback is a blunt tool, so
+// it only removes the exact value we wrote. Anything else in ProxyServer was
+// put there by somebody else and is not ours to erase.
+func TestRestoreFallbackKeepsForeignProxyServer(t *testing.T) {
+	f := useFakeRegistry(t, &fakeRegistry{ints: map[string]uint64{"ProxyEnable": 0}})
+
+	pm := New()
+	if err := pm.Enable(10809, ReadProxyState()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	f.strs["ProxyServer"] = "proxy.corp.local:3128"
+
+	if err := pm.Restore(ProxyState{}); err == nil {
+		t.Fatal("Restore accepted an unread state, want refusal")
+	}
+	if got := f.strs["ProxyServer"]; got != "proxy.corp.local:3128" {
+		t.Errorf("ProxyServer = %q, want the foreign value left alone", got)
+	}
+	if got := f.ints["ProxyEnable"]; got != 0 {
+		t.Errorf("ProxyEnable = %d, want 0", got)
 	}
 }

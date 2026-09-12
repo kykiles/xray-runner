@@ -7,9 +7,7 @@ import (
 	"log/slog"
 )
 
-func (pm *ProxyManager) Enable(port int) error {
-	saved := ReadProxyState()
-
+func (pm *ProxyManager) Enable(port int, saved ProxyState) error {
 	overrides := saved.Overrides
 	if overrides == "" {
 		overrides = "localhost,127.0.0.0/8,::1"
@@ -42,3 +40,9 @@ func setDesktopProxy(host string, port int, overrides string) bool {
 	}
 	return false
 }
+
+// forceDisable is the fallback Restore calls when the exact restore failed.
+// Only Windows needs one: there the settings live in the registry and keep
+// pointing at our dead port. Here they go through gsettings/kwriteconfig,
+// which either apply or report failure right away.
+func (pm *ProxyManager) forceDisable() {}
