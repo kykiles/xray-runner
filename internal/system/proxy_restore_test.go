@@ -3,99 +3,138 @@
 package system
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
+	"slices"
 	"testing"
 )
-
-// setupRegMockLogged like setupRegMock, but reg.bat also logs all `reg add`
-// invocations to a file whose path is returned. `reg query` responses are
-// controlled by queryBlock (echo lines). Env REG_LOG carries the log path.
-func setupRegMockLogged(t *testing.T, queryBlock string) string {
-	t.Helper()
-
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, "reg.log")
-	t.Setenv("REG_LOG", logPath)
-
-	regBat := `@echo off
-if "%1"=="query" (
-` + queryBlock + `
-)
-if "%1"=="add" (
-  echo %* >> "%REG_LOG%"
-)
-`
-	regPath := filepath.Join(dir, "reg.bat")
-	if err := os.WriteFile(regPath, []byte(regBat), 0644); err != nil {
-		t.Fatalf("write reg mock: %v", err)
-	}
-
-	oldPath := os.Getenv("PATH")
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+oldPath)
-	return logPath
-}
-
-const proxyEnableQueryBlock = `echo.
-echo HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
-echo     ProxyEnable    REG_DWORD    0x0`
 
 // TestRestoreDisabledProxy verifies that Restore writes ProxyEnable=0 when the
 // original state was disabled. Regression for the bug where cleanup skipped
 // restoration when oldProxy.Enabled == false, leaving 127.0.0.1:10809 active.
 func TestRestoreDisabledProxy(t *testing.T) {
-	logPath := setupRegMockLogged(t, proxyEnableQueryBlock)
+	f := useFakeRegistry(t, &fakeRegistry{
+		ints: map[string]uint64{"ProxyEnable": 1},
+		strs: map[string]string{"ProxyServer": "127.0.0.1:10809"},
+	})
 
 	pm := New()
-	if err := pm.Restore(ProxyState{Enabled: false}); err != nil {
+	if err := pm.Restore(ProxyState{Read: true, EnabledSet: true, Enabled: false}); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 
-	log, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal("Restore did not invoke reg add")
-	}
-	logStr := string(log)
-	if !strings.Contains(logStr, "ProxyEnable") {
-		t.Errorf("expected reg add ProxyEnable, got: %s", logStr)
-	}
-	if !strings.Contains(logStr, " REG_DWORD ") || !strings.Contains(logStr, " 0 ") {
-		if !strings.Contains(logStr, "/d 0") {
-			t.Errorf("expected /d 0 (disabled), got: %s", logStr)
-		}
+	if got := f.ints["ProxyEnable"]; got != 0 {
+		t.Errorf("ProxyEnable = %d, want 0", got)
 	}
 }
 
 // TestRestoreEnabledProxy verifies that Restore writes ProxyEnable=1, the
 // saved server, and the saved overrides when the state was enabled.
-// Ensures we didn't regress the enabled-state path while fixing the disabled one.
 func TestRestoreEnabledProxy(t *testing.T) {
-	logPath := setupRegMockLogged(t, proxyEnableQueryBlock)
+	f := useFakeRegistry(t, &fakeRegistry{})
 
 	pm := New()
 	if err := pm.Restore(ProxyState{
-		Enabled:   true,
-		Server:    "1.2.3.4:80",
-		Overrides: "localhost",
+		Read:         true,
+		EnabledSet:   true,
+		Enabled:      true,
+		ServerSet:    true,
+		Server:       "1.2.3.4:80",
+		OverridesSet: true,
+		Overrides:    "localhost",
 	}); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 
-	log, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal("Restore did not invoke reg add")
+	if got := f.ints["ProxyEnable"]; got != 1 {
+		t.Errorf("ProxyEnable = %d, want 1", got)
 	}
-	logStr := string(log)
-	// Expect 3 reg add invocations: ProxyEnable, ProxyServer, ProxyOverride.
-	calls := strings.Count(logStr, "\n")
-	if calls < 3 {
-		t.Errorf("expected 3 reg add calls, got %d: %s", calls, logStr)
+	if got := f.strs["ProxyServer"]; got != "1.2.3.4:80" {
+		t.Errorf("ProxyServer = %q, want %q", got, "1.2.3.4:80")
 	}
-	if !strings.Contains(logStr, "1.2.3.4:80") {
-		t.Errorf("expected ProxyServer=1.2.3.4:80, got: %s", logStr)
+	if got := f.strs["ProxyOverride"]; got != "localhost" {
+		t.Errorf("ProxyOverride = %q, want %q", got, "localhost")
 	}
-	if !strings.Contains(logStr, "localhost") {
-		t.Errorf("expected ProxyOverride=localhost, got: %s", logStr)
+}
+
+// TestRestoreDeletesValuesThatDidNotExist is A12 itself: on a clean machine
+// ProxyServer does not exist, and after a session it must not exist either.
+func TestRestoreDeletesValuesThatDidNotExist(t *testing.T) {
+	f := useFakeRegistry(t, &fakeRegistry{ints: map[string]uint64{"ProxyEnable": 0}})
+
+	before := ReadProxyState()
+
+	pm := New()
+	if err := pm.Enable(10809); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	if _, ok := f.strs["ProxyServer"]; !ok {
+		t.Fatalf("Enable did not set ProxyServer")
+	}
+
+	if err := pm.Restore(before); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	if _, ok := f.strs["ProxyServer"]; ok {
+		t.Errorf("ProxyServer survived the session: %q", f.strs["ProxyServer"])
+	}
+	if _, ok := f.strs["ProxyOverride"]; ok {
+		t.Errorf("ProxyOverride survived the session: %q", f.strs["ProxyOverride"])
+	}
+	if got := f.ints["ProxyEnable"]; got != 0 {
+		t.Errorf("ProxyEnable = %d, want 0", got)
+	}
+	if !slices.Contains(f.deleted, "ProxyServer") {
+		t.Errorf("expected ProxyServer to be deleted, deletions: %v", f.deleted)
+	}
+}
+
+// TestRestoreRewritesValuesThatExisted is the other half: a corporate proxy
+// configured before the session must come back byte for byte.
+func TestRestoreRewritesValuesThatExisted(t *testing.T) {
+	f := useFakeRegistry(t, &fakeRegistry{
+		ints: map[string]uint64{"ProxyEnable": 1},
+		strs: map[string]string{
+			"ProxyServer":   "proxy.corp.local:3128",
+			"ProxyOverride": "*.corp.local;<local>",
+		},
+	})
+
+	before := ReadProxyState()
+
+	pm := New()
+	if err := pm.Enable(10809); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	if err := pm.Restore(before); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	if got := f.strs["ProxyServer"]; got != "proxy.corp.local:3128" {
+		t.Errorf("ProxyServer = %q, want the corporate proxy back", got)
+	}
+	if got := f.strs["ProxyOverride"]; got != "*.corp.local;<local>" {
+		t.Errorf("ProxyOverride = %q, want the original value back", got)
+	}
+	if got := f.ints["ProxyEnable"]; got != 1 {
+		t.Errorf("ProxyEnable = %d, want 1", got)
+	}
+}
+
+// TestRestoreRefusesUnreadState: restoring from a snapshot we never took would
+// delete the user's real settings, so it is refused instead.
+func TestRestoreRefusesUnreadState(t *testing.T) {
+	f := useFakeRegistry(t, &fakeRegistry{
+		ints: map[string]uint64{"ProxyEnable": 1},
+		strs: map[string]string{"ProxyServer": "proxy.corp.local:3128"},
+	})
+
+	if err := New().Restore(ProxyState{}); err == nil {
+		t.Fatalf("Restore accepted an unread state, want refusal")
+	}
+	if got := f.strs["ProxyServer"]; got != "proxy.corp.local:3128" {
+		t.Errorf("refused Restore still touched the registry: ProxyServer = %q", got)
+	}
+	if len(f.deleted) != 0 {
+		t.Errorf("refused Restore deleted %v", f.deleted)
 	}
 }

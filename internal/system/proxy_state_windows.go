@@ -3,70 +3,166 @@
 package system
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
-	"strings"
+
+	"golang.org/x/sys/windows/registry"
 )
 
-const regKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
+const regKey = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
 
+// Seam for tests: the real implementations talk to HKCU, tests swap in a map.
+var (
+	regGetInt    = realRegGetInt
+	regGetString = realRegGetString
+	regSetInt    = realRegSetInt
+	regSetString = realRegSetString
+	regDelete    = realRegDelete
+)
+
+// ReadProxyState takes an exact snapshot of the three values we touch. A value
+// that is absent and a value we failed to read are different things: the first
+// must be deleted on restore, the second forbids us from touching anything at
+// all. Only a fully read snapshot sets Read.
 func ReadProxyState() ProxyState {
 	var s ProxyState
-	out, err := exec.Command("reg", "query", regKey, "/v", "ProxyEnable").Output()
-	if err != nil {
+
+	v, err := regGetInt("ProxyEnable")
+	switch {
+	case err == nil:
+		s.Enabled = v != 0
+		s.EnabledSet = true
+	case errors.Is(err, registry.ErrNotExist):
+		// No value: the proxy is off and there is nothing to put back.
+	default:
 		slog.Warn("не удалось прочитать ProxyEnable из реестра", "key", regKey, "error", err)
 		return s
 	}
-	s.Enabled = strings.Contains(string(out), "0x1")
-	s.Server = queryRegString("ProxyServer")
-	s.Overrides = queryRegString("ProxyOverride")
+
+	if s.Server, s.ServerSet, err = readProxyString("ProxyServer"); err != nil {
+		slog.Warn("не удалось прочитать ProxyServer из реестра", "key", regKey, "error", err)
+		return s
+	}
+	if s.Overrides, s.OverridesSet, err = readProxyString("ProxyOverride"); err != nil {
+		slog.Warn("не удалось прочитать ProxyOverride из реестра", "key", regKey, "error", err)
+		return s
+	}
+
+	s.Read = true
 	return s
 }
 
+// WriteProxyState puts the machine back exactly as ReadProxyState found it.
 func WriteProxyState(s ProxyState) error {
+	if !s.Read {
+		return errors.New("восстановление системного прокси: исходное состояние реестра не прочитано")
+	}
+
+	enabled := uint32(0)
 	if s.Enabled {
-		if err := execReg("add", regKey, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "1", "/f"); err != nil {
-			return err
-		}
-		if s.Server != "" {
-			if err := execReg("add", regKey, "/v", "ProxyServer", "/t", "REG_SZ", "/d", s.Server, "/f"); err != nil {
-				return err
-			}
-		}
-		if s.Overrides != "" {
-			if err := execReg("add", regKey, "/v", "ProxyOverride", "/t", "REG_SZ", "/d", s.Overrides, "/f"); err != nil {
-				return err
-			}
-		}
-	} else {
-		if err := execReg("add", regKey, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "0", "/f"); err != nil {
-			return err
-		}
+		enabled = 1
 	}
+	if err := restoreInt("ProxyEnable", s.EnabledSet, enabled); err != nil {
+		return err
+	}
+	if err := restoreString("ProxyServer", s.ServerSet, s.Server); err != nil {
+		return err
+	}
+	if err := restoreString("ProxyOverride", s.OverridesSet, s.Overrides); err != nil {
+		return err
+	}
+
+	notifyWinINet()
 	return nil
 }
 
-func queryRegString(name string) string {
-	out, err := exec.Command("reg", "query", regKey, "/v", name).Output()
+func readProxyString(name string) (string, bool, error) {
+	v, err := regGetString(name)
+	if errors.Is(err, registry.ErrNotExist) {
+		return "", false, nil
+	}
 	if err != nil {
-		return ""
+		return "", false, err
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.Contains(line, "REG_SZ") {
-			parts := strings.SplitN(line, "REG_SZ", 2)
-			if len(parts) == 2 {
-				return strings.TrimSpace(parts[1])
-			}
-		}
-	}
-	return ""
+	return v, true, nil
 }
 
-func execReg(args ...string) error {
-	if out, err := exec.Command("reg", args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("reg %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+func restoreInt(name string, existed bool, v uint32) error {
+	if !existed {
+		return deleteProxyValue(name)
+	}
+	if err := regSetInt(name, v); err != nil {
+		return fmt.Errorf("восстановление %s: %w", name, err)
 	}
 	return nil
+}
+
+func restoreString(name string, existed bool, v string) error {
+	if !existed {
+		return deleteProxyValue(name)
+	}
+	if err := regSetString(name, v); err != nil {
+		return fmt.Errorf("восстановление %s: %w", name, err)
+	}
+	return nil
+}
+
+func deleteProxyValue(name string) error {
+	err := regDelete(name)
+	if err == nil || errors.Is(err, registry.ErrNotExist) {
+		return nil
+	}
+	return fmt.Errorf("удаление %s: %w", name, err)
+}
+
+func openProxyKey(access uint32) (registry.Key, error) {
+	return registry.OpenKey(registry.CURRENT_USER, regKey, access)
+}
+
+func realRegGetInt(name string) (uint64, error) {
+	k, err := openProxyKey(registry.QUERY_VALUE)
+	if err != nil {
+		return 0, err
+	}
+	defer k.Close()
+	v, _, err := k.GetIntegerValue(name)
+	return v, err
+}
+
+func realRegGetString(name string) (string, error) {
+	k, err := openProxyKey(registry.QUERY_VALUE)
+	if err != nil {
+		return "", err
+	}
+	defer k.Close()
+	v, _, err := k.GetStringValue(name)
+	return v, err
+}
+
+func realRegSetInt(name string, v uint32) error {
+	k, err := openProxyKey(registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+	return k.SetDWordValue(name, v)
+}
+
+func realRegSetString(name, v string) error {
+	k, err := openProxyKey(registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+	return k.SetStringValue(name, v)
+}
+
+func realRegDelete(name string) error {
+	k, err := openProxyKey(registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+	return k.DeleteValue(name)
 }
