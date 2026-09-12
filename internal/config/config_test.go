@@ -8,8 +8,44 @@ import (
 	"testing"
 )
 
-func TestLoadDefaults(t *testing.T) {
+// clearEnv wipes the environment for a test that must start from nothing, and
+// puts it back afterwards. A bare os.Clearenv() is never undone by the testing
+// framework, so it leaked into every test that ran later in the package: TMP,
+// TEMP and USERPROFILE were gone, os.TempDir() fell back to the Windows
+// directory, and t.TempDir() failed with "Access is denied" on any account
+// without administrator rights. Under an administrator C:\WINDOWS is writable
+// and the suite went green, which is why acceptance — run as administrator —
+// never saw it.
+func clearEnv(t *testing.T) {
+	t.Helper()
+	saved := os.Environ()
 	os.Clearenv()
+	t.Cleanup(func() {
+		os.Clearenv()
+		for _, kv := range saved {
+			if k, v, ok := strings.Cut(kv, "="); ok {
+				_ = os.Setenv(k, v)
+			}
+		}
+	})
+}
+
+// isolateHWID points the data directory at a temporary one, so that a test
+// cannot touch the real device identifier. XDG_CONFIG_HOME alone is not enough:
+// on Windows os.UserConfigDir reads %AppData% and ignores it, so the tests wrote
+// their fake identifier into the user's real profile — and the HWID is what the
+// panel counts devices by.
+func isolateHWID(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("AppData", dir)
+	return dir
+}
+
+func TestLoadDefaults(t *testing.T) {
+	clearEnv(t)
 	_ = os.Setenv("VLESS_URL", "vless://uuid@host:443")
 
 	cfg, err := Load()
@@ -34,7 +70,7 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadMissingURLs(t *testing.T) {
-	os.Clearenv()
+	clearEnv(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -49,7 +85,7 @@ func TestLoadMissingURLs(t *testing.T) {
 }
 
 func TestLoadSubscriptionURL(t *testing.T) {
-	os.Clearenv()
+	clearEnv(t)
 	_ = os.Setenv("SUBSCRIPTION_URL", "https://example.com/sub")
 
 	cfg, err := Load()
@@ -62,7 +98,7 @@ func TestLoadSubscriptionURL(t *testing.T) {
 }
 
 func TestLoadCustomValues(t *testing.T) {
-	os.Clearenv()
+	clearEnv(t)
 	_ = os.Setenv("VLESS_URL", "vless://u@h:1")
 	_ = os.Setenv("LOG_ENABLED", "true")
 	_ = os.Setenv("LOG_LEVEL", "debug")
@@ -97,7 +133,7 @@ func TestLoadCustomValues(t *testing.T) {
 // now a startup error, exactly as MODE has always been. Every bad value is
 // reported at once rather than one per run.
 func TestLoadBadBoolIsFatal(t *testing.T) {
-	os.Clearenv()
+	clearEnv(t)
 	_ = os.Setenv("VLESS_URL", "vless://u@h:1")
 	_ = os.Setenv("LOG_ENABLED", "notabool")
 	_ = os.Setenv("KILL_SWITCH", "notabool")
@@ -114,7 +150,7 @@ func TestLoadBadBoolIsFatal(t *testing.T) {
 }
 
 func TestLoadHWID(t *testing.T) {
-	os.Clearenv()
+	clearEnv(t)
 	_ = os.Setenv("SUBSCRIPTION_URL", "https://example.com/sub")
 
 	cfg, err := Load()
@@ -130,7 +166,7 @@ func TestLoadHWID(t *testing.T) {
 }
 
 func TestLoadHWIDCustom(t *testing.T) {
-	os.Clearenv()
+	clearEnv(t)
 	_ = os.Setenv("SUBSCRIPTION_URL", "https://example.com/sub")
 	_ = os.Setenv("HWID", "my-custom-hwid-value")
 	_ = os.Setenv("HWID_DEVICE_MODEL", "custom-app")
@@ -155,17 +191,16 @@ func TestGetOrCreateHWID_Override(t *testing.T) {
 }
 
 func TestGetOrCreateHWID_GenerateAndReuse(t *testing.T) {
-	os.Remove(hwidFile)
-	defer os.Remove(hwidFile)
+	isolateHWID(t)
 
 	hwid1 := GetOrCreateHWID("")
 	if len(hwid1) != 20 {
 		t.Errorf("expected 20-char hex, got %q (len=%d)", hwid1, len(hwid1))
 	}
 
-	data, err := os.ReadFile(hwidFile)
+	data, err := os.ReadFile(hwidPath())
 	if err != nil {
-		t.Fatalf("hwid.txt not created: %v", err)
+		t.Fatalf("HWID not persisted: %v", err)
 	}
 	if string(data) != hwid1 {
 		t.Errorf("file content = %q, want %q", string(data), hwid1)
@@ -178,9 +213,10 @@ func TestGetOrCreateHWID_GenerateAndReuse(t *testing.T) {
 }
 
 func TestGetOrCreateHWID_Persistence(t *testing.T) {
-	os.Remove(hwidFile)
-	os.WriteFile(hwidFile, []byte("persistent-hwid-value"), 0644)
-	defer os.Remove(hwidFile)
+	isolateHWID(t)
+	if err := os.WriteFile(hwidFile, []byte("persistent-hwid-value"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	hwid := GetOrCreateHWID("")
 	if hwid != "persistent-hwid-value" {
@@ -189,7 +225,7 @@ func TestGetOrCreateHWID_Persistence(t *testing.T) {
 }
 
 func TestLoadLogLevelToLower(t *testing.T) {
-	os.Clearenv()
+	clearEnv(t)
 	_ = os.Setenv("VLESS_URL", "vless://u@h:1")
 	_ = os.Setenv("LOG_LEVEL", "WARN")
 
@@ -278,9 +314,7 @@ func TestGetOrCreateHWID_TrimsWhitespace(t *testing.T) {
 
 // The same trimming applies to the config-dir copy, not just the legacy file.
 func TestGetOrCreateHWID_TrimsConfigDirCopy(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	isolateHWID(t)
 	path := hwidPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)

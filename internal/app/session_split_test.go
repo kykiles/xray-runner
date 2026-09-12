@@ -189,6 +189,9 @@ func TestResolveSplit(t *testing.T) {
 	}
 	for _, c := range cases {
 		a := newTemplateApp(t)
+		// resolveSplit asks for privileges, and on Windows that means elevation:
+		// without the seam the result depended on which console go test ran from.
+		a.checkPrivileges = func() error { return nil }
 		a.mode, a.splitApps = c.mode, c.apps
 		a.resolveSplit()
 		if a.split != c.want {
