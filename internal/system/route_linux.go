@@ -3,8 +3,10 @@
 package system
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -49,9 +51,8 @@ var ipCmd commander = execCommander{}
 
 // installed remembers what EnableTunRouting added so teardown touches only
 // those destinations, leaving the rest of the host's table alone. The one gap:
-// `route replace` on a server /32 that some other client already owned drops
-// its entry, and the teardown deletes the destination outright instead of
-// restoring it.
+// a client that routes one of them after checkTunRoutingFree has its entry
+// replaced, and the teardown deletes the destination outright.
 var installed *TunRouteConfig
 
 // DirectBind reports how freedom outbounds leave the tunnel on this platform.
@@ -93,6 +94,13 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 		return fmt.Errorf("не задан адрес VPN-сервера для исключения из туннеля")
 	}
 
+	// Nothing below may overwrite an entry that is already there (A08), so the
+	// whole set is checked before the first change.
+	block6 := cfg.Addr6 != "" && hasIPv6Stack()
+	if err := checkTunRoutingFree(cfg, block6); err != nil {
+		return err
+	}
+
 	// Resolve every server's physical path first: if this fails after the
 	// split default is in place, xray's own uplink is blackholed and the
 	// machine loses connectivity entirely.
@@ -125,10 +133,9 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 	saved := cfg
 	installed = &saved
 
-	// Every install below is idempotent: a crash never runs the teardown, so the
-	// next start finds its own routes still in place. `route add` would fail
-	// there with "File exists" and leave the user stranded until they flush the
-	// table by hand (L-1).
+	// checkTunRoutingFree refused anything already in place, a crashed run's
+	// leftovers included, so replace below finds nothing to overwrite unless a
+	// client added an entry after the check.
 	for _, e := range exceptions {
 		args := []string{"route", "replace", e.ip + "/32"}
 		if e.via != "" {
@@ -168,7 +175,7 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 	// the app hears at once and falls back to IPv4, which the tunnel carries,
 	// instead of hanging until a timeout. Link-local and LAN prefixes have
 	// routes of their own, more specific than these halves, and keep working.
-	if cfg.Addr6 != "" && hasIPv6Stack() {
+	if block6 {
 		for _, half := range blockDefault6 {
 			if out, err := ipCmd.run("ip", "-6", "route", "replace", "unreachable", half); err != nil {
 				_ = DisableTunRouting()
@@ -215,4 +222,189 @@ func DisableTunRouting() error {
 
 	slog.Info("tun routing disabled")
 	return nil
+}
+
+// checkTunRoutingFree refuses to route while any entry EnableTunRouting would
+// create is already there. A crashed run's leftovers match another client's
+// byte for byte, so a match proves nothing about ownership and is never taken
+// over. Only exact prefixes count: the default route, the LAN and other
+// clients' more specific routes are no conflict. A query that fails or prints
+// something unreadable refuses too — routing on a guess is how foreign entries
+// got overwritten.
+func checkTunRoutingFree(cfg TunRouteConfig, block6 bool) error {
+	// xray assigns the address before it brings the interface up, so a tun
+	// without it is not the one this core created.
+	var links []ipLink
+	if err := ipJSON(&links, "addr", "show", "dev", cfg.Iface); err != nil {
+		return err
+	}
+	var hasAddr bool
+	for _, l := range links {
+		for _, a := range l.AddrInfo {
+			hasAddr = hasAddr || a.Family == "inet" && a.Local == cfg.Addr
+		}
+	}
+	if !hasAddr {
+		return fmt.Errorf("у %s нет адреса %s — это не интерфейс, который поднимает ядро", cfg.Iface, cfg.Addr)
+	}
+
+	own := map[netip.Prefix]bool{}
+	for _, half := range splitDefault {
+		own[netip.MustParsePrefix(half)] = true
+	}
+	for _, ip := range cfg.ServerIPs {
+		p, err := routeDst(ip)
+		if err != nil {
+			return err
+		}
+		own[p] = true
+	}
+	families := []string{"-4"}
+	if block6 {
+		for _, half := range blockDefault6 {
+			own[netip.MustParsePrefix(half)] = true
+		}
+		families = append(families, "-6")
+	}
+
+	var conflicts []string
+	for _, family := range families {
+		var routes []ipRoute
+		if err := ipJSON(&routes, family, "route", "show", "table", "all"); err != nil {
+			return err
+		}
+		for _, r := range routes {
+			if family == "-4" && r.Table == directTable {
+				conflicts = append(conflicts, "таблица "+directTable+": "+r.describe(r.Dst))
+				continue
+			}
+			// Every route EnableTunRouting adds lands in the main table, and
+			// none of them is a default.
+			if r.Table != "" || r.Dst == "default" {
+				continue
+			}
+			p, err := routeDst(r.Dst)
+			if err != nil {
+				return err
+			}
+			if own[p] {
+				conflicts = append(conflicts, r.describe(p.String()))
+			}
+		}
+	}
+
+	var rules []ipRule
+	if err := ipJSON(&rules, "-4", "rule", "show"); err != nil {
+		return err
+	}
+	for _, r := range rules {
+		catches, err := r.catchesDirectMark()
+		if err != nil {
+			return err
+		}
+		if catches || r.Table == directTable {
+			conflicts = append(conflicts, r.describe())
+		}
+	}
+
+	if len(conflicts) > 0 {
+		return fmt.Errorf("уже есть записи, которые ставит TUN: %s — чужое не перезаписываю, ничего не изменено (остатки упавшего запуска удалите вручную или перезагрузкой)",
+			strings.Join(conflicts, "; "))
+	}
+	return nil
+}
+
+// ipJSON runs a read-only `ip -j -N` query and decodes its output. -N keeps
+// table numbers numeric: a name given to 8888 in rt_tables would hide it.
+func ipJSON(v any, args ...string) error {
+	query := strings.Join(args, " ")
+	out, err := ipCmd.run("ip", append([]string{"-j", "-N"}, args...)...)
+	if err != nil {
+		return fmt.Errorf("прочитать состояние сети (ip %s): %w\n%s", query, err, out)
+	}
+	if err := json.Unmarshal(out, v); err != nil {
+		return fmt.Errorf("разобрать вывод ip %s: %w", query, err)
+	}
+	return nil
+}
+
+// ipLink is one entry of `ip -j addr show`, reduced to its addresses.
+type ipLink struct {
+	AddrInfo []struct {
+		Family string `json:"family"`
+		Local  string `json:"local"`
+	} `json:"addr_info"`
+}
+
+// ipRoute is one entry of `ip -j -N route show`, reduced to what the preflight
+// reads. A main-table route carries no "table" key.
+type ipRoute struct {
+	Dst     string `json:"dst"`
+	Gateway string `json:"gateway"`
+	Dev     string `json:"dev"`
+	Table   string `json:"table"`
+}
+
+func (r ipRoute) describe(dst string) string {
+	if r.Gateway != "" {
+		dst += " via " + r.Gateway
+	}
+	if r.Dev != "" {
+		dst += " dev " + r.Dev
+	}
+	return dst
+}
+
+// routeDst reads a destination the way ip prints it: a host route drops its
+// /32 or /128.
+func routeDst(dst string) (netip.Prefix, error) {
+	if addr, err := netip.ParseAddr(dst); err == nil {
+		return netip.PrefixFrom(addr, addr.BitLen()), nil
+	}
+	p, err := netip.ParsePrefix(dst)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("разобрать назначение маршрута %q: %w", dst, err)
+	}
+	return p, nil
+}
+
+// ipRule is one entry of `ip -j -N rule show`; fwmark and fwmask print in hex.
+type ipRule struct {
+	Priority int    `json:"priority"`
+	FwMark   string `json:"fwmark"`
+	FwMask   string `json:"fwmask"`
+	Table    string `json:"table"`
+}
+
+// catchesDirectMark reports whether the rule selects packets carrying
+// DirectFwMark. A fwmark without a mask compares all 32 bits.
+func (r ipRule) catchesDirectMark() (bool, error) {
+	if r.FwMark == "" {
+		return false, nil
+	}
+	mark, err := strconv.ParseUint(r.FwMark, 0, 32)
+	if err != nil {
+		return false, fmt.Errorf("разобрать fwmark правила %d: %w", r.Priority, err)
+	}
+	mask := uint64(0xffffffff)
+	if r.FwMask != "" {
+		if mask, err = strconv.ParseUint(r.FwMask, 0, 32); err != nil {
+			return false, fmt.Errorf("разобрать fwmask правила %d: %w", r.Priority, err)
+		}
+	}
+	return (mark^xraycfg.DirectFwMark)&mask == 0, nil
+}
+
+func (r ipRule) describe() string {
+	s := "правило " + strconv.Itoa(r.Priority)
+	if r.FwMark != "" {
+		s += " fwmark " + r.FwMark
+		if r.FwMask != "" {
+			s += "/" + r.FwMask
+		}
+	}
+	if r.Table != "" {
+		s += " lookup " + r.Table
+	}
+	return s
 }
