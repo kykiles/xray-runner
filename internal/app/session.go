@@ -354,7 +354,7 @@ func (a *App) buildSessionConfig(t *target) (json.RawMessage, sessionPorts, erro
 	if err != nil || !a.tunMode() {
 		return raw, ports, err
 	}
-	bind, err := system.DirectBind()
+	bind, err := a.directBind()
 	if err != nil {
 		return nil, sessionPorts{}, fmt.Errorf("определить прямой путь мимо туннеля: %w", err)
 	}

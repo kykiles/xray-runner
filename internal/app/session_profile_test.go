@@ -137,6 +137,9 @@ func newTemplateApp(t *testing.T) *App {
 	}
 	a := New(&config.Config{Mode: "proxy", XrayLogLvl: "warning"}, Options{NonInteractive: true})
 	a.template = tc
+	// The real lookup asks the machine's adapters (A12); tests of the config
+	// must not depend on which machine runs them.
+	a.directBind = fakeDirectBind
 	return a
 }
 

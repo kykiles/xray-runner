@@ -88,6 +88,10 @@ type App struct {
 	enableTunRouting  func(system.TunRouteConfig) error
 	disableTunRouting func() error
 	disableSplit      func() error
+	// directBind reports how the TUN config's freedom outbounds leave past the
+	// tunnel; a field because on Windows the answer comes from the machine's
+	// physical adapter, which a unit test of the config must not depend on.
+	directBind func() (xraycfg.DirectBind, error)
 	// checkPrivileges reports whether tun mode may be used; a field so tests can
 	// exercise both outcomes without being root.
 	checkPrivileges func() error
@@ -130,6 +134,7 @@ func New(cfg *config.Config, opts Options) *App {
 		enableTunRouting:  system.EnableTunRouting,
 		disableTunRouting: system.DisableTunRouting,
 		disableSplit:      system.DisableSplit,
+		directBind:        system.DirectBind,
 		showStatus:        tui.ShowStatus,
 		connectScreen:     tui.ShowConnecting,
 	}
