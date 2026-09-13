@@ -4,10 +4,12 @@ package system
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -49,11 +51,28 @@ func hasIPv6Stack() bool {
 // ipCmd is overridable in tests.
 var ipCmd commander = execCommander{}
 
-// installed remembers what EnableTunRouting added so teardown touches only
-// those destinations, leaving the rest of the host's table alone. The one gap:
-// a client that routes one of them after checkTunRoutingFree has its entry
-// replaced, and the teardown deletes the destination outright.
-var installed *TunRouteConfig
+// tunEntry is one route or rule EnableTunRouting added, spelled the way the
+// teardown has to name it: its delete removes this entry and never a foreign
+// one sharing the prefix.
+type tunEntry struct {
+	what string // what the entry is for, for the error when it cannot be added
+
+	rule bool // the mark rule; the fields below it describe a route
+	pref int  // the rule's priority
+
+	v6     bool
+	typ    string // "unreachable", or empty for unicast
+	prefix netip.Prefix
+	via    string
+	dev    string
+	table  string // empty is main
+	metric int    // zero leaves the kernel's IPv4 default
+}
+
+// installed lists what EnableTunRouting added, oldest first. An entry joins
+// once its add succeeded and leaves once it is gone from the host, so a failed
+// teardown keeps it for the next attempt.
+var installed []tunEntry
 
 // DirectBind reports how freedom outbounds leave the tunnel on this platform.
 // Linux marks the sockets; EnableTunRouting installs the matching ip rule.
@@ -84,7 +103,9 @@ func parseRouteGet(out string) (via, dev string, err error) {
 }
 
 // EnableTunRouting points the system's default traffic at the TUN device and
-// pins the VPN server to the physical path.
+// pins the VPN server to the physical path. It only adds: an entry already in
+// place is refused before the first change, and a failure takes back exactly
+// what this call added.
 func EnableTunRouting(cfg TunRouteConfig) error {
 	if err := ipCmd.lookPath("ip"); err != nil {
 		return fmt.Errorf("iproute2 не найден: %w", err)
@@ -94,19 +115,21 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 		return fmt.Errorf("не задан адрес VPN-сервера для исключения из туннеля")
 	}
 
-	// Nothing below may overwrite an entry that is already there (A08), so the
-	// whole set is checked before the first change.
-	block6 := cfg.Addr6 != "" && hasIPv6Stack()
-	if err := checkTunRoutingFree(cfg, block6); err != nil {
+	// A teardown that failed left its entries owned: finish it before building
+	// a second set on top.
+	if err := DisableTunRouting(); err != nil {
 		return err
 	}
 
 	// Resolve every server's physical path first: if this fails after the
 	// split default is in place, xray's own uplink is blackholed and the
 	// machine loses connectivity entirely.
-	type exception struct{ ip, via, dev string }
-	exceptions := make([]exception, 0, len(cfg.ServerIPs))
+	want := make([]tunEntry, 0, len(cfg.ServerIPs)+6)
 	for _, ip := range cfg.ServerIPs {
+		prefix, err := routeDst(ip, false)
+		if err != nil {
+			return err
+		}
 		out, err := ipCmd.run("ip", "route", "get", ip)
 		if err != nil {
 			return fmt.Errorf("определить маршрут до сервера %s: %w\n%s", ip, err, out)
@@ -115,7 +138,7 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 		if err != nil {
 			return fmt.Errorf("разобрать маршрут до сервера %s: %w", ip, err)
 		}
-		exceptions = append(exceptions, exception{ip: ip, via: via, dev: dev})
+		want = append(want, tunEntry{what: "исключить сервер " + ip + " из туннеля", prefix: prefix, via: via, dev: dev})
 	}
 
 	// The physical path for marked traffic is resolved here, alongside the
@@ -130,113 +153,197 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 		return fmt.Errorf("разобрать физический маршрут по умолчанию: %w", err)
 	}
 
-	saved := cfg
-	installed = &saved
-
-	// checkTunRoutingFree refused anything already in place, a crashed run's
-	// leftovers included, so replace below finds nothing to overwrite unless a
-	// client added an entry after the check.
-	for _, e := range exceptions {
-		args := []string{"route", "replace", e.ip + "/32"}
-		if e.via != "" {
-			args = append(args, "via", e.via)
-		}
-		args = append(args, "dev", e.dev)
-
-		if out, err := ipCmd.run("ip", args...); err != nil {
-			_ = DisableTunRouting()
-			return fmt.Errorf("исключить сервер %s из туннеля: %w\n%s", e.ip, err, out)
-		}
-	}
-
 	// Marked traffic gets its escape hatch before the split default exists,
 	// otherwise direct connections loop during the gap between the two.
-	directRoute := []string{"route", "replace", "default"}
-	if directVia != "" {
-		directRoute = append(directRoute, "via", directVia)
-	}
-	directRoute = append(directRoute, "dev", directDev, "table", directTable)
-	if out, err := ipCmd.run("ip", directRoute...); err != nil {
-		_ = DisableTunRouting()
-		return fmt.Errorf("проложить прямой маршрут мимо туннеля: %w\n%s", err, out)
-	}
-	// ip rule has no `replace`, and `add` stacks duplicates the teardown only
-	// removes one of — so clear a stale copy first. The del is best-effort:
-	// on a clean start there is nothing to remove.
-	markRule := []string{"rule", "fwmark", strconv.Itoa(xraycfg.DirectFwMark), "lookup", directTable}
-	_, _ = ipCmd.run("ip", append([]string{"rule", "del"}, markRule[1:]...)...)
-	if out, err := ipCmd.run("ip", append([]string{"rule", "add"}, markRule[1:]...)...); err != nil {
-		_ = DisableTunRouting()
-		return fmt.Errorf("вывести прямой трафик из туннеля: %w\n%s", err, out)
-	}
+	want = append(want,
+		tunEntry{what: "проложить прямой маршрут мимо туннеля",
+			prefix: netip.PrefixFrom(netip.IPv4Unspecified(), 0), via: directVia, dev: directDev, table: directTable},
+		tunEntry{what: "вывести прямой трафик из туннеля", rule: true})
 
 	// A11: the VPN runs without IPv6, so tun does not route it into the tunnel —
 	// it refuses it, before IPv4 is captured. Unreachable rather than blackhole:
 	// the app hears at once and falls back to IPv4, which the tunnel carries,
 	// instead of hanging until a timeout. Link-local and LAN prefixes have
 	// routes of their own, more specific than these halves, and keep working.
-	if block6 {
+	// The device and metric are the kernel's own and spelled out for the
+	// teardown: an IPv6 delete ignores the route type, so `del unreachable ::/1`
+	// alone would remove whatever route holds that prefix.
+	if cfg.Addr6 != "" && hasIPv6Stack() {
 		for _, half := range blockDefault6 {
-			if out, err := ipCmd.run("ip", "-6", "route", "replace", "unreachable", half); err != nil {
-				_ = DisableTunRouting()
-				return fmt.Errorf("закрыть IPv6 мимо туннеля: %w\n%s", err, out)
-			}
+			want = append(want, tunEntry{what: "закрыть IPv6 мимо туннеля",
+				v6: true, typ: "unreachable", prefix: netip.MustParsePrefix(half), dev: "lo", metric: 1024})
 		}
 	}
 
 	for _, half := range splitDefault {
-		if out, err := ipCmd.run("ip", "route", "replace", half, "dev", cfg.Iface); err != nil {
-			_ = DisableTunRouting()
-			return fmt.Errorf("направить трафик в %s: %w\n%s", cfg.Iface, err, out)
-		}
+		want = append(want, tunEntry{what: "направить трафик в " + cfg.Iface,
+			prefix: netip.MustParsePrefix(half), dev: cfg.Iface})
 	}
 
-	slog.Info("tun routing enabled", "iface", cfg.Iface, "excluded_servers", len(exceptions))
+	// Nothing here may overwrite an entry that is already there (A08), so the
+	// whole set is checked before the first change.
+	pref, err := checkTunRoutingFree(cfg, want)
+	if err != nil {
+		return err
+	}
+
+	// add fails on an entry a client slipped in after the check instead of
+	// replacing it, and an entry is owned only once its add went through.
+	for _, e := range want {
+		if e.rule {
+			e.pref = pref
+		}
+		if out, err := ipCmd.run("ip", e.args("add")...); err != nil {
+			err = fmt.Errorf("%s: %w\n%s", e.what, err, out)
+			if undoErr := DisableTunRouting(); undoErr != nil {
+				err = fmt.Errorf("%w\nоткат не завершён: %w", err, undoErr)
+			}
+			return err
+		}
+		installed = append(installed, e)
+	}
+
+	slog.Info("tun routing enabled", "iface", cfg.Iface, "excluded_servers", len(cfg.ServerIPs))
 	return nil
 }
 
-// DisableTunRouting removes the routes EnableTunRouting installed, restoring
-// the physical default path.
+// DisableTunRouting removes what EnableTunRouting installed, newest first, so
+// the split default goes before the exceptions it relies on. Each entry is
+// looked up before it is deleted: one the tun took with it is already gone, and
+// one another client has since replaced is not ours to remove. An entry whose
+// delete fails stays owned and the error says so; the next call retries it.
 func DisableTunRouting() error {
-	if installed == nil {
+	if len(installed) == 0 {
 		return nil
 	}
 	if err := ipCmd.lookPath("ip"); err != nil {
-		return nil
+		return fmt.Errorf("iproute2 не найден — маршруты TUN не сняты: %w", err)
 	}
 
-	for _, half := range splitDefault {
-		_, _ = ipCmd.run("ip", "route", "del", half, "dev", installed.Iface)
+	var routes4, routes6 []ipRoute
+	var rules []ipRule
+	if err := ipJSON(&routes4, "-4", "route", "show", "table", "all"); err != nil {
+		return fmt.Errorf("маршруты TUN не сняты: %w", err)
 	}
-	if installed.Addr6 != "" && hasIPv6Stack() {
-		for _, half := range blockDefault6 {
-			_, _ = ipCmd.run("ip", "-6", "route", "del", "unreachable", half)
+	if slices.ContainsFunc(installed, func(e tunEntry) bool { return e.v6 }) {
+		if err := ipJSON(&routes6, "-6", "route", "show", "table", "all"); err != nil {
+			return fmt.Errorf("маршруты TUN не сняты: %w", err)
 		}
 	}
-	_, _ = ipCmd.run("ip", "rule", "del", "fwmark", strconv.Itoa(xraycfg.DirectFwMark), "lookup", directTable)
-	_, _ = ipCmd.run("ip", "route", "flush", "table", directTable)
-	for _, ip := range installed.ServerIPs {
-		_, _ = ipCmd.run("ip", "route", "del", ip+"/32")
+	if slices.ContainsFunc(installed, func(e tunEntry) bool { return e.rule }) {
+		if err := ipJSON(&rules, "-4", "rule", "show"); err != nil {
+			return fmt.Errorf("маршруты TUN не сняты: %w", err)
+		}
 	}
-	installed = nil
+
+	var kept []tunEntry
+	var errs []error
+	for _, e := range slices.Backward(installed) {
+		routes := routes4
+		if e.v6 {
+			routes = routes6
+		}
+		present, foreign, err := e.find(routes, rules)
+		if err != nil {
+			errs = append(errs, err)
+			kept = append(kept, e)
+			continue
+		}
+		if foreign {
+			slog.Warn("tun route replaced by another client, left in place", "route", strings.Join(e.args("add"), " "))
+		}
+		if !present {
+			continue
+		}
+		args := e.args("del")
+		if out, err := ipCmd.run("ip", args...); err != nil {
+			errs = append(errs, fmt.Errorf("ip %s: %w\n%s", strings.Join(args, " "), err, out))
+			kept = append(kept, e)
+		}
+	}
+	slices.Reverse(kept)
+	installed = kept
+	if len(errs) > 0 {
+		return fmt.Errorf("маршруты TUN сняты не полностью: %w", errors.Join(errs...))
+	}
 
 	slog.Info("tun routing disabled")
 	return nil
 }
 
-// checkTunRoutingFree refuses to route while any entry EnableTunRouting would
-// create is already there. A crashed run's leftovers match another client's
-// byte for byte, so a match proves nothing about ownership and is never taken
-// over. Only exact prefixes count: the default route, the LAN and other
-// clients' more specific routes are no conflict. A query that fails or prints
-// something unreadable refuses too — routing on a guess is how foreign entries
-// got overwritten.
-func checkTunRoutingFree(cfg TunRouteConfig, block6 bool) error {
+// args spells the entry for ip: add installs it, del removes exactly it.
+func (e tunEntry) args(verb string) []string {
+	if e.rule {
+		return []string{"rule", verb, "pref", strconv.Itoa(e.pref),
+			"fwmark", strconv.Itoa(xraycfg.DirectFwMark), "lookup", directTable}
+	}
+	var args []string
+	if e.v6 {
+		args = append(args, "-6")
+	}
+	args = append(args, "route", verb)
+	if e.typ != "" {
+		args = append(args, e.typ)
+	}
+	args = append(args, e.prefix.String())
+	if e.via != "" {
+		args = append(args, "via", e.via)
+	}
+	args = append(args, "dev", e.dev)
+	if e.table != "" {
+		args = append(args, "table", e.table)
+	}
+	if e.metric != 0 {
+		args = append(args, "metric", strconv.Itoa(e.metric))
+	}
+	return args
+}
+
+// find looks the entry up in the host's state. present means it is still
+// there as it was added; foreign means it is gone but another entry now holds
+// its prefix, which the teardown must leave alone.
+func (e tunEntry) find(routes []ipRoute, rules []ipRule) (present, foreign bool, err error) {
+	if e.rule {
+		mark := fmt.Sprintf("%#x", xraycfg.DirectFwMark)
+		for _, r := range rules {
+			if r.Priority == e.pref && r.FwMark == mark && r.FwMask == "" && r.Table == directTable {
+				return true, false, nil
+			}
+		}
+		return false, false, nil
+	}
+	for _, r := range routes {
+		if r.Table != e.table {
+			continue
+		}
+		p, err := routeDst(r.Dst, e.v6)
+		if err != nil {
+			return false, false, err
+		}
+		if p != e.prefix {
+			continue
+		}
+		if r.Gateway == e.via && r.Dev == e.dev && r.Metric == e.metric {
+			return true, false, nil
+		}
+		foreign = true
+	}
+	return false, foreign, nil
+}
+
+// checkTunRoutingFree refuses to route while any entry of want is already
+// there, and returns the priority the mark rule is to take. A crashed run's
+// leftovers match another client's byte for byte, so a match proves nothing
+// about ownership and is never taken over. Only exact prefixes count: the
+// default route, the LAN and other clients' more specific routes are no
+// conflict. A query that fails or prints something unreadable refuses too —
+// routing on a guess is how foreign entries got overwritten.
+func checkTunRoutingFree(cfg TunRouteConfig, want []tunEntry) (int, error) {
 	// xray assigns the address before it brings the interface up, so a tun
 	// without it is not the one this core created.
 	var links []ipLink
 	if err := ipJSON(&links, "addr", "show", "dev", cfg.Iface); err != nil {
-		return err
+		return 0, err
 	}
 	var hasAddr bool
 	for _, l := range links {
@@ -245,25 +352,18 @@ func checkTunRoutingFree(cfg TunRouteConfig, block6 bool) error {
 		}
 	}
 	if !hasAddr {
-		return fmt.Errorf("у %s нет адреса %s — это не интерфейс, который поднимает ядро", cfg.Iface, cfg.Addr)
+		return 0, fmt.Errorf("у %s нет адреса %s — это не интерфейс, который поднимает ядро", cfg.Iface, cfg.Addr)
 	}
 
+	// The direct table is checked whole below; every other route lands in main.
 	own := map[netip.Prefix]bool{}
-	for _, half := range splitDefault {
-		own[netip.MustParsePrefix(half)] = true
-	}
-	for _, ip := range cfg.ServerIPs {
-		p, err := routeDst(ip)
-		if err != nil {
-			return err
+	for _, e := range want {
+		if !e.rule && e.table == "" {
+			own[e.prefix] = true
 		}
-		own[p] = true
 	}
 	families := []string{"-4"}
-	if block6 {
-		for _, half := range blockDefault6 {
-			own[netip.MustParsePrefix(half)] = true
-		}
+	if slices.ContainsFunc(want, func(e tunEntry) bool { return e.v6 }) {
 		families = append(families, "-6")
 	}
 
@@ -271,21 +371,19 @@ func checkTunRoutingFree(cfg TunRouteConfig, block6 bool) error {
 	for _, family := range families {
 		var routes []ipRoute
 		if err := ipJSON(&routes, family, "route", "show", "table", "all"); err != nil {
-			return err
+			return 0, err
 		}
 		for _, r := range routes {
 			if family == "-4" && r.Table == directTable {
 				conflicts = append(conflicts, "таблица "+directTable+": "+r.describe(r.Dst))
 				continue
 			}
-			// Every route EnableTunRouting adds lands in the main table, and
-			// none of them is a default.
-			if r.Table != "" || r.Dst == "default" {
+			if r.Table != "" {
 				continue
 			}
-			p, err := routeDst(r.Dst)
+			p, err := routeDst(r.Dst, family == "-6")
 			if err != nil {
-				return err
+				return 0, err
 			}
 			if own[p] {
 				conflicts = append(conflicts, r.describe(p.String()))
@@ -295,12 +393,12 @@ func checkTunRoutingFree(cfg TunRouteConfig, block6 bool) error {
 
 	var rules []ipRule
 	if err := ipJSON(&rules, "-4", "rule", "show"); err != nil {
-		return err
+		return 0, err
 	}
 	for _, r := range rules {
 		catches, err := r.catchesDirectMark()
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if catches || r.Table == directTable {
 			conflicts = append(conflicts, r.describe())
@@ -308,10 +406,21 @@ func checkTunRoutingFree(cfg TunRouteConfig, block6 bool) error {
 	}
 
 	if len(conflicts) > 0 {
-		return fmt.Errorf("уже есть записи, которые ставит TUN: %s — чужое не перезаписываю, ничего не изменено (остатки упавшего запуска удалите вручную или перезагрузкой)",
+		return 0, fmt.Errorf("уже есть записи, которые ставит TUN: %s — чужое не перезаписываю, ничего не изменено (остатки упавшего запуска удалите вручную или перезагрузкой)",
 			strings.Join(conflicts, "; "))
 	}
-	return nil
+
+	// A rule added without a priority lands just before the second rule in the
+	// kernel's list: past `lookup local`, ahead of every other client's rules.
+	// The mark rule takes that place by number, so its delete names it alone.
+	pref := 0
+	if len(rules) > 1 {
+		pref = rules[1].Priority - 1
+	}
+	if pref < 1 {
+		return 0, fmt.Errorf("нет свободного приоритета для правила fwmark %d перед правилами других программ", xraycfg.DirectFwMark)
+	}
+	return pref, nil
 }
 
 // ipJSON runs a read-only `ip -j -N` query and decodes its output. -N keeps
@@ -336,13 +445,15 @@ type ipLink struct {
 	} `json:"addr_info"`
 }
 
-// ipRoute is one entry of `ip -j -N route show`, reduced to what the preflight
-// reads. A main-table route carries no "table" key.
+// ipRoute is one entry of `ip -j -N route show`, reduced to what the routing
+// code reads. A main-table route carries no "table" key, and an IPv4 route
+// with metric zero no "metric".
 type ipRoute struct {
 	Dst     string `json:"dst"`
 	Gateway string `json:"gateway"`
 	Dev     string `json:"dev"`
 	Table   string `json:"table"`
+	Metric  int    `json:"metric"`
 }
 
 func (r ipRoute) describe(dst string) string {
@@ -355,9 +466,15 @@ func (r ipRoute) describe(dst string) string {
 	return dst
 }
 
-// routeDst reads a destination the way ip prints it: a host route drops its
-// /32 or /128.
-func routeDst(dst string) (netip.Prefix, error) {
+// routeDst reads a destination the way ip prints it: "default" for the whole
+// family, a host route without its /32 or /128.
+func routeDst(dst string, v6 bool) (netip.Prefix, error) {
+	if dst == "default" {
+		if v6 {
+			return netip.PrefixFrom(netip.IPv6Unspecified(), 0), nil
+		}
+		return netip.PrefixFrom(netip.IPv4Unspecified(), 0), nil
+	}
 	if addr, err := netip.ParseAddr(dst); err == nil {
 		return netip.PrefixFrom(addr, addr.BitLen()), nil
 	}
