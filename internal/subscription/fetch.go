@@ -106,9 +106,41 @@ func decodeHeader(v string) string {
 // hand or a redirect hands the user's device id to a third party.
 var hwidHeaders = []string{"x-hwid", "x-device-os", "x-device-model"}
 
-// checkRedirect keeps a subscription request from downgrading to plaintext and
-// from carrying the HWID headers off the original host. Panels redirect
-// legitimately, so redirects themselves stay allowed.
+// checkTransport is the one rule for the first URL and every redirect target:
+// https anywhere, plain http only to loopback, where there is no wire for the
+// token and the device headers to cross.
+func checkTransport(u *url.URL) error {
+	switch {
+	case u.Scheme == "https":
+		return nil
+	case u.Scheme == "http" && isLoopbackHost(u.Hostname()):
+		return nil
+	case u.Scheme == "http":
+		return errors.New("подписка по http:// отклонена — токен и заголовки устройства ушли бы открытым текстом")
+	}
+	return fmt.Errorf("подписка со схемой %q отклонена — поддерживается только https://", u.Scheme)
+}
+
+// sameOrigin compares scheme, host and effective port: the origin the device
+// headers were sent to. A subdomain or another port is another party.
+func sameOrigin(a, b *url.URL) bool {
+	return a.Scheme == b.Scheme && strings.EqualFold(a.Hostname(), b.Hostname()) && effectivePort(a) == effectivePort(b)
+}
+
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	if u.Scheme == "https" {
+		return "443"
+	}
+	return "80"
+}
+
+// checkRedirect holds every redirect target to the first URL's transport rule,
+// refuses a downgrade from https, and keeps the device headers and the Referer
+// on the first request's origin. Panels redirect legitimately, so redirects
+// themselves stay allowed.
 func checkRedirect(req *http.Request, via []*http.Request) error {
 	// Supplying CheckRedirect replaces Go's default policy, cap included, so the
 	// cap has to be restored by hand — a panel redirecting in a loop would
@@ -121,10 +153,18 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 		return fmt.Errorf("подписка перенаправлена с https на %s://%s — отказ, токен и заголовки устройства ушли бы открытым текстом",
 			req.URL.Scheme, req.URL.Host)
 	}
-	if req.URL.Host != prev.URL.Host {
+	if err := checkTransport(req.URL); err != nil {
+		return fmt.Errorf("перенаправление на %s: %w", req.URL.Host, err)
+	}
+	// Go copies the first request's headers onto every hop, so a header dropped
+	// on one hop is back on the next: each hop is judged against the origin the
+	// headers were meant for, not against the hop before it (A05). The Referer
+	// Go adds is the previous URL, subscription token included.
+	if !sameOrigin(req.URL, via[0].URL) {
 		for _, h := range hwidHeaders {
 			req.Header.Del(h)
 		}
+		req.Header.Del("Referer")
 	}
 	return nil
 }
@@ -162,9 +202,11 @@ func fetchBody(ctx context.Context, rawURL string, opts ...FetchOption) ([]byte,
 	// A08: plain http sends the token in the URL and the x-hwid headers in the
 	// clear, so it is refused before any request goes out. Loopback stays open:
 	// there is no wire to cross, and tests and a panel on the same machine use it.
-	if u, err := url.Parse(strings.TrimSpace(rawURL)); err == nil &&
-		strings.EqualFold(u.Scheme, "http") && !isLoopbackHost(u.Hostname()) {
-		return nil, nil, fmt.Errorf("подписка по http:// отклонена — токен ушёл бы открытым текстом (%s)", RedactURL(rawURL))
+	// Redirect targets are held to the same rule in checkRedirect.
+	if u, err := url.Parse(strings.TrimSpace(rawURL)); err == nil {
+		if err := checkTransport(u); err != nil {
+			return nil, nil, fmt.Errorf("%w (%s)", err, RedactURL(rawURL))
+		}
 	}
 
 	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: checkRedirect, Transport: fetchTransport}
