@@ -345,9 +345,14 @@ func (a *App) cleanup() {
 	// back here, before main prints its goodbye.
 	tui.ReleaseScreen()
 	a.releaseSession()
-	_ = os.Remove(a.tmpFile)
+	// The config is ours only while the lock is: an instance refused by a live
+	// lock shares the path with the owner, whose core reads that file on its next
+	// restart (A07). Config first, then the lock that guards it; the flag drops
+	// with the lock, so a second cleanup cannot take the next owner's files.
 	if a.lockHeld {
+		_ = os.Remove(a.tmpFile)
 		_ = os.Remove(a.lockFile)
+		a.lockHeld = false
 	}
 }
 
