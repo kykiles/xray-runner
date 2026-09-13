@@ -30,6 +30,11 @@ type fakeIPTables struct {
 	// failNew makes -N fail for these binaries, the way a stack without
 	// the needed kernel module refuses to create the chain.
 	failNew map[string]bool
+	// failArgs makes a binary's command fail when its arguments contain the
+	// fragment, to walk a fault through every step of the enable.
+	failArgs map[string]string
+	// calls is every command run, in order, as "bin args…".
+	calls []string
 }
 
 func newFakeIPTables(bins ...string) *fakeIPTables {
@@ -54,6 +59,11 @@ func (f *fakeIPTables) lookPath(bin string) error {
 }
 
 func (f *fakeIPTables) run(bin string, args ...string) ([]byte, error) {
+	cmd := strings.Join(args, " ")
+	f.calls = append(f.calls, bin+" "+cmd)
+	if frag, ok := f.failArgs[bin]; ok && strings.Contains(cmd, frag) {
+		return []byte("injected failure"), fmt.Errorf("exit status 1")
+	}
 	c := f.chains[bin]
 	if c == nil {
 		c = &fakeChain{}
@@ -162,11 +172,11 @@ func TestEnableKillSwitchAppliesBothStacks(t *testing.T) {
 	}
 	// iptables (IPv4 stack) gets the server ACCEPT rule; ip6tables doesn't
 	// (IPv4 -d would be invalid there), so it has one rule fewer.
-	if got := len(f.chains["iptables"].rules); got != 8 {
-		t.Errorf("iptables: chain rules = %d, want 8", got)
+	if got := len(f.chains["iptables"].rules); got != 7 {
+		t.Errorf("iptables: chain rules = %d, want 7", got)
 	}
-	if got := len(f.chains["ip6tables"].rules); got != 7 {
-		t.Errorf("ip6tables: chain rules = %d, want 7", got)
+	if got := len(f.chains["ip6tables"].rules); got != 6 {
+		t.Errorf("ip6tables: chain rules = %d, want 6", got)
 	}
 	if !chainHasServerAccept(f.chains["iptables"].rules, ipv4Cfg.Endpoints[0].IP) {
 		t.Errorf("iptables: missing ACCEPT rule for server %s", ipv4Cfg.Endpoints[0].IP)
@@ -267,27 +277,116 @@ func TestEnableKillSwitchIsIdempotent(t *testing.T) {
 			t.Errorf("%s: OUTPUT jumps after 3 enables = %d, want 1", bin, got)
 		}
 	}
-	if got := len(f.chains["iptables"].rules); got != 8 {
-		t.Errorf("iptables: chain rules after 3 enables = %d, want 8", got)
+	if got := len(f.chains["iptables"].rules); got != 7 {
+		t.Errorf("iptables: chain rules after 3 enables = %d, want 7", got)
 	}
-	if got := len(f.chains["ip6tables"].rules); got != 7 {
-		t.Errorf("ip6tables: chain rules after 3 enables = %d, want 7", got)
+	if got := len(f.chains["ip6tables"].rules); got != 6 {
+		t.Errorf("ip6tables: chain rules after 3 enables = %d, want 6", got)
 	}
 }
 
-func TestEnableKillSwitchSkipsMissingBinary(t *testing.T) {
-	f := newFakeIPTables("iptables") // ip6tables unavailable
+// A02: a missing backend used to be skipped with a warning and the kill switch
+// reported on — with no ip6tables every IPv6 packet went past it, with neither
+// binary nothing was blocked at all. Both are required, and the check comes
+// before any rule is touched.
+func TestEnableKillSwitchRefusesMissingBackend(t *testing.T) {
+	cases := []struct {
+		available []string
+		missing   []string
+	}{
+		{nil, []string{"iptables", "ip6tables"}},
+		{[]string{"iptables"}, []string{"ip6tables"}},
+		{[]string{"ip6tables"}, []string{"iptables"}},
+	}
+	for _, c := range cases {
+		t.Run("missing "+strings.Join(c.missing, "+"), func(t *testing.T) {
+			f := newFakeIPTables(c.available...)
+			withFakeFirewall(t, f)
+
+			err := EnableKillSwitch(ipv4Cfg)
+			if err == nil {
+				t.Fatal("EnableKillSwitch succeeded without a firewall backend")
+			}
+			for _, bin := range c.missing {
+				if !strings.Contains(err.Error(), bin) {
+					t.Errorf("error %q does not name the missing %s", err, bin)
+				}
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("commands ran before the refusal: %v", f.calls)
+			}
+		})
+	}
+}
+
+// A09: an ESTABLISHED,RELATED accept let every connection opened before the
+// kill switch keep flowing past it on the physical path. What must pass does
+// so by its own rule, whatever the conntrack state.
+func TestEnableKillSwitchHasNoConntrackAccept(t *testing.T) {
+	f := newFakeIPTables("iptables", "ip6tables")
 	withFakeFirewall(t, f)
 
 	if err := EnableKillSwitch(ipv4Cfg); err != nil {
 		t.Fatalf("EnableKillSwitch: %v", err)
 	}
-
-	if f.jumps["iptables"] != 1 {
-		t.Errorf("iptables OUTPUT jumps = %d, want 1", f.jumps["iptables"])
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		rules := f.chains[bin].rules
+		if i := ruleIndex(rules, "ctstate"); i >= 0 {
+			t.Errorf("%s: conntrack accept at %d: %v", bin, i, rules)
+		}
+		if drop := ruleIndex(rules, "-j DROP"); drop != len(rules)-1 {
+			t.Errorf("%s: DROP at %d, want it last: %v", bin, drop, rules)
+		}
+		for _, allowed := range []string{"-o lo", "-o xray-tun", "--mark", "--dport 53"} {
+			if ruleIndex(rules, allowed, "ACCEPT") < 0 {
+				t.Errorf("%s: no ACCEPT for %s: %v", bin, allowed, rules)
+			}
+		}
 	}
-	if f.jumps["ip6tables"] != 0 {
-		t.Errorf("ip6tables should be skipped, but got %d jumps", f.jumps["ip6tables"])
+	if ruleIndex(f.chains["iptables"].rules, "-d 203.0.113.5", "ACCEPT") < 0 {
+		t.Errorf("iptables: no ACCEPT for the server: %v", f.chains["iptables"].rules)
+	}
+}
+
+// A failure at any step of either family takes everything this enable put in
+// back out — and only that: the rollback touches our chain and our OUTPUT jump,
+// not the rules another firewall keeps in OUTPUT.
+func TestEnableKillSwitchRollsBackEveryFailure(t *testing.T) {
+	steps := map[string][]string{
+		"iptables":  {"-N", "-o lo", "-o xray-tun", "--mark", "-d 203.0.113.5", "--dport 53", "-j DROP", "-I OUTPUT"},
+		"ip6tables": {"-N", "-o lo", "-o xray-tun", "--mark", "--dport 53", "-j DROP", "-I OUTPUT"},
+	}
+	const foreign = "-A OUTPUT -j ufw-user-output"
+	for bin, frags := range steps {
+		for _, frag := range frags {
+			t.Run(bin+" "+frag, func(t *testing.T) {
+				f := newFakeIPTables("iptables", "ip6tables")
+				f.failArgs = map[string]string{bin: frag}
+				f.output["iptables"] = []string{foreign}
+				f.output["ip6tables"] = []string{foreign}
+				withFakeFirewall(t, f)
+
+				if err := EnableKillSwitch(ipv4Cfg); err == nil {
+					t.Fatal("EnableKillSwitch succeeded with a failing step")
+				}
+				if ruleIndex(f.calls, bin, frag) < 0 {
+					t.Fatalf("the failing step never ran: %v", f.calls)
+				}
+				for _, b := range []string{"iptables", "ip6tables"} {
+					if f.chains[b].exists || len(f.chains[b].rules) != 0 {
+						t.Errorf("%s: chain left behind: exists=%v rules=%v", b, f.chains[b].exists, f.chains[b].rules)
+					}
+					if len(f.output[b]) != 1 || f.output[b][0] != foreign {
+						t.Errorf("%s: OUTPUT = %v, want only the foreign rule", b, f.output[b])
+					}
+				}
+				for _, call := range f.calls {
+					if !strings.Contains(call, killSwitchChain) {
+						t.Errorf("command outside our chain: %s", call)
+					}
+				}
+			})
+		}
 	}
 }
 

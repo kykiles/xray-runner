@@ -24,15 +24,24 @@ var fwCmd commander = execCommander{}
 func EnableKillSwitch(cfg KillSwitchConfig) error {
 	slog.Info("enabling kill switch via iptables/ip6tables", "endpoints", len(cfg.Endpoints))
 
+	// Both families or none (A02): without ip6tables every IPv6 packet goes past
+	// the switch, without either nothing is blocked at all — and the session
+	// would report it on. Checked before anything is touched.
+	var missing []string
+	for _, bin := range firewallBins {
+		if err := fwCmd.lookPath(bin); err != nil {
+			missing = append(missing, bin)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("не найден %s — kill switch требует iptables и ip6tables", strings.Join(missing, ", "))
+	}
+
 	// Start from a clean slate so repeated runs don't accumulate duplicate
 	// rules or OUTPUT jumps.
 	_ = DisableKillSwitch()
 
 	for _, bin := range firewallBins {
-		if err := fwCmd.lookPath(bin); err != nil {
-			slog.Warn("firewall binary not found, skipping", "bin", bin)
-			continue
-		}
 		if err := applyKillSwitch(bin, cfg); err != nil {
 			// The caller treats a failed enable as "no kill switch" and never
 			// tears it down, so a stack that did go in must come out here.
@@ -51,8 +60,10 @@ func applyKillSwitch(bin string, cfg KillSwitchConfig) error {
 		}
 	}
 
+	// Nothing is accepted by conntrack state (A09): an ESTABLISHED accept let
+	// every connection opened before the switch keep flowing past it on the
+	// physical path. What must pass does so by its own rule below.
 	rules := [][]string{
-		{"-A", killSwitchChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
 		{"-A", killSwitchChain, "-o", "lo", "-j", "ACCEPT"},
 		{"-A", killSwitchChain, "-o", "xray-tun", "-j", "ACCEPT"},
 		// Traffic the panel routes `direct` carries this mark and leaves through
@@ -63,10 +74,10 @@ func applyKillSwitch(bin string, cfg KillSwitchConfig) error {
 		{"-A", killSwitchChain, "-m", "mark", "--mark", strconv.Itoa(xraycfg.DirectFwMark), "-j", "ACCEPT"},
 	}
 
-	// Allow xray's own NEW connections to the VPN servers, otherwise every
-	// reconnect (and hysteria2 UDP flows after conntrack timeout) is dropped
-	// and the tunnel can never recover. Only add the rule to the matching IP
-	// stack: an IPv4 -d on ip6tables would fail.
+	// Allow xray's own traffic to the VPN servers — every packet of it, with no
+	// conntrack accept to lean on — otherwise the uplink, every reconnect and
+	// hysteria2's UDP flows are dropped and the tunnel can never recover. Only
+	// add the rule to the matching IP stack: an IPv4 -d on ip6tables would fail.
 	for _, e := range cfg.Endpoints {
 		if rule := serverAcceptRule(bin, e); rule != nil {
 			rules = append(rules, rule)
