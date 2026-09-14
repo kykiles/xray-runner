@@ -23,7 +23,7 @@ func TestStartHealthStopWaitsForTheLoop(t *testing.T) {
 		},
 	}
 
-	stop := a.startHealth(context.Background(), sessionPorts{})
+	stop := a.startHealth(context.Background(), sessionPorts{}, false)
 	stop()
 
 	if !finished.Load() {
@@ -42,12 +42,31 @@ func TestStartHealthStopIsIdempotent(t *testing.T) {
 		},
 	}
 
-	stop := a.startHealth(context.Background(), sessionPorts{})
+	stop := a.startHealth(context.Background(), sessionPorts{}, false)
 	stop()
 	stop()
 
 	if got := calls.Load(); got != 1 {
 		t.Errorf("health loop ran %d times, want 1", got)
+	}
+}
+
+// In a tun session health is each core's (C01): the session's own loops must not
+// add a second health loop next to it.
+func TestStartHealth_TunLeavesHealthToTheCore(t *testing.T) {
+	var calls atomic.Int32
+	a := &App{
+		healthLoop: func(ctx context.Context, _ sessionPorts) {
+			calls.Add(1)
+			<-ctx.Done()
+		},
+	}
+
+	stop := a.startHealth(context.Background(), sessionPorts{}, true)
+	stop()
+
+	if got := calls.Load(); got != 0 {
+		t.Errorf("session-level health loop ran %d times in a tun session, want 0", got)
 	}
 }
 
@@ -63,7 +82,7 @@ func TestStartHealthStopsWithTheSessionContext(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	stop := a.startHealth(ctx, sessionPorts{})
+	stop := a.startHealth(ctx, sessionPorts{}, false)
 	cancel()
 
 	select {

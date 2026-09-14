@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"xray-runner/internal/config"
 	"xray-runner/internal/subscription"
@@ -32,6 +33,8 @@ func newKillSwitchApp(spy *killSwitchSpy, enable func(system.KillSwitchConfig) e
 		disableTunRouting: func() error { spy.unrouted++; return nil },
 		enableKillSwitch:  enable,
 		disableKillSwitch: func() error { spy.ksOff++; return nil },
+		// A set-up core is checked; these tests do not look at the result.
+		tunProbe: func() (bool, time.Duration) { return true, 0 },
 	}
 }
 
@@ -45,7 +48,7 @@ func TestBringUpTun_KillSwitchFailureFailsSession(t *testing.T) {
 	a := newKillSwitchApp(&spy, func(system.KillSwitchConfig) error { return errors.New("iptables: permission denied") })
 	a.serverHost, a.serverPort = "203.0.113.5", 443
 
-	if err := a.newTunLifecycle(killSwitchTarget(), false).afterStart(context.Background()); err == nil {
+	if err := a.newTunLifecycle(killSwitchTarget(), sessionPorts{}, false).afterStart(context.Background()); err == nil {
 		t.Fatal("tun setup succeeded with the kill switch down")
 	}
 	if a.killSwitchOn {
@@ -69,7 +72,7 @@ func TestBringUpTun_KillSwitchWithoutEndpointsFailsSession(t *testing.T) {
 	a := newKillSwitchApp(&spy, func(system.KillSwitchConfig) error { enabled = true; return nil })
 	// No endpoint recorded: the whitelist would be empty and cut xray's uplink.
 
-	if err := a.newTunLifecycle(killSwitchTarget(), false).afterStart(context.Background()); err == nil {
+	if err := a.newTunLifecycle(killSwitchTarget(), sessionPorts{}, false).afterStart(context.Background()); err == nil {
 		t.Fatal("tun setup succeeded with no server to whitelist")
 	}
 	if enabled {
@@ -88,9 +91,11 @@ func TestBringUpTun_SplitSkipsKillSwitch(t *testing.T) {
 	a := newKillSwitchApp(&spy, func(system.KillSwitchConfig) error { enabled = true; return nil })
 	a.serverHost, a.serverPort = "203.0.113.5", 443
 
-	if err := a.newTunLifecycle(killSwitchTarget(), true).afterStart(context.Background()); err != nil {
+	l := a.newTunLifecycle(killSwitchTarget(), sessionPorts{}, true)
+	if err := l.afterStart(context.Background()); err != nil {
 		t.Fatalf("split setup: %v", err)
 	}
+	defer l.afterStop() // the core's health loop goes with it
 	if enabled || a.killSwitchOn {
 		t.Error("kill switch enabled in split")
 	}

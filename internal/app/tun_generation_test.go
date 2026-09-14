@@ -82,7 +82,7 @@ type tunNet struct {
 
 	mu          sync.Mutex
 	index       map[int]int       // core pid → index of its interface
-	born        map[int]time.Time // core pid → when its interface was first asked for
+	born        map[int]time.Time // core pid → when the core was first seen
 	never       bool              // the interface never comes up
 	routes      int               // enableTunRouting calls
 	unroutes    int               // disableTunRouting calls
@@ -108,27 +108,64 @@ func newTunGenerationApp(t *testing.T, crashes int) (*App, *tunNet) {
 	a.disableTunRouting = n.disableTunRouting
 	a.enableKillSwitch = func(system.KillSwitchConfig) error { n.event("ks on"); return nil }
 	a.disableKillSwitch = func() error { n.event("ks off"); return nil }
-	a.healthLoop = func(ctx context.Context, _ sessionPorts) { <-ctx.Done() }
+	// The real tun health loop, checking through the model instead of a network,
+	// on a short tick so that a check can land anywhere in a core's life.
+	a.tunProbe = n.probe
+	interval := connectivityInterval
+	connectivityInterval = 50 * time.Millisecond
+	t.Cleanup(func() { connectivityInterval = interval })
 	return a, n
 }
 
-// liveIndex is the index of the running core's interface, 0 while it has none.
-func (n *tunNet) liveIndex() int {
-	if n.never || n.a.runner == nil {
-		return 0
+// coreIndex is the index the running core's interface has or is about to get,
+// with when that core was first seen; 0 while no core runs.
+func (n *tunNet) coreIndex() (int, time.Time) {
+	if n.a.runner == nil {
+		return 0, time.Time{}
 	}
 	pid := n.a.runner.PID()
 	if !processAlive(pid) {
-		return 0
+		return 0, time.Time{}
 	}
 	if _, ok := n.index[pid]; !ok {
 		n.index[pid] = 10 + len(n.index)
 		n.born[pid] = time.Now()
 	}
-	if time.Since(n.born[pid]) < 300*time.Millisecond {
+	return n.index[pid], n.born[pid]
+}
+
+// liveIndex is the index of the running core's interface, 0 while it has none.
+func (n *tunNet) liveIndex() int {
+	idx, born := n.coreIndex()
+	if n.never || idx == 0 || time.Since(born) < 300*time.Millisecond {
 		return 0
 	}
-	return n.index[pid]
+	return idx
+}
+
+// probe is the health check as the core's probe inbound answers it: it passes
+// whenever that core runs, routed or not — the probe does not follow the system
+// routes (A10). Logged with the core's index, so the log shows which core a
+// check went through and whether that core's routes were in at the time.
+func (n *tunNet) probe() (bool, time.Duration) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	idx, _ := n.coreIndex()
+	n.log = append(n.log, fmt.Sprintf("probe %d", idx))
+	return idx != 0, time.Millisecond
+}
+
+// probes counts the checks that went through the core with this index.
+func (n *tunNet) probes(idx int) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	count := 0
+	for _, e := range n.log {
+		if e == fmt.Sprintf("probe %d", idx) {
+			count++
+		}
+	}
+	return count
 }
 
 func (n *tunNet) interfaces() ([]net.Interface, error) {
@@ -250,40 +287,121 @@ func restartOnce(a *App) func(context.Context, sessionPorts) {
 	}
 }
 
+// assertEvents compares the session's changes to the machine. Health checks are
+// left out: assertProbedOnlyWhileRouted places those.
 func assertEvents(t *testing.T, n *tunNet, want ...string) {
 	t.Helper()
-	if got := n.events(); !slices.Equal(got, want) {
+	got := slices.DeleteFunc(n.events(), func(e string) bool { return strings.HasPrefix(e, "probe ") })
+	if !slices.Equal(got, want) {
 		t.Errorf("events = %q\nwant     %q", got, want)
 	}
 }
 
+// assertProbedOnlyWhileRouted fails on a check that passed through a core whose
+// routes were not in: its "ок" speaks for a tunnel the system's traffic does not
+// go through yet, or any more.
+func assertProbedOnlyWhileRouted(t *testing.T, n *tunNet) {
+	t.Helper()
+	routed := 0
+	for _, e := range n.events() {
+		if s, ok := strings.CutPrefix(e, "route "); ok {
+			if idx, err := strconv.Atoi(s); err == nil {
+				routed = idx
+			}
+			continue
+		}
+		if e == "unroute" {
+			routed = 0
+			continue
+		}
+		s, ok := strings.CutPrefix(e, "probe ")
+		if !ok {
+			continue
+		}
+		if idx, _ := strconv.Atoi(s); idx != 0 && idx != routed {
+			t.Errorf("core %d checked while the routes were on %d (0 — none)\nevents = %q", idx, routed, n.events())
+			return
+		}
+	}
+}
+
+// screen stands in for the status screen and keeps everything sent to it.
+type screen struct {
+	a       *App
+	ch      chan tui.StatusUpdate
+	drained chan struct{}
+	got     []tui.StatusUpdate
+}
+
+func watchScreen(a *App) *screen {
+	s := &screen{a: a, ch: make(chan tui.StatusUpdate, 8), drained: make(chan struct{})}
+	a.setStatusCh(s.ch)
+	go func() {
+		defer close(s.drained)
+		for u := range s.ch {
+			s.got = append(s.got, u)
+		}
+	}()
+	return s
+}
+
+// healthLine closes the screen and returns its health line over time: "ok N" for
+// a passed check of core N, "reset N" for a reset to core N. Notes, failed checks
+// (a dying core's last check may fail or not) and repeats are left out.
+func (s *screen) healthLine() []string {
+	s.a.closeStatusCh(s.ch)
+	<-s.drained
+	var out []string
+	for _, u := range s.got {
+		var e string
+		switch {
+		case u.ResetHealth:
+			e = fmt.Sprintf("reset %d", u.Generation)
+		case u.OK:
+			e = fmt.Sprintf("ok %d", u.Generation)
+		default:
+			continue
+		}
+		if len(out) == 0 || out[len(out)-1] != e {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // The core dies; its interface and the routes on it go with it. The next core
 // gets its own interface and has to be routed again — once it is up, not
-// before. The kill switch belongs to the session: on once, off once.
+// before. The kill switch belongs to the session: on once, off once. Health
+// belongs to the core: nothing is checked before its routes are in, and the
+// dead core's "ок" leaves the screen with it.
 func TestTunSession_RoutesFollowTheCore(t *testing.T) {
 	a, n := newTunGenerationApp(t, 1)
+	scr := watchScreen(a)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := runTunSession(a, ctx)
-	waitFor(t, done, func() bool { return n.routed() == 2 }, "the restarted core to be routed")
+	// By the new core's third check its first result has been sent.
+	waitFor(t, done, func() bool { return n.routed() == 2 && n.probes(11) >= 3 }, "the restarted core to be routed and checked")
 	cancel()
 
 	if err := waitEnd(t, done); !errors.Is(err, context.Canceled) {
 		t.Fatalf("runSession err = %v, want context.Canceled", err)
 	}
 	assertEvents(t, n, "route 10", "ks on", "unroute", "route 11", "unroute", "ks off")
+	assertProbedOnlyWhileRouted(t, n)
+	if got, want := scr.healthLine(), []string{"ok 1", "reset 2", "ok 2", "reset 3"}; !slices.Equal(got, want) {
+		t.Errorf("health on the screen = %q, want %q", got, want)
+	}
 }
 
 // Restarts the health check asks for, three in a row, each onto a new
 // interface.
 func TestTunSession_RoutesEveryRequestedRestart(t *testing.T) {
 	a, n := newTunGenerationApp(t, 0)
+	// Health runs per core: each of the first three cores asks for a restart.
 	a.healthLoop = func(ctx context.Context, _ sessionPorts) {
-		for i := 1; i <= 3; i++ {
-			if !pollUntil(ctx, func() bool { return n.routed() == i }) {
-				return
-			}
+		if n.routed() < 4 {
 			a.runner.RequestRestart()
 		}
 		<-ctx.Done()

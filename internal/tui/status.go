@@ -47,6 +47,12 @@ type StatusUpdate struct {
 	Note    string   // transient message, e.g. why a mode switch was refused
 	Err     bool     // render Note as an error
 	Apps    []string // split-tunnel rescan result; nil in a plain health update
+	// ResetHealth drops the shown health result and the uptime: the core they
+	// came from has stopped, and the next one has not been checked yet (C01).
+	ResetHealth bool
+	// Generation is the core a health result came from. A reset carries the
+	// first core whose results still count; an older one's is stale.
+	Generation int
 }
 
 type statusModel struct {
@@ -56,6 +62,7 @@ type statusModel struct {
 	started  time.Time
 	last     *StatusUpdate
 	note     notice
+	gen      int  // the oldest core whose health results still count (C01)
 	appsOpen bool // the split-tunnel list is expanded to one process per line
 	action   StatusAction
 	width    int // terminal width; 0 until the first WindowSizeMsg
@@ -118,6 +125,12 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case StatusUpdate:
 		switch {
+		case msg.ResetHealth:
+			// The core behind the shown result has stopped: the next one is a new
+			// connection, unchecked until its own first result.
+			m.last = nil
+			m.started = time.Time{}
+			m.gen = max(m.gen, msg.Generation)
 		case msg.Apps != nil:
 			m.info.Apps = msg.Apps
 		case msg.Note != "":
@@ -128,6 +141,9 @@ func (m statusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				style = errStyle
 			}
 			return m, tea.Batch(m.note.set(msg.Note, style), m.waitUpdate())
+		case msg.Generation < m.gen:
+			// A stopped core's result that was already on its way when the reset
+			// came: it says nothing about the core running now.
 		default:
 			u := msg
 			m.last = &u

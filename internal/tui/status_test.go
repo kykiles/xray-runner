@@ -120,6 +120,38 @@ func TestUptimeStartsOnFirstOK(t *testing.T) {
 	}
 }
 
+// C01: a restarted core is a new connection. The stopped core's "ок" — shown,
+// or still queued behind the reset — must not stand for the next one before
+// that one has been checked, and the uptime starts over with it.
+func TestStatus_ResetHealthDropsTheStoppedCore(t *testing.T) {
+	m := statusModel{updates: make(chan StatusUpdate, 1)}
+	step := func(u StatusUpdate) {
+		got, _ := m.Update(u)
+		m = got.(statusModel)
+	}
+
+	step(StatusUpdate{OK: true, Generation: 1})
+	if got := m.health(); !strings.Contains(got, "ок") {
+		t.Fatalf("health() = %q, want the first core's ок", got)
+	}
+
+	step(StatusUpdate{ResetHealth: true, Generation: 2})
+	if got := m.health(); strings.Contains(got, "ок") || strings.Contains(got, "uptime") {
+		t.Errorf("after the reset health() = %q, want no ок and no uptime", got)
+	}
+
+	// A result of the stopped core that arrives after the reset.
+	step(StatusUpdate{OK: true, Latency: 40 * time.Millisecond, Generation: 1})
+	if got := m.health(); strings.Contains(got, "ок") {
+		t.Errorf("a late result of the stopped core shows as %q", got)
+	}
+
+	step(StatusUpdate{OK: true, Generation: 2})
+	if got := m.health(); !strings.Contains(got, "ок") || !strings.Contains(got, "uptime") {
+		t.Errorf("health() = %q, want the new core's ок with its own uptime", got)
+	}
+}
+
 // The legend used to jump up a line when a notice faded out: the notice block
 // was only drawn while it had text.
 func TestStatus_LegendStaysPutWhenNoticeFades(t *testing.T) {

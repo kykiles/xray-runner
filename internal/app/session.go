@@ -105,7 +105,7 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 		var gens *tunLifecycle
 		var hooks xray.RunHooks
 		if tun {
-			gens = a.newTunLifecycle(t, split)
+			gens = a.newTunLifecycle(t, ports, split)
 			hooks = xray.RunHooks{AfterStart: gens.afterStart, AfterStop: gens.afterStop}
 		}
 		xrayDone.Add(1)
@@ -134,9 +134,6 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 		// ends, since a core that fails to start never gets that far.
 		select {
 		case err := <-gens.ready:
-			if err == nil {
-				go reachCheck(sessCtx, tunProbeClient(ports.probe, 10*time.Second), a.cfg.CheckURLs(), "connectivity check")
-			}
 			return err
 		case <-sessCtx.Done():
 			return sessCtx.Err()
@@ -159,7 +156,7 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 		return tui.StatusQuit, err
 	}
 
-	stopHealth = a.startHealth(sessCtx, ports)
+	stopHealth = a.startHealth(sessCtx, ports, tun)
 	action, err := a.watchSession(sessCtx, t, ports, stopHealth)
 	teardown()
 	if ctx.Err() != nil {
@@ -173,12 +170,15 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	return action, err
 }
 
-// startHealth runs the mode's health loop and returns a function that stops it
-// and waits for it to finish. The waiting is the point: the loop reads a.runner
-// while teardown nils it, and a loop outliving its session can ask the *next*
-// session's core to restart. Calling the returned function more than once is
-// safe — both the teardown and the screen-closer do.
-func (a *App) startHealth(ctx context.Context, ports sessionPorts) func() {
+// startHealth runs the session's background loops and returns a function that
+// stops them and waits for them to finish. The waiting is the point: the loop
+// reads a.runner while teardown nils it, and a loop outliving its session can
+// ask the *next* session's core to restart. Calling the returned function more
+// than once is safe — both the teardown and the screen-closer do.
+//
+// A tun session gets no health loop here: its health belongs to each core, and
+// tunLifecycle runs one per core (C01).
+func (a *App) startHealth(ctx context.Context, ports sessionPorts, tun bool) func() {
 	hctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -186,21 +186,44 @@ func (a *App) startHealth(ctx context.Context, ports sessionPorts) func() {
 		defer wg.Done()
 		a.splitRescanLoop(hctx)
 	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		switch {
-		case a.healthLoop != nil:
-			a.healthLoop(hctx, ports)
-		case a.tunMode():
-			a.healthCheckLoopConnectivity(hctx, ports.probe)
-		default:
+	if !tun {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if a.healthLoop != nil {
+				a.healthLoop(hctx, ports)
+				return
+			}
 			a.healthCheckLoopPorts(hctx, ports.socks, ports.http)
-		}
-	}()
+		}()
+	}
 	return func() {
 		cancel()
 		wg.Wait()
+	}
+}
+
+// startTunHealth runs the health loop of core gen and returns a function that
+// stops it and waits for it to finish (C01). The core's results reach the
+// screen from now until its reset.
+func (a *App) startTunHealth(ctx context.Context, ports sessionPorts, gen int) func() {
+	a.statusMu.Lock()
+	a.healthGen = gen
+	a.statusMu.Unlock()
+
+	hctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if a.healthLoop != nil {
+			a.healthLoop(hctx, ports)
+			return
+		}
+		a.healthCheckLoopConnectivity(hctx, ports.probe, gen)
+	}()
+	return func() {
+		cancel()
+		<-done
 	}
 }
 
@@ -736,11 +759,15 @@ type tunLifecycle struct {
 	a     *App
 	t     *target
 	split bool // the session's, fixed when it started
+	ports sessionPorts
 	// bound is where the config sends direct traffic past the tunnel; it was
 	// built for the adapter that was physical at the time.
 	bound xraycfg.DirectBind
 	gen   int
 	route *system.TunRouteConfig // resolved by the first setup that gets there
+	// stopHealth stops the current core's health loop and waits it out; nil
+	// while no core is being checked.
+	stopHealth func()
 	// ready hands the first finished setup's result to bring-up. Buffered and
 	// sent to once, so a later core's setup never blocks on it.
 	ready chan error
@@ -749,8 +776,8 @@ type tunLifecycle struct {
 	failed error
 }
 
-func (a *App) newTunLifecycle(t *target, split bool) *tunLifecycle {
-	return &tunLifecycle{a: a, t: t, split: split, bound: a.directBound, ready: make(chan error, 1)}
+func (a *App) newTunLifecycle(t *target, ports sessionPorts, split bool) *tunLifecycle {
+	return &tunLifecycle{a: a, t: t, split: split, ports: ports, bound: a.directBound, ready: make(chan error, 1)}
 }
 
 // afterStart sets up the core that has just started. An error while the core is
@@ -768,6 +795,10 @@ func (l *tunLifecycle) afterStart(ctx context.Context) error {
 			err = fmt.Errorf("после перезапуска ядра: %w", err)
 		}
 		l.failed = err
+	} else {
+		// Checked from now on, not before: through a core whose routes are not
+		// in yet a check passes for a tunnel no traffic goes through (C01).
+		l.stopHealth = l.a.startTunHealth(ctx, l.ports, l.gen)
 	}
 	if !l.sent {
 		l.sent = true
@@ -830,6 +861,13 @@ func (l *tunLifecycle) setUp(ctx context.Context) error {
 // switch stays up: between cores it is what keeps the apps off the physical link.
 func (l *tunLifecycle) afterStop() error {
 	a := l.a
+	// The core's health goes first, waited out: nothing it still has in flight
+	// may colour the screen once the reset has cleared it.
+	if l.stopHealth != nil {
+		l.stopHealth()
+		l.stopHealth = nil
+	}
+	a.resetHealth(l.gen + 1)
 	if !a.tunRouted {
 		return nil
 	}
@@ -939,6 +977,7 @@ func (a *App) releaseSession() {
 	a.statusMu.Lock()
 	a.lastCheck = time.Time{}
 	a.lastCheckOK = false
+	a.healthGen = 0
 	a.statusMu.Unlock()
 }
 

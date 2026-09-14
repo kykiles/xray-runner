@@ -162,7 +162,7 @@ func (a *App) healthCheckLoopPorts(ctx context.Context, socksPort, httpPort int)
 		httpOK := dialPort(ctx, httpPort, 2*time.Second)
 		// No latency: this probe dials our own local ports, so its timing says
 		// nothing about the VPN and would read as a fake "0 ms" to the server.
-		a.recordHealth(socksOK && httpOK, 0)
+		a.recordHealth(0, socksOK && httpOK, 0)
 
 		if socksOK && httpOK {
 			consecutiveFails = 0
@@ -192,23 +192,33 @@ func tunProbeClient(port int, timeout time.Duration) *http.Client {
 	return &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}}
 }
 
-func (a *App) healthCheckLoopConnectivity(ctx context.Context, probePort int) {
-	ticker := time.NewTicker(30 * time.Second)
+// connectivityInterval is how often a tun session is checked once it is up; a
+// variable so tests need not sit through it.
+var connectivityInterval = 30 * time.Second
+
+func (a *App) healthCheckLoopConnectivity(ctx context.Context, probePort, gen int) {
+	ticker := time.NewTicker(connectivityInterval)
 	defer ticker.Stop()
 
 	consecutiveFails := 0
-	client := tunProbeClient(probePort, 10*time.Second)
-	// The whole list, not just the first URL: one blocked probe host would
-	// otherwise show the session as down while everything else works.
-	checkURLs := a.cfg.CheckURLs()
-	probe := func() (bool, time.Duration) {
-		for _, checkURL := range checkURLs {
-			if latency, err := timeRequest(ctx, client, checkURL); err == nil {
-				return true, latency
+	probe := a.tunProbe
+	if probe == nil {
+		client := tunProbeClient(probePort, 10*time.Second)
+		// The loop lives as long as its core; a pooled connection to that core's
+		// inbound is of no use to the next one.
+		defer client.CloseIdleConnections()
+		// The whole list, not just the first URL: one blocked probe host would
+		// otherwise show the session as down while everything else works.
+		checkURLs := a.cfg.CheckURLs()
+		probe = func() (bool, time.Duration) {
+			for _, checkURL := range checkURLs {
+				if latency, err := timeRequest(ctx, client, checkURL); err == nil {
+					return true, latency
+				}
 			}
+			// Latency on a failed check is never shown — see recordHealth.
+			return false, 0
 		}
-		// Latency on a failed check is never shown — see recordHealth.
-		return false, 0
 	}
 
 	// Probe once up front so the status screen shows a real result immediately.
@@ -239,13 +249,14 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context, probePort int) {
 				if warmOK, warm := probe(); warmOK {
 					latency = warm
 				}
+				slog.Info("connectivity check ok", "generation", gen, "latency", latency)
 			}
 		} else {
 			ok, latency = probe()
 		}
 		first = false
 
-		a.recordHealth(ok, latency)
+		a.recordHealth(gen, ok, latency)
 		if !ok {
 			consecutiveFails++
 			slog.Warn("TUN connectivity check failed", "consecutive_fails", consecutiveFails)
@@ -290,31 +301,70 @@ func connectivityWarmup(ctx context.Context, probe func() (bool, time.Duration),
 	}
 }
 
-// recordHealth stores the latest probe result and pushes it to the connected
-// screen (U-5).
-func (a *App) recordHealth(ok bool, latency time.Duration) {
+// recordHealth stores the latest probe result of core gen and pushes it to the
+// connected screen (U-5) — unless that core is no longer the one being checked
+// (C01). The check and the send are one hold of statusMu, the one resetHealth
+// takes: a result cannot slip in between a core's stop and its reset.
+func (a *App) recordHealth(gen int, ok bool, latency time.Duration) {
 	a.statusMu.Lock()
+	defer a.statusMu.Unlock()
+	if gen != a.healthGen {
+		slog.Debug("health result of a stopped core dropped", "generation", gen, "current", a.healthGen)
+		return
+	}
 	a.lastCheck = time.Now()
 	a.lastCheckOK = ok
-	a.statusMu.Unlock()
 
-	u := tui.StatusUpdate{OK: ok}
+	u := tui.StatusUpdate{OK: ok, Generation: gen}
 	if ok {
 		u.Latency = latency
 	}
-	a.publishStatus(u)
+	a.sendStatusLocked(u)
+}
+
+// resetHealth ends the health of a core that has stopped (C01): its results no
+// longer reach the screen, and the screen drops the one it shows. next is the
+// core whose results count from now on. Unlike an ordinary update the reset is
+// never dropped — a full channel gives up its oldest update to make room —
+// and it still never blocks: the screen's reader takes updates on its own.
+func (a *App) resetHealth(next int) {
+	a.statusMu.Lock()
+	defer a.statusMu.Unlock()
+	a.healthGen = next
+	a.lastCheck = time.Time{}
+	a.lastCheckOK = false
+	if a.statusCh == nil {
+		return
+	}
+	u := tui.StatusUpdate{ResetHealth: true, Generation: next}
+	for {
+		select {
+		case a.statusCh <- u:
+			return
+		default:
+		}
+		select {
+		case <-a.statusCh:
+		default:
+		}
+	}
 }
 
 // publishStatus hands an update to the status screen. The screen is optional
 // (scripted runs have none) and must never block a health loop, so a full or
 // absent channel simply drops the update.
 func (a *App) publishStatus(u tui.StatusUpdate) {
-	// Held across the send, not just the read: closeStatusCh closes the channel
-	// under this same lock, and releasing it first leaves a window where a
-	// publisher sends into a channel that has just been closed. Safe to hold,
-	// since the send below never blocks.
 	a.statusMu.Lock()
 	defer a.statusMu.Unlock()
+	a.sendStatusLocked(u)
+}
+
+// sendStatusLocked is publishStatus for a caller already holding statusMu.
+// Held across the send, not just the read: closeStatusCh closes the channel
+// under this same lock, and releasing it first leaves a window where a
+// publisher sends into a channel that has just been closed. Safe to hold, since
+// the send below never blocks.
+func (a *App) sendStatusLocked(u tui.StatusUpdate) {
 	if a.statusCh == nil {
 		return
 	}
