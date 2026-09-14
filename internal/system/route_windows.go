@@ -3,8 +3,14 @@
 package system
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
+	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -25,8 +31,9 @@ var ipCmd commander = execCommander{}
 
 // installed remembers what EnableTunRouting added so teardown touches only
 // those destinations, leaving the rest of the host's table alone. The one gap:
-// routeReplace clears a server /32 that some other client already owned, and
-// the teardown deletes the destination outright instead of restoring it.
+// Enable refuses a destination that is already there, but routeReplace still
+// clears one another client added after that check, and the teardown deletes
+// the destination outright instead of restoring it.
 var installed *TunRouteConfig
 
 // installedV6 holds the netsh argument lists that undo the IPv6 routes. They
@@ -71,16 +78,6 @@ func DirectBind() (xraycfg.DirectBind, error) {
 	return xraycfg.DirectBind{Interface: alias}, nil
 }
 
-// parseFindNetRoute reads the "<next hop> <interface index>" line produced by
-// the Find-NetRoute call below. An on-link destination reports 0.0.0.0.
-func parseFindNetRoute(out string) (nextHop, ifIndex string, err error) {
-	fields := strings.Fields(out)
-	if len(fields) < 2 {
-		return "", "", fmt.Errorf("unexpected Find-NetRoute output: %q", out)
-	}
-	return fields[0], fields[1], nil
-}
-
 // powershell runs a script and reads its output as UTF-8. Without the encoding
 // line the pipe carries the console OEM codepage (cp866 on a Russian Windows),
 // so any localized adapter alias arrives as mojibake.
@@ -89,19 +86,61 @@ func powershell(script string) ([]byte, error) {
 		"[Console]::OutputEncoding=[Text.Encoding]::UTF8; "+script)
 }
 
+// psJSON runs a read-only script that ends in ConvertTo-Json and decodes its
+// output.
+func psJSON[T any](script string) ([]T, error) {
+	out, err := powershell(script)
+	if err != nil {
+		return nil, fmt.Errorf("%w\n%s", err, out)
+	}
+	return decodePS[T](out)
+}
+
+// decodePS reads ConvertTo-Json output as a list. Windows PowerShell prints a
+// lone object without the array brackets and nothing at all when no object
+// came through; every query here expects an answer, so silence is an error
+// rather than an empty list.
+func decodePS[T any](out []byte) ([]T, error) {
+	// Not seen from the encoding line above, but a byte order mark would make
+	// the whole answer unreadable JSON.
+	out = bytes.TrimSpace(bytes.TrimPrefix(out, []byte("\xef\xbb\xbf")))
+	if len(out) == 0 {
+		return nil, errors.New("PowerShell ничего не вывела")
+	}
+	var list []T
+	var err error
+	if out[0] == '[' {
+		err = json.Unmarshal(out, &list)
+	} else {
+		var one T
+		err = json.Unmarshal(out, &one)
+		list = []T{one}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("разобрать вывод PowerShell: %w", err)
+	}
+	return list, nil
+}
+
+// winRoute is one route as Get-NetRoute and Find-NetRoute report it, reduced
+// to what the routing code reads. An on-link route has NextHop 0.0.0.0 or ::.
+type winRoute struct {
+	DestinationPrefix string
+	NextHop           string
+	InterfaceIndex    int
+}
+
 // routeReplace installs a route the way `ip route replace` does on Linux.
 // route.exe has no replace verb and rejects a destination already present with
-// "The object already exists" — and a crash never runs the teardown, so the
-// next start meets its own leftovers. The delete is best-effort: on a clean
-// start there is nothing to remove.
+// "The object already exists". Enable has already refused a destination that
+// was there, so the delete only reaches a route another client added since.
 func routeReplace(dest, mask, gateway, ifIndex string) ([]byte, error) {
 	_, _ = ipCmd.run("route", "delete", dest, "mask", mask)
 	return ipCmd.run("route", "add", dest, "mask", mask, gateway, "if", ifIndex)
 }
 
 // netshRoute6 installs an IPv6 route the way routeReplace does for IPv4: the
-// delete first, because a session killed before its teardown leaves its routes
-// behind and netsh refuses a duplicate prefix on the same interface.
+// delete first, because netsh refuses a duplicate prefix on the same interface.
 //
 // An on-link destination has no next hop (Find-NetRoute answers "::"), and
 // netsh wants the parameter left out rather than set to the unspecified
@@ -121,41 +160,75 @@ func netshRoute6(prefix, ifIndex, nextHop string) ([]byte, error) {
 	return out, err
 }
 
+// tunException is a server's physical path, which its exception route pins so
+// the tunnel's own uplink stays out of the tun.
+type tunException struct{ ip, nextHop, ifIndex string }
+
 // EnableTunRouting points the system's default traffic at the TUN adapter and
-// pins the VPN server to the physical adapter.
+// pins the VPN server to the physical adapter. Every lookup, and the check
+// that none of the routes it adds is there already, runs before the first
+// change.
 func EnableTunRouting(cfg TunRouteConfig) error {
 	if len(cfg.ServerIPs) == 0 {
 		return fmt.Errorf("не задан адрес VPN-сервера для исключения из туннеля")
+	}
+	servers, err := serverAddrs(cfg.ServerIPs, false)
+	if err != nil {
+		return err
+	}
+	var servers6 []netip.Addr
+	if cfg.Addr6 != "" {
+		if servers6, err = serverAddrs(cfg.ServerIPs6, true); err != nil {
+			return err
+		}
 	}
 
 	// Resolve every server's physical path first: if this fails after the
 	// split default is in place, xray's own uplink is blackholed and the
 	// machine loses connectivity entirely.
-	type exception struct{ ip, nextHop, ifIndex string }
-	exceptions := make([]exception, 0, len(cfg.ServerIPs))
-	for _, ip := range cfg.ServerIPs {
-		// Find-NetRoute emits both the route and the source IP address object,
-		// in no guaranteed order; only the former carries NextHop.
-		out, err := powershell(fmt.Sprintf(
-			`$r = Find-NetRoute -RemoteIPAddress '%s' -ErrorAction Stop | Where-Object NextHop | Select-Object -First 1; "$($r.NextHop) $($r.InterfaceIndex)"`,
-			ip))
+	exceptions := make([]tunException, 0, len(servers))
+	for _, ip := range servers {
+		e, err := physicalPath(ip)
 		if err != nil {
-			return fmt.Errorf("определить маршрут до сервера %s: %w\n%s", ip, err, out)
+			return err
 		}
-		nextHop, physIndex, err := parseFindNetRoute(string(out))
+		exceptions = append(exceptions, e)
+	}
+	exceptions6 := make([]tunException, 0, len(servers6))
+	for _, ip := range servers6 {
+		e, err := physicalPath(ip)
 		if err != nil {
-			return fmt.Errorf("разобрать маршрут до сервера %s: %w", ip, err)
+			return err
 		}
-		exceptions = append(exceptions, exception{ip: ip, nextHop: nextHop, ifIndex: physIndex})
+		exceptions6 = append(exceptions6, e)
 	}
 
-	out, err := powershell(fmt.Sprintf(`(Get-NetAdapter -Name '%s' -ErrorAction Stop).ifIndex`, cfg.Iface))
+	adapters, err := psJSON[struct{ IfIndex int }](fmt.Sprintf(
+		`Get-NetAdapter -Name '%s' -ErrorAction Stop | Select-Object -Property ifIndex | ConvertTo-Json -Compress`, cfg.Iface))
 	if err != nil {
-		return fmt.Errorf("найти адаптер %s: %w\n%s", cfg.Iface, err, out)
+		return fmt.Errorf("найти адаптер %s: %w", cfg.Iface, err)
 	}
-	tunIndex := strings.TrimSpace(string(out))
-	if tunIndex == "" {
-		return fmt.Errorf("адаптер %s не имеет индекса интерфейса", cfg.Iface)
+	if len(adapters) != 1 || adapters[0].IfIndex <= 0 {
+		return fmt.Errorf("не удалось определить индекс интерфейса адаптера %s", cfg.Iface)
+	}
+	tunIndex := strconv.Itoa(adapters[0].IfIndex)
+
+	// Nothing here may overwrite a route that is already there (A08), so the
+	// whole set is checked before the first change.
+	want := make([]netip.Prefix, 0, len(servers)+len(servers6)+len(splitDefault)+len(splitDefault6))
+	for _, ip := range slices.Concat(servers, servers6) {
+		want = append(want, netip.PrefixFrom(ip, ip.BitLen()))
+	}
+	for _, half := range splitDefault {
+		want = append(want, netip.PrefixFrom(netip.MustParseAddr(half.dest), 1))
+	}
+	if cfg.Addr6 != "" {
+		for _, half := range splitDefault6 {
+			want = append(want, netip.MustParsePrefix(half))
+		}
+	}
+	if err := checkTunRoutingFree(want); err != nil {
+		return err
 	}
 
 	saved := cfg
@@ -176,7 +249,7 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 	}
 
 	if cfg.Addr6 != "" {
-		if err := enableTunRouting6(cfg, tunIndex); err != nil {
+		if err := enableTunRouting6(cfg, exceptions6, tunIndex); err != nil {
 			_ = DisableTunRouting()
 			return err
 		}
@@ -190,20 +263,10 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 // then the two default halves. Without it a v6-capable app prefers the AAAA
 // record and leaves with its real address while the screen says the tunnel is
 // up — the leak the split mode exists to prevent.
-func enableTunRouting6(cfg TunRouteConfig, tunIndex string) error {
-	for _, ip := range cfg.ServerIPs6 {
-		out, err := powershell(fmt.Sprintf(
-			`$r = Find-NetRoute -RemoteIPAddress '%s' -ErrorAction Stop | Where-Object NextHop | Select-Object -First 1; "$($r.NextHop) $($r.InterfaceIndex)"`,
-			ip))
-		if err != nil {
-			return fmt.Errorf("определить маршрут до сервера %s: %w\n%s", ip, err, out)
-		}
-		nextHop, physIndex, err := parseFindNetRoute(string(out))
-		if err != nil {
-			return fmt.Errorf("разобрать маршрут до сервера %s: %w", ip, err)
-		}
-		if out, err := netshRoute6(ip+"/128", physIndex, nextHop); err != nil {
-			return fmt.Errorf("исключить сервер %s из туннеля: %w\n%s", ip, err, out)
+func enableTunRouting6(cfg TunRouteConfig, exceptions []tunException, tunIndex string) error {
+	for _, e := range exceptions {
+		if out, err := netshRoute6(e.ip+"/128", e.ifIndex, e.nextHop); err != nil {
+			return fmt.Errorf("исключить сервер %s из туннеля: %w\n%s", e.ip, err, out)
 		}
 	}
 
@@ -211,6 +274,73 @@ func enableTunRouting6(cfg TunRouteConfig, tunIndex string) error {
 		if out, err := netshRoute6(half, tunIndex, cfg.Addr6); err != nil {
 			return fmt.Errorf("направить IPv6-трафик в %s: %w\n%s", cfg.Iface, err, out)
 		}
+	}
+	return nil
+}
+
+// serverAddrs reads the server addresses of one family. They are spliced into
+// PowerShell scripts, so anything but a plain address of that family is
+// refused before a script runs.
+func serverAddrs(ips []string, v6 bool) ([]netip.Addr, error) {
+	family := "IPv4"
+	if v6 {
+		family = "IPv6"
+	}
+	addrs := make([]netip.Addr, 0, len(ips))
+	for _, s := range ips {
+		a, err := netip.ParseAddr(s)
+		if err != nil || a.Zone() != "" || a.Is4() == v6 || a.Is4In6() {
+			return nil, fmt.Errorf("адрес VPN-сервера %q — не %s-адрес", s, family)
+		}
+		addrs = append(addrs, a)
+	}
+	return addrs, nil
+}
+
+// physicalPath asks Windows how it reaches ip right now. Find-NetRoute emits
+// both the route and the source IP address object, in no guaranteed order;
+// only the former carries NextHop.
+func physicalPath(ip netip.Addr) (tunException, error) {
+	found, err := psJSON[winRoute](fmt.Sprintf(
+		`Find-NetRoute -RemoteIPAddress '%s' -ErrorAction Stop | Where-Object NextHop | Select-Object -First 1 -Property NextHop,InterfaceIndex | ConvertTo-Json -Compress`,
+		ip))
+	if err != nil {
+		return tunException{}, fmt.Errorf("определить маршрут до сервера %s: %w", ip, err)
+	}
+	r := found[0]
+	hop, err := netip.ParseAddr(r.NextHop)
+	if len(found) != 1 || err != nil || hop.Is4() != ip.Is4() || r.InterfaceIndex <= 0 {
+		return tunException{}, fmt.Errorf("разобрать маршрут до сервера %s: next hop %q, интерфейс %d", ip, r.NextHop, r.InterfaceIndex)
+	}
+	return tunException{ip: ip.String(), nextHop: hop.String(), ifIndex: strconv.Itoa(r.InterfaceIndex)}, nil
+}
+
+// checkTunRoutingFree refuses to route while a route with any prefix of want
+// is already in the active table, whatever its interface, next hop or metric.
+// A crashed run's leftovers look exactly like another client's routes, so a
+// match proves nothing about ownership and is never taken over. Only exact
+// prefixes count: the default routes, the LAN and other clients' more specific
+// routes are no conflict. A query that fails or prints something unreadable
+// refuses too — routing on a guess is how foreign routes got overwritten.
+func checkTunRoutingFree(want []netip.Prefix) error {
+	routes, err := psJSON[winRoute](
+		`Get-NetRoute -PolicyStore ActiveStore -ErrorAction Stop | Select-Object -Property DestinationPrefix,NextHop,InterfaceIndex | ConvertTo-Json -Compress`)
+	if err != nil {
+		return fmt.Errorf("прочитать таблицу маршрутов: %w", err)
+	}
+	var conflicts []string
+	for _, r := range routes {
+		p, err := netip.ParsePrefix(r.DestinationPrefix)
+		if err != nil {
+			return fmt.Errorf("разобрать назначение маршрута %q: %w", r.DestinationPrefix, err)
+		}
+		if slices.Contains(want, p.Masked()) {
+			conflicts = append(conflicts, fmt.Sprintf("%s via %s if %d", p, r.NextHop, r.InterfaceIndex))
+		}
+	}
+	if len(conflicts) > 0 {
+		return fmt.Errorf("уже есть маршруты, которые ставит TUN: %s — чужое не перезаписываю, ничего не изменено (остатки упавшего запуска удалите вручную или перезагрузкой)",
+			strings.Join(conflicts, "; "))
 	}
 	return nil
 }
