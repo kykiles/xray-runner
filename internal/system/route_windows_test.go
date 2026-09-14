@@ -21,11 +21,16 @@ import (
 // select, the way ConvertTo-Json prints them: Get-NetRoute lists the table,
 // Find-NetRoute picks the best route (longest prefix, then lowest metric) and
 // prints it as a lone object, which is what ConvertTo-Json makes of a single
-// pipeline item. A script the fake does not know fails, so the code under test
-// cannot lean on output nobody modelled.
+// pipeline item. A route is keyed by prefix, interface and next hop, as
+// Windows keys it: an add of a key already there fails, and Remove-NetRoute
+// removes the one route matching all three. A script the fake does not know
+// fails, so the code under test cannot lean on output nobody modelled.
 type fakeIP struct {
 	routes   []fakeRoute
 	tunIndex int // ifIndex of the xray-tun adapter; zero means there is none
+	// selfOnLink records a route whose gateway is the tun's own address as
+	// on-link, which Windows may do with an interface's own address.
+	selfOnLink bool
 
 	bindAlias  string
 	bindErr    error
@@ -35,8 +40,13 @@ type fakeIP struct {
 	raw      map[string]string // replaces a script's output; keyed "find", "adapter", "routes"
 	queryErr map[string]error  // fails a script; same keys
 
+	// before runs ahead of every mutation — a client racing the preflight;
+	// fail makes a mutation fail when it returns true.
+	before func(cmd string)
+	fail   func(cmd string) bool
+
 	scripts []string // every script run
-	cmds    []string // every mutating command tried
+	cmds    []string // every mutation tried, failed ones included
 }
 
 type fakeRoute struct {
@@ -71,8 +81,19 @@ func (f *fakeIP) run(bin string, args ...string) ([]byte, error) {
 	if bin == "powershell" {
 		return f.script(args[len(args)-1])
 	}
-	f.cmds = append(f.cmds, bin+" "+strings.Join(args, " "))
-	return f.mutate(bin, args)
+	return f.mutation(bin+" "+strings.Join(args, " "), func() ([]byte, error) { return f.mutate(bin, args) })
+}
+
+// mutation records cmd and applies it unless the test makes it fail.
+func (f *fakeIP) mutation(cmd string, apply func() ([]byte, error)) ([]byte, error) {
+	f.cmds = append(f.cmds, cmd)
+	if f.before != nil {
+		f.before(cmd)
+	}
+	if f.fail != nil && f.fail(cmd) {
+		return []byte("Access is denied."), errors.New("exit status 1")
+	}
+	return apply()
 }
 
 var findTarget = regexp.MustCompile(`Find-NetRoute -RemoteIPAddress '([^']*)'`)
@@ -83,6 +104,9 @@ func (f *fakeIP) script(s string) ([]byte, error) {
 	if strings.Contains(s, "InterfaceAlias") {
 		f.bindScript = s
 		return []byte(f.bindAlias), f.bindErr
+	}
+	if strings.Contains(s, "Remove-NetRoute") {
+		return f.removeRoutes(s)
 	}
 	if !strings.Contains(s, "| ConvertTo-Json") {
 		return nil, fmt.Errorf("fakeIP: script without structured output %q", s)
@@ -128,6 +152,45 @@ func (f *fakeIP) script(s string) ([]byte, error) {
 	return json.Marshal(out)
 }
 
+var removeRoute = regexp.MustCompile(`Remove-NetRoute -DestinationPrefix '([^']*)' -InterfaceIndex (\d+) -NextHop '([^']*)' -PolicyStore ActiveStore -Confirm:\$false`)
+
+// removeRoutes runs a batch of Remove-NetRoute calls in order. Each removes the
+// one route matching its prefix, interface and next hop, and one that matches
+// nothing is an error. The batch must stop at the first error, or it would
+// report the removals after it as done when they may not be.
+func (f *fakeIP) removeRoutes(s string) ([]byte, error) {
+	stop := strings.Index(s, "$ErrorActionPreference = 'Stop'; ")
+	if stop < 0 || stop > strings.Index(s, "Remove-NetRoute") {
+		return nil, fmt.Errorf("fakeIP: a removal batch that goes on past an error %q", s)
+	}
+	calls := removeRoute.FindAllStringSubmatch(s, -1)
+	if len(calls) != strings.Count(s, "Remove-NetRoute") {
+		return nil, fmt.Errorf("fakeIP: unmodelled Remove-NetRoute in %q", s)
+	}
+	for _, c := range calls {
+		dst, err := netip.ParsePrefix(c[1])
+		if err != nil {
+			return nil, fmt.Errorf("fakeIP: prefix %q: %w", c[1], err)
+		}
+		index, _ := strconv.Atoi(c[2])
+		hop := c[3]
+		out, err := f.mutation("Remove-NetRoute "+c[1]+" if "+c[2]+" via "+hop, func() ([]byte, error) {
+			i := slices.IndexFunc(f.routes, func(r fakeRoute) bool {
+				return r.dst == dst && r.ifIndex == index && r.nextHop == hop
+			})
+			if i < 0 {
+				return []byte("Remove-NetRoute : No matching MSFT_NetRoute objects found"), errors.New("exit status 1")
+			}
+			f.routes = slices.Delete(f.routes, i, i+1)
+			return nil, nil
+		})
+		if err != nil {
+			return out, err
+		}
+	}
+	return nil, nil
+}
+
 // best picks the route Windows would use: the longest matching prefix, then
 // the lowest metric.
 func (f *fakeIP) best(addr netip.Addr) (fakeRoute, bool) {
@@ -170,6 +233,10 @@ func (f *fakeIP) recreateTun(index int) {
 		fakeRoute{dst: pfx("fdfe:dcba:9876::/126"), nextHop: "::", ifIndex: index, metric: 256})
 }
 
+// mutate applies route.exe and netsh. The code under test no longer deletes
+// through them, but the deletes stay modelled with their real reach: a delete
+// by destination creeping back would remove the foreign routes the tests watch
+// instead of failing unseen, since route.exe errors used to be ignored.
 func (f *fakeIP) mutate(bin string, args []string) ([]byte, error) {
 	switch {
 	// route add DEST mask MASK GATEWAY if INDEX
@@ -182,9 +249,13 @@ func (f *fakeIP) mutate(bin string, args []string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("fakeIP: interface %q: %w", args[6], err)
 		}
-		return f.add(fakeRoute{dst: dst, nextHop: args[4], ifIndex: index})
-	// route delete DEST mask MASK: without a gateway or interface it removes
-	// every route to the prefix, another client's included.
+		hop := args[4]
+		if f.selfOnLink && hop == "10.0.0.1" {
+			hop = "0.0.0.0"
+		}
+		return f.add(fakeRoute{dst: dst, nextHop: hop, ifIndex: index})
+	// route delete DEST mask MASK: without a gateway it removes every route
+	// to the prefix, another client's included.
 	case bin == "route" && len(args) == 4 && args[0] == "delete" && args[2] == "mask":
 		dst, err := maskPrefix(args[1], args[3])
 		if err != nil {
@@ -210,7 +281,7 @@ func (f *fakeIP) mutate(bin string, args []string) ([]byte, error) {
 		switch args[2] {
 		case "add":
 			hop := kv["nexthop"]
-			if hop == "" {
+			if hop == "" || f.selfOnLink && hop == "fdfe:dcba:9876::1" {
 				hop = "::"
 			}
 			return f.add(fakeRoute{dst: dst, nextHop: hop, ifIndex: index})
@@ -258,13 +329,29 @@ func (f *fakeIP) has(substr string) bool {
 
 func (f *fakeIP) hasRoute(r fakeRoute) bool { return slices.Contains(f.routes, r) }
 
+// holds reports whether any route has the prefix.
+func (f *fakeIP) holds(prefix string) bool {
+	return slices.ContainsFunc(f.routes, func(r fakeRoute) bool { return r.dst == pfx(prefix) })
+}
+
+// removals lists the Remove-NetRoute calls tried, in order.
+func (f *fakeIP) removals() []string {
+	var out []string
+	for _, c := range f.cmds {
+		if strings.HasPrefix(c, "Remove-NetRoute") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func withFakeIP(t *testing.T, f *fakeIP) {
 	t.Helper()
 	orig := ipCmd
 	ipCmd = f
 	t.Cleanup(func() {
 		ipCmd = orig
-		installed, installedV6 = nil, nil
+		installed = nil
 	})
 }
 
@@ -344,7 +431,7 @@ func TestEnableTunRouting_RefusesLeftoversFromACrashedRun(t *testing.T) {
 			t.Fatalf("EnableTunRouting: %v", err)
 		}
 		// The process died, and what it knew about its routes died with it.
-		installed, installedV6 = nil, nil
+		installed = nil
 		f.cmds = nil
 		return f
 	}
@@ -518,6 +605,82 @@ func TestEnableTunRouting_LeavesUnrelatedRoutesAlone(t *testing.T) {
 	}
 }
 
+// The preflight cannot stop a client that adds a route after it ran. Enable
+// only adds, so the client's route survives either way: the same route makes
+// the add fail, and the same prefix elsewhere simply lives beside ours.
+func TestEnableTunRouting_FailsWhenAClientRacesThePreflight(t *testing.T) {
+	cases := []struct {
+		name   string
+		racer  fakeRoute
+		failed bool
+	}{
+		{"the same route", fakeRoute{dst: pfx("0.0.0.0/1"), nextHop: "10.0.0.1", ifIndex: 27}, true},
+		{"the same prefix elsewhere", fakeRoute{dst: pfx("0.0.0.0/1"), nextHop: "10.8.0.1", ifIndex: 40}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := winHost()
+			withFakeIP(t, f)
+			original := f.state()
+			f.before = func(string) {
+				f.routes = append(f.routes, c.racer)
+				f.before = nil
+			}
+
+			err := EnableTunRouting(tunCfg)
+			if c.failed && err == nil {
+				t.Fatalf("installed over a route added after the check: %v", f.cmds)
+			}
+			if !c.failed {
+				if err != nil {
+					t.Fatalf("EnableTunRouting: %v", err)
+				}
+				if err := DisableTunRouting(); err != nil {
+					t.Fatalf("DisableTunRouting: %v", err)
+				}
+			}
+			if !f.hasRoute(c.racer) {
+				t.Fatalf("the racing client's route is gone: %v", f.cmds)
+			}
+			f.routes = slices.DeleteFunc(f.routes, func(r fakeRoute) bool { return r == c.racer })
+			if f.state() != original {
+				t.Errorf("routes of ours left behind:\nbefore %s\nafter  %s", original, f.state())
+			}
+		})
+	}
+}
+
+// A failed add takes back exactly the routes this call added, newest first, and
+// nothing else.
+func TestEnableTunRouting_RollsBackEveryFailure(t *testing.T) {
+	// The six adds: IPv4 server, both IPv4 halves, IPv6 server, both IPv6 halves.
+	for n := 1; n <= 6; n++ {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			f := winHost()
+			withFakeIP(t, f)
+			original := f.state()
+			adds := 0
+			f.fail = func(cmd string) bool {
+				if strings.Contains(cmd, " add ") {
+					adds++
+					return adds == n
+				}
+				return false
+			}
+
+			if err := EnableTunRouting(tunCfg6); err == nil {
+				t.Fatal("Enable succeeded past a failed add")
+			}
+			if f.state() != original {
+				t.Errorf("rollback left the table changed:\nbefore %s\nafter  %s", original, f.state())
+			}
+			if got := f.removals(); len(got) != n-1 {
+				t.Errorf("rollback removed %d routes, want exactly the %d added: %v", len(got), n-1, f.cmds)
+			}
+		})
+	}
+}
+
 func TestEnableTunRouting_FailsWhenTunAdapterMissing(t *testing.T) {
 	f := winHost()
 	f.tunIndex = 0
@@ -531,38 +694,269 @@ func TestEnableTunRouting_FailsWhenTunAdapterMissing(t *testing.T) {
 	}
 }
 
+// Each route is removed by its prefix, interface and next hop, newest first,
+// and the table ends up as Enable found it.
 func TestDisableTunRouting_RemovesEverythingEnableAdded(t *testing.T) {
 	f := winHost()
 	withFakeIP(t, f)
+	original := f.state()
 
 	if err := EnableTunRouting(tunCfg); err != nil {
 		t.Fatalf("EnableTunRouting: %v", err)
 	}
 	f.cmds = nil
 
-	DisableTunRouting()
+	if err := DisableTunRouting(); err != nil {
+		t.Fatalf("DisableTunRouting: %v", err)
+	}
 
+	want := []string{
+		"Remove-NetRoute 128.0.0.0/1 if 27 via 10.0.0.1",
+		"Remove-NetRoute 0.0.0.0/1 if 27 via 10.0.0.1",
+		"Remove-NetRoute 45.150.32.235/32 if 12 via 192.168.31.1",
+	}
+	if got := f.removals(); !slices.Equal(got, want) {
+		t.Errorf("removals = %v, want %v", got, want)
+	}
+	if f.state() != original {
+		t.Errorf("table not restored:\nbefore %s\nafter  %s", original, f.state())
+	}
+}
+
+// Disable runs on every session teardown, including sessions that never
+// enabled tun routing; it must not touch or even read the host's table.
+func TestDisableTunRouting_NoopWhenNothingWasEnabled(t *testing.T) {
+	f := winHost()
+	withFakeIP(t, f)
+
+	if err := DisableTunRouting(); err != nil {
+		t.Fatalf("DisableTunRouting: %v", err)
+	}
+
+	if len(f.cmds) != 0 || len(f.scripts) != 0 {
+		t.Errorf("expected no commands, got: %v %q", f.cmds, f.scripts)
+	}
+}
+
+func TestDisableTunRouting_IsNotRepeated(t *testing.T) {
+	f := winHost()
+	withFakeIP(t, f)
+
+	if err := EnableTunRouting(tunCfg6); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	if err := DisableTunRouting(); err != nil {
+		t.Fatalf("DisableTunRouting: %v", err)
+	}
+	f.cmds, f.scripts = nil, nil
+
+	if err := DisableTunRouting(); err != nil {
+		t.Fatalf("second DisableTunRouting: %v", err)
+	}
+	if len(f.cmds) != 0 || len(f.scripts) != 0 {
+		t.Errorf("second teardown ran again: %v %q", f.cmds, f.scripts)
+	}
+}
+
+// When xray dies its adapter takes the tun's routes with it. Those are already
+// gone and cost nothing; the server exceptions on the physical adapter remain
+// and are removed.
+func TestDisableTunRouting_AfterTheTunIsGone(t *testing.T) {
+	f := winHost()
+	withFakeIP(t, f)
+	if err := EnableTunRouting(tunCfg6); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	f.recreateTun(31)
+	f.cmds = nil
+	fresh := winHost()
+	fresh.recreateTun(31)
+
+	if err := DisableTunRouting(); err != nil {
+		t.Fatalf("DisableTunRouting: %v", err)
+	}
+	want := []string{
+		"Remove-NetRoute 2a00:1450::64/128 if 12 via fe80::1",
+		"Remove-NetRoute 45.150.32.235/32 if 12 via 192.168.31.1",
+	}
+	if got := f.removals(); !slices.Equal(got, want) {
+		t.Errorf("removals = %v, want %v", got, want)
+	}
+	if f.state() != fresh.state() {
+		t.Errorf("table not restored:\nwant %s\ngot  %s", fresh.state(), f.state())
+	}
+}
+
+// A prefix of ours that another client has since taken over holds their route,
+// not ours: it stays where it is, and the rest of ours is removed.
+func TestDisableTunRouting_LeavesAReplacedEntryAlone(t *testing.T) {
+	f := winHost()
+	withFakeIP(t, f)
+	if err := EnableTunRouting(tunCfg6); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	theirs := map[netip.Prefix]fakeRoute{
+		pfx("45.150.32.235/32"): {dst: pfx("45.150.32.235/32"), nextHop: "10.8.0.1", ifIndex: 40},
+		pfx("::/1"):             {dst: pfx("::/1"), nextHop: "::", ifIndex: 40},
+	}
+	for i, r := range f.routes {
+		if other, ok := theirs[r.dst]; ok {
+			f.routes[i] = other
+		}
+	}
+
+	if err := DisableTunRouting(); err != nil {
+		t.Fatalf("DisableTunRouting: %v", err)
+	}
+	for _, r := range theirs {
+		if !f.hasRoute(r) {
+			t.Errorf("another client's %s was removed: %v", r.dst, f.cmds)
+		}
+	}
+	for _, p := range []string{"0.0.0.0/1", "128.0.0.0/1", "2a00:1450::64/128", "8000::/1"} {
+		if f.holds(p) {
+			t.Errorf("our %s is still there: %s", p, f.state())
+		}
+	}
+}
+
+// A failed removal leaves a route of ours in place: the teardown must say so
+// and try again next time — from Disable, or from the next Enable before it
+// builds anything on top.
+func TestDisableTunRouting_KeepsWhatItFailedToRemove(t *testing.T) {
+	isRemoval := func(cmd string) bool {
+		return strings.HasPrefix(cmd, "Remove-NetRoute") || strings.Contains(cmd, " delete ")
+	}
+	failSecondRemoval := func(f *fakeIP) {
+		removals := 0
+		f.fail = func(cmd string) bool {
+			if isRemoval(cmd) {
+				removals++
+				return removals == 2
+			}
+			return false
+		}
+	}
+	setup := func(t *testing.T) (*fakeIP, string) {
+		f := winHost()
+		withFakeIP(t, f)
+		original := f.state()
+		if err := EnableTunRouting(tunCfg6); err != nil {
+			t.Fatalf("EnableTunRouting: %v", err)
+		}
+		failSecondRemoval(f)
+		if err := DisableTunRouting(); err == nil {
+			t.Fatalf("reported a clean teardown with routes left: %s", f.state())
+		}
+		f.fail = nil
+		return f, original
+	}
+
+	t.Run("retried by Disable", func(t *testing.T) {
+		f, original := setup(t)
+		if err := DisableTunRouting(); err != nil {
+			t.Fatalf("retried DisableTunRouting: %v", err)
+		}
+		if f.state() != original {
+			t.Errorf("the retry did not finish the teardown:\nbefore %s\nafter  %s", original, f.state())
+		}
+	})
+	t.Run("finished by the next Enable", func(t *testing.T) {
+		f, original := setup(t)
+		if err := EnableTunRouting(tunCfg6); err != nil {
+			t.Fatalf("EnableTunRouting after a failed teardown: %v", err)
+		}
+		if err := DisableTunRouting(); err != nil {
+			t.Fatalf("DisableTunRouting: %v", err)
+		}
+		if f.state() != original {
+			t.Errorf("table not restored:\nbefore %s\nafter  %s", original, f.state())
+		}
+	})
+}
+
+// Without the table there is no telling ours from a foreign route, so nothing
+// is removed and the routes stay owned for the next attempt.
+func TestDisableTunRouting_KeepsEverythingWhenStateIsUnknown(t *testing.T) {
+	f := winHost()
+	withFakeIP(t, f)
+	original := f.state()
+	if err := EnableTunRouting(tunCfg); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	f.queryErr = map[string]error{"routes": errors.New("exit status 1")}
+	f.cmds = nil
+
+	if err := DisableTunRouting(); err == nil {
+		t.Fatal("reported a clean teardown without reading the table")
+	}
+	if len(f.cmds) != 0 {
+		t.Errorf("removed routes without reading the table: %v", f.cmds)
+	}
+	f.queryErr = nil
+	if err := DisableTunRouting(); err != nil {
+		t.Fatalf("retried DisableTunRouting: %v", err)
+	}
+	if f.state() != original {
+		t.Errorf("table not restored:\nbefore %s\nafter  %s", original, f.state())
+	}
+}
+
+// route.exe may keep a gateway that is the interface's own address as an
+// on-link route. The teardown must still know that route as ours.
+func TestDisableTunRouting_RecognizesItsOwnAddressKeptAsOnLink(t *testing.T) {
+	f := winHost()
+	f.selfOnLink = true
+	withFakeIP(t, f)
+	original := f.state()
+
+	if err := EnableTunRouting(tunCfg6); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	if err := DisableTunRouting(); err != nil {
+		t.Fatalf("DisableTunRouting: %v", err)
+	}
+	if f.state() != original {
+		t.Errorf("table not restored:\nbefore %s\nafter  %s", original, f.state())
+	}
+}
+
+// After a full teardown the next Enable starts over: xray came back with a new
+// adapter index, and nothing from the old generation may leak into the new one.
+func TestEnableTunRouting_ReinstallsOnANewAdapter(t *testing.T) {
+	f := winHost()
+	withFakeIP(t, f)
+	if err := EnableTunRouting(tunCfg6); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	f.recreateTun(31)
+	if err := DisableTunRouting(); err != nil {
+		t.Fatalf("DisableTunRouting: %v", err)
+	}
+	fresh := f.state()
+	f.cmds = nil
+
+	if err := EnableTunRouting(tunCfg6); err != nil {
+		t.Fatalf("EnableTunRouting on the new adapter: %v", err)
+	}
 	for _, want := range []string{
-		"route delete 0.0.0.0 mask 128.0.0.0",
-		"route delete 128.0.0.0 mask 128.0.0.0",
-		"route delete 45.150.32.235 mask 255.255.255.255",
+		"route add 0.0.0.0 mask 128.0.0.0 10.0.0.1 if 31",
+		"netsh interface ipv6 add route prefix=::/1 interface=31 store=active nexthop=fdfe:dcba:9876::1",
 	} {
 		if !f.has(want) {
 			t.Errorf("missing %q, got: %v", want, f.cmds)
 		}
 	}
-}
-
-// Disable runs on every session teardown, including sessions that never
-// enabled tun routing; it must not fire stray `route delete` at the host.
-func TestDisableTunRouting_NoopWhenNothingWasEnabled(t *testing.T) {
-	f := winHost()
-	withFakeIP(t, f)
-
-	DisableTunRouting()
-
-	if len(f.cmds) != 0 {
-		t.Errorf("expected no commands, got: %v", f.cmds)
+	if err := DisableTunRouting(); err != nil {
+		t.Fatalf("DisableTunRouting: %v", err)
+	}
+	for _, c := range f.cmds {
+		if strings.Contains(c, "if 27") || strings.Contains(c, "interface=27") {
+			t.Errorf("the old adapter's index reached the new generation: %q", c)
+		}
+	}
+	if f.state() != fresh {
+		t.Errorf("table not restored:\nbefore %s\nafter  %s", fresh, f.state())
 	}
 }
 
@@ -680,21 +1074,32 @@ func TestEnableTunRouting_WithoutIPv6TouchesNoIPv6Routes(t *testing.T) {
 func TestDisableTunRouting_RemovesIPv6Routes(t *testing.T) {
 	f := winHost()
 	withFakeIP(t, f)
+	original := f.state()
 
 	if err := EnableTunRouting(tunCfg6); err != nil {
 		t.Fatalf("EnableTunRouting: %v", err)
 	}
+	f.cmds = nil
 	if err := DisableTunRouting(); err != nil {
 		t.Fatalf("DisableTunRouting: %v", err)
 	}
 
-	for _, prefix := range []string{"::/1", "8000::/1", "2a00:1450::64/128"} {
-		if !f.has("netsh interface ipv6 delete route prefix=" + prefix) {
-			t.Errorf("IPv6 route %q not removed, got: %v", prefix, f.cmds)
-		}
+	want := []string{
+		"Remove-NetRoute 8000::/1 if 27 via fdfe:dcba:9876::1",
+		"Remove-NetRoute ::/1 if 27 via fdfe:dcba:9876::1",
+		"Remove-NetRoute 2a00:1450::64/128 if 12 via fe80::1",
+		"Remove-NetRoute 128.0.0.0/1 if 27 via 10.0.0.1",
+		"Remove-NetRoute 0.0.0.0/1 if 27 via 10.0.0.1",
+		"Remove-NetRoute 45.150.32.235/32 if 12 via 192.168.31.1",
 	}
-	if installedV6 != nil {
-		t.Errorf("installedV6 not cleared: %v", installedV6)
+	if got := f.removals(); !slices.Equal(got, want) {
+		t.Errorf("removals = %v, want %v", got, want)
+	}
+	if f.state() != original {
+		t.Errorf("table not restored:\nbefore %s\nafter  %s", original, f.state())
+	}
+	if installed != nil {
+		t.Errorf("ownership not cleared: %v", installed)
 	}
 }
 
