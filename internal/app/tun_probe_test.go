@@ -51,7 +51,7 @@ func TestBuildSessionConfig_TunHasProbeInbound(t *testing.T) {
 }
 
 func TestTunProbeClient_UsesSessionInbound(t *testing.T) {
-	client := tunProbeClient(12345, time.Second)
+	client := newProbeClient(12345, time.Second)
 	tr, ok := client.Transport.(*http.Transport)
 	if !ok || tr.Proxy == nil {
 		t.Fatalf("probe client transport = %#v, want a proxying *http.Transport", client.Transport)
@@ -77,7 +77,7 @@ func TestTunProbe_FailsWithoutInbound(t *testing.T) {
 	dead := l.Addr().(*net.TCPAddr).Port
 	_ = l.Close()
 
-	if _, err := timeRequest(context.Background(), tunProbeClient(dead, 2*time.Second), direct.URL); err == nil {
+	if _, err := timeRequest(context.Background(), newProbeClient(dead, 2*time.Second), direct.URL); err == nil {
 		t.Error("probe passed with the inbound down — it went around the tunnel")
 	}
 }

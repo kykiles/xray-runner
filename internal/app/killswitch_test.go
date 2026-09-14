@@ -34,7 +34,7 @@ func newKillSwitchApp(spy *killSwitchSpy, enable func(system.KillSwitchConfig) e
 		enableKillSwitch:  enable,
 		disableKillSwitch: func() error { spy.ksOff++; return nil },
 		// A set-up core is checked; these tests do not look at the result.
-		tunProbe: func() (bool, time.Duration) { return true, 0 },
+		healthProbe: func() (bool, time.Duration) { return true, 0 },
 	}
 }
 

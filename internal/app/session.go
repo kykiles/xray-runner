@@ -194,7 +194,7 @@ func (a *App) startHealth(ctx context.Context, ports sessionPorts, tun bool) fun
 				a.healthLoop(hctx, ports)
 				return
 			}
-			a.healthCheckLoopPorts(hctx, ports.socks, ports.http)
+			a.healthCheckLoop(hctx, ports.http, 0, proxyCheckInterval)
 		}()
 	}
 	return func() {
@@ -219,7 +219,7 @@ func (a *App) startTunHealth(ctx context.Context, ports sessionPorts, gen int) f
 			a.healthLoop(hctx, ports)
 			return
 		}
-		a.healthCheckLoopConnectivity(hctx, ports.probe, gen)
+		a.healthCheckLoop(hctx, ports.probe, gen, tunCheckInterval)
 	}()
 	return func() {
 		cancel()
@@ -489,15 +489,14 @@ func (a *App) buildModeConfig(t *target) (json.RawMessage, sessionPorts, error) 
 	if raw, err = a.withSplitRouting(raw); err != nil {
 		return nil, sessionPorts{}, err
 	}
-	if a.split || a.tunMode() {
-		// The other two branches prepend it themselves. Here it matters in split
-		// mode — the probe leaves our own process, which is not in the list — and
-		// in tun, where the probe inbound's traffic meets the template's rules:
-		// without this rule either would go direct and report the tunnel healthy
-		// while nothing at all goes through it (ADR-0002, A10).
-		if raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs())); err != nil {
-			return nil, sessionPorts{}, err
-		}
+	// The other two branches prepend it themselves. Here it matters in every
+	// mode: the template's rules meet the check hosts in proxy mode (A06), in
+	// split, where the probe leaves our own process, which is not in the list,
+	// and in tun, where the probe inbound's traffic goes through them. Without
+	// this rule the check could go direct and report the tunnel healthy while
+	// nothing at all goes through it (ADR-0002, A10).
+	if raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs())); err != nil {
+		return nil, sessionPorts{}, err
 	}
 	ports, err := portsFromInbounds(inbounds, a.tunMode())
 	return raw, ports, err
@@ -619,19 +618,9 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 	a.proxyTouched = true
 	slog.Info("system proxy enabled", "port", ports.http)
 
-	go func() {
-		// The OS setting first: it is a registry read, so the user hears about a
-		// proxy that did not apply right away instead of behind the network test.
-		a.verifySystemProxy(ports.http)
-		// A proxy the OS accepted but nothing answers through is the case the
-		// status screen used to report as connected — say so out loud.
-		if !a.testProxyConnection(ctx, ports.http) && ctx.Err() == nil {
-			a.publishStatus(tui.StatusUpdate{
-				Note: "Через прокси ничего не отвечает — сервер принял подключение, но трафик не идёт",
-				Err:  true,
-			})
-		}
-	}()
+	// Only whether the OS took the setting: whether anything answers through the
+	// proxy is the health check's to say, on the status line (A06).
+	go a.verifySystemProxy(ports.http)
 	return nil
 }
 

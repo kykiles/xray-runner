@@ -110,10 +110,10 @@ func newTunGenerationApp(t *testing.T, crashes int) (*App, *tunNet) {
 	a.disableKillSwitch = func() error { n.event("ks off"); return nil }
 	// The real tun health loop, checking through the model instead of a network,
 	// on a short tick so that a check can land anywhere in a core's life.
-	a.tunProbe = n.probe
-	interval := connectivityInterval
-	connectivityInterval = 50 * time.Millisecond
-	t.Cleanup(func() { connectivityInterval = interval })
+	a.healthProbe = n.probe
+	interval := tunCheckInterval
+	tunCheckInterval = 50 * time.Millisecond
+	t.Cleanup(func() { tunCheckInterval = interval })
 	return a, n
 }
 

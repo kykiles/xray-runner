@@ -104,9 +104,9 @@ type App struct {
 	// healthLoop overrides the mode's health loop; a field so tests can observe
 	// the loop's lifetime without a network or a running core.
 	healthLoop func(context.Context, sessionPorts)
-	// tunProbe replaces the tun health loop's check through the probe inbound; a
-	// field so tests can see when a tun session probes, without a network.
-	tunProbe func() (bool, time.Duration)
+	// healthProbe replaces the health loop's check through the core's inbound; a
+	// field so tests can see when a session is checked, without a network.
+	healthProbe func() (bool, time.Duration)
 	// showStatus draws the status screen; a field so tests can drive the session
 	// loop without a terminal.
 	showStatus func(tui.StatusInfo, <-chan tui.StatusUpdate) (tui.StatusAction, error)

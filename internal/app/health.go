@@ -38,43 +38,6 @@ func (a *App) awaitTUNInterface(ctx context.Context, name string, timeout time.D
 	return false
 }
 
-// reachCheck walks the check URLs until one answers, retrying the whole list
-// three times with exponential backoff. The TUN and proxy paths differ only in
-// the client they hand in: one goes out directly, the other through xray's http
-// inbound. label names the check in the log. False means nothing answered —
-// the caller decides whether that is worth telling the user about.
-func reachCheck(ctx context.Context, client *http.Client, urls []string, label string, logArgs ...any) bool {
-	for attempt := 0; attempt < 3; attempt++ {
-		for _, testURL := range urls {
-			select {
-			case <-ctx.Done():
-				return false
-			default:
-			}
-			req, _ := http.NewRequestWithContext(ctx, "GET", testURL, nil)
-			resp, err := client.Do(req)
-			if err != nil {
-				continue
-			}
-			_ = resp.Body.Close()
-			if resp.StatusCode == 204 || resp.StatusCode == 200 {
-				slog.Info(label+" ok", append(logArgs, "status", resp.StatusCode)...)
-				return true
-			}
-		}
-		delay := time.Duration(1<<uint(attempt)) * time.Second
-		slog.Warn(label+" failed", "attempt", attempt+1, "retry_in", delay)
-		// P-1: honour Ctrl+C during the backoff instead of sleeping it out.
-		select {
-		case <-time.After(delay):
-		case <-ctx.Done():
-			return false
-		}
-	}
-	slog.Error(label + " failed after 3 attempts")
-	return false
-}
-
 // dialPort reports whether something is listening on the local port right now.
 // Every port probe in the package — "is it taken", "is it up yet", "is it still
 // alive" — is this one dial with a different timeout.
@@ -122,90 +85,46 @@ func awaitPort(ctx context.Context, port int, label string, timeout time.Duratio
 	return false
 }
 
-// testProxyConnection reports whether anything actually comes back through
-// xray's http inbound. 5s per request rather than 10: three URLs times three
-// attempts made a dead tunnel take a minute and a half to say so, and a proxy
-// that needs more than 5s for a 204 is not one to report as working.
-func (a *App) testProxyConnection(ctx context.Context, httpPort int) bool {
-	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", httpPort)
-	transport := &http.Transport{
-		Proxy: func(req *http.Request) (*url.URL, error) {
-			return url.Parse(proxyURL)
-		},
-	}
-	defer transport.CloseIdleConnections()
-
-	return reachCheck(ctx, &http.Client{Transport: transport, Timeout: 5 * time.Second},
-		a.cfg.CheckURLs(), "proxy test", "proxy", proxyURL)
-}
-
-func (a *App) healthCheckLoopPorts(ctx context.Context, socksPort, httpPort int) {
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-
-	consecutiveFails := 0
-	// Probe once up front so the status screen shows a real result immediately
-	// instead of "проверка…" for the first interval.
-	first := true
-
-	for {
-		if !first {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-		first = false
-
-		socksOK := dialPort(ctx, socksPort, 2*time.Second)
-		httpOK := dialPort(ctx, httpPort, 2*time.Second)
-		// No latency: this probe dials our own local ports, so its timing says
-		// nothing about the VPN and would read as a fake "0 ms" to the server.
-		a.recordHealth(0, socksOK && httpOK, 0)
-
-		if socksOK && httpOK {
-			consecutiveFails = 0
-			continue
-		}
-
-		consecutiveFails++
-		slog.Warn("health check failed", "socks", socksOK, "http", httpOK,
-			"consecutive_fails", consecutiveFails)
-
-		if consecutiveFails >= 3 {
-			a.announceRestart()
-			if a.runner != nil {
-				a.runner.RequestRestart()
-			}
-			consecutiveFails = 0
-		}
-	}
-}
-
-// tunProbeClient sends a probe through the tun session's loopback inbound, so
-// it travels the server's outbound whatever the system routes and the profile's
-// direct rules say (A10). A dead inbound fails the probe, however well the
-// plain internet answers.
-func tunProbeClient(port int, timeout time.Duration) *http.Client {
+// newProbeClient sends a probe through the core's loopback HTTP inbound at port,
+// so it travels the server's outbound whatever the system routes and the
+// profile's direct rules say (A10). A dead inbound fails the probe, however
+// well the plain internet answers. A variable so a test can trust its own TLS
+// target in this one transport.
+var newProbeClient = func(port int, timeout time.Duration) *http.Client {
 	proxy := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
-	return &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxy)},
+		// A 3xx fails the check instead of being followed: the host it names is
+		// not under the probe's routing rule, and the core may send it out
+		// direct — an answer from there says nothing about the tunnel (A06).
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
-// connectivityInterval is how often a tun session is checked once it is up; a
-// variable so tests need not sit through it.
-var connectivityInterval = 30 * time.Second
+// tunCheckInterval and proxyCheckInterval are how often a session is checked
+// once it is up; variables so tests need not sit through them.
+var (
+	tunCheckInterval   = 30 * time.Second
+	proxyCheckInterval = 15 * time.Second
+)
 
-func (a *App) healthCheckLoopConnectivity(ctx context.Context, probePort, gen int) {
-	ticker := time.NewTicker(connectivityInterval)
+// healthCheckLoop checks the session through one of the core's own loopback
+// HTTP inbounds — the probe inbound in tun, the http inbound in proxy — every
+// interval, and asks for a restart after three failed checks in a row. One
+// check is one round of the check URLs, and one 200/204 among them passes it:
+// ports that merely accept a connection are not a working tunnel (A06). gen is
+// the core the results belong to (C01), 0 for a proxy session's own loop.
+func (a *App) healthCheckLoop(ctx context.Context, port, gen int, interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	consecutiveFails := 0
-	probe := a.tunProbe
+	probe := a.healthProbe
 	if probe == nil {
-		client := tunProbeClient(probePort, 10*time.Second)
-		// The loop lives as long as its core; a pooled connection to that core's
-		// inbound is of no use to the next one.
+		client := newProbeClient(port, 10*time.Second)
+		// The loop's connections go with it: a pooled one to a stopped core's
+		// inbound is of no use to the next core or session.
 		defer client.CloseIdleConnections()
 		// The whole list, not just the first URL: one blocked probe host would
 		// otherwise show the session as down while everything else works.
@@ -236,9 +155,10 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context, probePort, gen in
 		var ok bool
 		var latency time.Duration
 		if first {
-			// A freshly-established TUN route needs a moment before it carries
-			// traffic; give the first check a warm-up window of retries so a
-			// cold miss doesn't flash "нет связи" the instant we connect.
+			// A fresh core needs a moment — a TUN route before it carries
+			// traffic, a balancer before its observatory has picked a server;
+			// give the first check a warm-up window of retries so a cold miss
+			// doesn't flash "нет связи" the instant we connect.
 			ok, latency = connectivityWarmup(ctx, probe, connectivityWarmupWindow, connectivityWarmupInterval)
 			// The first request over a fresh connection pays DNS, the dial and the
 			// TLS handshake on top of the round trip: it reads far higher than the
@@ -259,7 +179,7 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context, probePort, gen in
 		a.recordHealth(gen, ok, latency)
 		if !ok {
 			consecutiveFails++
-			slog.Warn("TUN connectivity check failed", "consecutive_fails", consecutiveFails)
+			slog.Warn("connectivity check failed", "port", port, "consecutive_fails", consecutiveFails)
 			if consecutiveFails >= 3 {
 				a.announceRestart()
 				if a.runner != nil {
@@ -273,9 +193,10 @@ func (a *App) healthCheckLoopConnectivity(ctx context.Context, probePort, gen in
 	}
 }
 
-const (
+var (
 	// connectivityWarmupWindow / Interval bound the first-probe warm-up: retry
-	// for up to the window, waiting the interval between tries.
+	// for up to the window, waiting the interval between tries. Variables so
+	// tests need not sit through them.
 	connectivityWarmupWindow   = 12 * time.Second
 	connectivityWarmupInterval = 2 * time.Second
 )
@@ -401,6 +322,6 @@ func (a *App) verifySystemProxy(httpPort int) {
 		return
 	}
 	// Only the OS setting is confirmed here; whether anything travels through it
-	// is what testProxyConnection answers.
+	// is the health check's to answer.
 	slog.Info("system proxy setting applied", "port", httpPort)
 }
