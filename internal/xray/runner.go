@@ -231,17 +231,37 @@ func (r *Runner) PID() int {
 	return 0
 }
 
+// RunHooks is what a session does around every core process (C01): a restarted
+// core brings up a new TUN interface, and whatever was set up on the old one is
+// gone with it. Both hooks run one after the other on the RunWithRetryHooks
+// goroutine, without r.mu held, so a hook may call the Runner.
+type RunHooks struct {
+	// AfterStart runs once the process is up. Its context ends when that
+	// process does or the session is cancelled.
+	AfterStart func(context.Context) error
+	// AfterStop runs once the process is gone and reaped, also after a failed
+	// AfterStart, and before the next process is started.
+	AfterStop func() error
+}
+
 func (r *Runner) RunWithRetry(ctx context.Context, maxRetries int) error {
+	return r.RunWithRetryHooks(ctx, maxRetries, RunHooks{})
+}
+
+// RunWithRetryHooks is RunWithRetry with the hooks called around every process.
+// An AfterStart error while the core is still up ends the run with that error —
+// restarting the core would not fix a route that would not go in. An AfterStop
+// error ends it too: a new core is not started over a network in a state
+// nobody knows.
+func (r *Runner) RunWithRetryHooks(ctx context.Context, maxRetries int, hooks RunHooks) error {
 	attempt := 0
 	var lastErr error
 	for attempt < maxRetries {
 		start := time.Now()
-		if err := r.Start(ctx); err != nil {
-			return err
+		err, fatal := r.generation(ctx, hooks)
+		if fatal != nil {
+			return fatal
 		}
-		slog.Info("xray started", "pid", r.PID())
-
-		err := r.Wait()
 
 		if ctx.Err() != nil {
 			return nil
@@ -285,4 +305,50 @@ func (r *Runner) RunWithRetry(ctx context.Context, maxRetries int) error {
 		}
 	}
 	return fmt.Errorf("xray crashed %d times, giving up: %w", maxRetries, lastErr)
+}
+
+// generation runs one core process: Start, AfterStart, the wait for the
+// process to end, AfterStop. exit is how the process ended; a non-nil fatal
+// ends the run without a retry.
+func (r *Runner) generation(ctx context.Context, hooks RunHooks) (exit, fatal error) {
+	// The process runs under genCtx, so cancelling it kills the process.
+	genCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if err := r.Start(genCtx); err != nil {
+		return nil, err
+	}
+	slog.Info("xray started", "pid", r.PID())
+
+	// The only Wait for this process. Its exit ends genCtx, so a setup still
+	// waiting on the core's interface gives up rather than times out.
+	waited := make(chan error, 1)
+	go func() {
+		err := r.Wait()
+		cancel()
+		waited <- err
+	}()
+
+	var setupErr error
+	if hooks.AfterStart != nil {
+		setupErr = hooks.AfterStart(genCtx)
+	}
+	if setupErr != nil && genCtx.Err() == nil {
+		// Setup failed under a live core: stop it and report the setup error.
+		cancel()
+	} else {
+		// The core died or the session ended under the setup; whatever the hook
+		// ran into is a symptom of that, and the exit below decides what next.
+		setupErr = nil
+	}
+	exit = <-waited
+
+	if hooks.AfterStop != nil {
+		if err := hooks.AfterStop(); err != nil {
+			fatal = fmt.Errorf("cleanup after xray failed: %w", err)
+		}
+	}
+	if setupErr != nil {
+		return exit, errors.Join(setupErr, fatal)
+	}
+	return exit, fatal
 }
