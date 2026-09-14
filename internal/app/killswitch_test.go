@@ -45,8 +45,8 @@ func TestBringUpTun_KillSwitchFailureFailsSession(t *testing.T) {
 	a := newKillSwitchApp(&spy, func(system.KillSwitchConfig) error { return errors.New("iptables: permission denied") })
 	a.serverHost, a.serverPort = "203.0.113.5", 443
 
-	if err := a.bringUpTun(context.Background(), killSwitchTarget(), sessionPorts{}); err == nil {
-		t.Fatal("bringUpTun succeeded with the kill switch down")
+	if err := a.newTunLifecycle(killSwitchTarget(), false).afterStart(context.Background()); err == nil {
+		t.Fatal("tun setup succeeded with the kill switch down")
 	}
 	if a.killSwitchOn {
 		t.Error("killSwitchOn set although EnableKillSwitch failed")
@@ -69,14 +69,33 @@ func TestBringUpTun_KillSwitchWithoutEndpointsFailsSession(t *testing.T) {
 	a := newKillSwitchApp(&spy, func(system.KillSwitchConfig) error { enabled = true; return nil })
 	// No endpoint recorded: the whitelist would be empty and cut xray's uplink.
 
-	if err := a.bringUpTun(context.Background(), killSwitchTarget(), sessionPorts{}); err == nil {
-		t.Fatal("bringUpTun succeeded with no server to whitelist")
+	if err := a.newTunLifecycle(killSwitchTarget(), false).afterStart(context.Background()); err == nil {
+		t.Fatal("tun setup succeeded with no server to whitelist")
 	}
 	if enabled {
 		t.Error("EnableKillSwitch called with an empty whitelist")
 	}
 	if a.killSwitchOn {
 		t.Error("killSwitchOn set without a kill switch")
+	}
+}
+
+// Split over the tunnel (Windows) is set up as tun, minus the kill switch: it
+// would cut everything the split sends past the tunnel on purpose (ADR-0003).
+func TestBringUpTun_SplitSkipsKillSwitch(t *testing.T) {
+	var spy killSwitchSpy
+	enabled := false
+	a := newKillSwitchApp(&spy, func(system.KillSwitchConfig) error { enabled = true; return nil })
+	a.serverHost, a.serverPort = "203.0.113.5", 443
+
+	if err := a.newTunLifecycle(killSwitchTarget(), true).afterStart(context.Background()); err != nil {
+		t.Fatalf("split setup: %v", err)
+	}
+	if enabled || a.killSwitchOn {
+		t.Error("kill switch enabled in split")
+	}
+	if spy.routed != 1 {
+		t.Errorf("tun routes installed %d times, want 1", spy.routed)
 	}
 }
 
@@ -90,7 +109,7 @@ func TestBringUp_ProxyKillSwitchLeavesNote(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // the ports never open; only the note matters here
-	_ = a.bringUp(ctx, splitTarget(), sessionPorts{socks: 1, http: 2})
+	_ = a.bringUp(ctx, sessionPorts{socks: 1, http: 2})
 
 	if !strings.Contains(a.pendingNote, "только в TUN") {
 		t.Errorf("pendingNote = %q, want a kill switch note", a.pendingNote)

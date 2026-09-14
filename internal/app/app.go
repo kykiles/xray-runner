@@ -71,6 +71,9 @@ type App struct {
 	// that every packet goes through the VPN (A03).
 	hasBypass    bool
 	killSwitchOn bool // kill switch enabled; teardown must take it down
+	// directBound is where the session's config sends direct traffic past the
+	// tunnel (buildSessionConfig); a restarted core is not routed under a stale one.
+	directBound xraycfg.DirectBind
 	// Split tunnelling (proxy mode): the names read from apps.txt, the ones that
 	// were actually running, and whether teardown has anything to undo.
 	splitApps    []string

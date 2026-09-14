@@ -26,8 +26,8 @@ func TestBringUpTun_ClaimsIPv6OutsideSplit(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := a.bringUpTun(ctx, killSwitchTarget(), sessionPorts{}); err != nil {
-		t.Fatalf("bringUpTun: %v", err)
+	if err := a.newTunLifecycle(killSwitchTarget(), false).afterStart(ctx); err != nil {
+		t.Fatalf("tun setup: %v", err)
 	}
 	if got.Addr6 != xraycfg.TunAddr6 {
 		t.Errorf("Addr6 = %q outside split, want %q", got.Addr6, xraycfg.TunAddr6)

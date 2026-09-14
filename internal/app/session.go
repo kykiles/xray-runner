@@ -37,6 +37,10 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	}
 	a.splitApps = apps
 	a.resolveSplit()
+	// Fixed for the session's life: the m key sets a.mode for the next session
+	// while this one is still up, and a core restarted in between is still this
+	// session's (C01).
+	tun, split := a.tunMode(), a.split
 
 	cfgJSON, ports, err := a.buildSessionConfig(t)
 	if err != nil {
@@ -70,8 +74,9 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	defer sessCancel()
 
 	var xrayDone sync.WaitGroup
-	// coreErr is why the core died on its own (A09). Written before sessCancel
-	// and read only after teardown's xrayDone.Wait, which orders the two.
+	// coreErr is why the session ended on its own: the core died (A09), or a
+	// restarted core could not be set up (C01). Written before sessCancel and
+	// read only after teardown's xrayDone.Wait, which orders the two.
 	var coreErr error
 
 	// Set once the health loops are up; teardown must wait for them before
@@ -95,16 +100,47 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 		if err := a.runner.TestConfig(sessCtx); err != nil {
 			return fmt.Errorf("проверка конфигурации xray не прошла: %w", err)
 		}
+		// A tun session is set up around every core, not once: each core brings
+		// up its own interface, and the routes on the last one went with it (C01).
+		var gens *tunLifecycle
+		var hooks xray.RunHooks
+		if tun {
+			gens = a.newTunLifecycle(t, split)
+			hooks = xray.RunHooks{AfterStart: gens.afterStart, AfterStop: gens.afterStop}
+		}
 		xrayDone.Add(1)
 		go func() {
 			defer xrayDone.Done()
-			if err := a.runner.RunWithRetry(sessCtx, 5); err != nil && !errors.Is(err, context.Canceled) {
-				slog.Error("xray runner failed", "error", err)
-				coreErr = err
-				sessCancel()
+			err := a.runner.RunWithRetryHooks(sessCtx, 5, hooks)
+			if err == nil || errors.Is(err, context.Canceled) {
+				return
 			}
+			slog.Error("xray runner failed", "error", err)
+			// The session is already ending, for its own reason; a cleanup that
+			// failed on the way out is tried again by releaseSession.
+			if sessCtx.Err() != nil {
+				return
+			}
+			coreErr = fmt.Errorf("ядро завершилось: %w", err)
+			if gens != nil && gens.failed != nil {
+				coreErr = gens.failed // the core was up; setting it up failed
+			}
+			sessCancel()
 		}()
-		return a.bringUp(sessCtx, t, ports)
+		if !tun {
+			return a.bringUp(sessCtx, ports)
+		}
+		// Bring-up is done once the first core is set up — or once the session
+		// ends, since a core that fails to start never gets that far.
+		select {
+		case err := <-gens.ready:
+			if err == nil {
+				go reachCheck(sessCtx, tunProbeClient(ports.probe, 10*time.Second), a.cfg.CheckURLs(), "connectivity check")
+			}
+			return err
+		case <-sessCtx.Done():
+			return sessCtx.Err()
+		}
 	}
 
 	if err := a.showConnecting(t, connect, sessCancel); err != nil {
@@ -112,7 +148,7 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 		// A core that died mid bring-up is the cause; the port or interface wait
 		// that then failed is only its symptom.
 		if coreErr != nil {
-			return tui.StatusQuit, fmt.Errorf("ядро завершилось: %w", coreErr)
+			return tui.StatusQuit, coreErr
 		}
 		// M-2: an interrupted bring-up is a deliberate exit, not a failure — the
 		// teardown above already undid the half-built session, and Ctrl+C means
@@ -132,7 +168,7 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	// The screen closed because the core died, not because the user left: an
 	// error takes the menu back with the reason instead of quitting the app.
 	if coreErr != nil {
-		return tui.StatusQuit, fmt.Errorf("ядро завершилось: %w", coreErr)
+		return tui.StatusQuit, coreErr
 	}
 	return action, err
 }
@@ -362,6 +398,7 @@ func (a *App) buildSessionConfig(t *target) (json.RawMessage, sessionPorts, erro
 	if err != nil {
 		return nil, sessionPorts{}, fmt.Errorf("привязать прямые outbound-ы: %w", err)
 	}
+	a.directBound = bind
 	return bound, ports, nil
 }
 
@@ -511,11 +548,9 @@ func portsFromInbounds(inbounds []xraycfg.Inbound, tun bool) (sessionPorts, erro
 	return p, nil
 }
 
-// bringUp waits for xray to listen and enables proxy/kill switch.
-func (a *App) bringUp(ctx context.Context, t *target, ports sessionPorts) error {
-	if a.tunMode() {
-		return a.bringUpTun(ctx, t, ports)
-	}
+// bringUp waits for xray to listen and enables the system proxy. A tun session
+// is set up around each core instead (tunLifecycle).
+func (a *App) bringUp(ctx context.Context, ports sessionPorts) error {
 	if a.cfg.KillSwitch {
 		// Not a failure: proxy mode has no system-wide traffic for a kill switch
 		// to guard. No screen is up yet, so the note waits in pendingNote.
@@ -693,7 +728,69 @@ func (a *App) refreshSplit() {
 	a.publishStatus(tui.StatusUpdate{Apps: matched})
 }
 
-func (a *App) bringUpTun(ctx context.Context, t *target, ports sessionPorts) error {
+// tunLifecycle sets a tun session up around every core process (C01): each core
+// brings up its own interface, and the routes on the previous one went with it.
+// The hooks run on the runner's goroutine, which owns a.tunRouted and
+// a.killSwitchOn until teardown has waited the runner out.
+type tunLifecycle struct {
+	a     *App
+	t     *target
+	split bool // the session's, fixed when it started
+	// bound is where the config sends direct traffic past the tunnel; it was
+	// built for the adapter that was physical at the time.
+	bound xraycfg.DirectBind
+	gen   int
+	route *system.TunRouteConfig // resolved by the first setup that gets there
+	// ready hands the first finished setup's result to bring-up. Buffered and
+	// sent to once, so a later core's setup never blocks on it.
+	ready chan error
+	sent  bool
+	// failed is a setup that failed under a live core: why the session ends.
+	failed error
+}
+
+func (a *App) newTunLifecycle(t *target, split bool) *tunLifecycle {
+	return &tunLifecycle{a: a, t: t, split: split, bound: a.directBound, ready: make(chan error, 1)}
+}
+
+// afterStart sets up the core that has just started. An error while the core is
+// still up ends the session; one caused by the core dying under the setup is
+// only a symptom, and the runner restarts the core as for any crash.
+func (l *tunLifecycle) afterStart(ctx context.Context) error {
+	l.gen++
+	l.failed = nil
+	err := l.setUp(ctx)
+	if err != nil && ctx.Err() != nil {
+		return err
+	}
+	if err != nil {
+		if l.gen > 1 {
+			err = fmt.Errorf("после перезапуска ядра: %w", err)
+		}
+		l.failed = err
+	}
+	if !l.sent {
+		l.sent = true
+		l.ready <- err
+	}
+	return err
+}
+
+// setUp routes the current core's interface. The first core to get that far
+// also brings up the kill switch, which then stays for the whole session.
+func (l *tunLifecycle) setUp(ctx context.Context) error {
+	a := l.a
+	if l.gen > 1 {
+		// A config bound to an adapter that is gone sends direct traffic nowhere;
+		// only a new connection builds one for the new adapter.
+		bind, err := a.directBind()
+		if err != nil {
+			return fmt.Errorf("определить прямой путь мимо туннеля: %w", err)
+		}
+		if bind != l.bound {
+			return fmt.Errorf("физический адаптер сменился («%s» → «%s»), а конфиг привязан к прежнему — подключитесь заново", l.bound.Interface, bind.Interface)
+		}
+	}
 	if !a.awaitTUNInterface(ctx, xraycfg.TunInterfaceName, 10*time.Second) {
 		slog.Error("tun interface did not come up")
 		return fmt.Errorf("TUN-интерфейс %s не поднялся за 10с", xraycfg.TunInterfaceName)
@@ -705,22 +802,49 @@ func (a *App) bringUpTun(ctx context.Context, t *target, ports sessionPorts) err
 	// routes below exist the tunnel receives no traffic at all.
 	// Every tun session claims IPv6 (A11): left alone, a v6-capable app on a
 	// dual-stack network goes around the tunnel with its real address.
-	routeCfg := system.TunRouteConfig{
-		Iface:      xraycfg.TunInterfaceName,
-		Addr:       xraycfg.TunAddr,
-		ServerIPs:  resolveAllIPs(t.serverHosts()),
-		Addr6:      xraycfg.TunAddr6,
-		ServerIPs6: resolveAllIPs6(t.serverHosts()),
+	if l.route == nil {
+		routeCfg := system.TunRouteConfig{
+			Iface:      xraycfg.TunInterfaceName,
+			Addr:       xraycfg.TunAddr,
+			ServerIPs:  resolveAllIPs(l.t.serverHosts()),
+			Addr6:      xraycfg.TunAddr6,
+			ServerIPs6: resolveAllIPs6(l.t.serverHosts()),
+		}
+		if len(routeCfg.ServerIPs) == 0 {
+			return fmt.Errorf("не удалось определить IP VPN-сервера — без него маршрутизация TUN оставит машину без сети")
+		}
+		l.route = &routeCfg
 	}
-	if len(routeCfg.ServerIPs) == 0 {
-		return fmt.Errorf("не удалось определить IP VPN-сервера — без него маршрутизация TUN оставит машину без сети")
-	}
-	if err := a.enableTunRouting(routeCfg); err != nil {
+	if err := a.enableTunRouting(*l.route); err != nil {
 		return fmt.Errorf("настроить маршрутизацию TUN: %w", err)
 	}
 	a.tunRouted = true
+	if l.sent {
+		return nil
+	}
+	return a.enableTunKillSwitch(l.t, l.split)
+}
 
-	if a.cfg.KillSwitch && a.split {
+// afterStop takes the core's routes out before the next core starts, so the
+// next one's physical path is found with none of ours in the table. The kill
+// switch stays up: between cores it is what keeps the apps off the physical link.
+func (l *tunLifecycle) afterStop() error {
+	a := l.a
+	if !a.tunRouted {
+		return nil
+	}
+	if err := a.disableTunRouting(); err != nil {
+		// Still marked routed: the session's final teardown tries again.
+		return fmt.Errorf("снять маршруты TUN: %w", err)
+	}
+	a.tunRouted = false
+	return nil
+}
+
+// enableTunKillSwitch is the session's part of the tun bring-up, done once with
+// the first core's routes in.
+func (a *App) enableTunKillSwitch(t *target, split bool) error {
+	if a.cfg.KillSwitch && split {
 		// Kill switch cuts everything that does not go through the tunnel, which
 		// in split mode is most of the system working as intended (ADR-0003).
 		slog.Info("kill switch skipped", "reason", "mode=split")
@@ -746,8 +870,6 @@ func (a *App) bringUpTun(ctx context.Context, t *target, ports sessionPorts) err
 		a.killSwitchOn = true
 		slog.Info("kill switch enabled", "endpoints", len(endpoints))
 	}
-
-	go reachCheck(ctx, tunProbeClient(ports.probe, 10*time.Second), a.cfg.CheckURLs(), "connectivity check")
 	return nil
 }
 
@@ -783,9 +905,11 @@ func (a *App) releaseSession() {
 	// network, so restore the physical path before anything else can fail.
 	if a.tunRouted {
 		if err := a.disableTunRouting(); err != nil {
+			// Still marked routed, so the teardown at exit tries again.
 			slog.Warn("failed to remove tun routes", "error", err)
+		} else {
+			a.tunRouted = false
 		}
-		a.tunRouted = false
 	}
 	// Undo by what was actually enabled, never by a.mode: the m key switches the
 	// mode while the session is still up, so by the time teardown runs a.mode
