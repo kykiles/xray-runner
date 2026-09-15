@@ -11,6 +11,7 @@ import (
 
 	"xray-runner/internal/subscription"
 	"xray-runner/internal/system"
+	"xray-runner/internal/tui"
 	"xray-runner/internal/xraycfg"
 )
 
@@ -196,6 +197,76 @@ func TestResolveSplit(t *testing.T) {
 		a.resolveSplit()
 		if a.split != c.want {
 			t.Errorf("mode=%s apps=%v: split = %v, want %v", c.mode, c.apps, a.split, c.want)
+		}
+	}
+}
+
+// A connection an app opened before it joined the split is outside the rules;
+// when it could not be closed, the screen says so — once per app, since the
+// rescan keeps reporting it every second until the app exits (14b).
+func TestRefreshSplit_NotesUnclosedOnce(t *testing.T) {
+	a := newTemplateApp(t)
+	a.splitApps = []string{"code", "claude"}
+	a.setSplitMatched(true, []string{"code"})
+	a.statusCh = make(chan tui.StatusUpdate, 8)
+
+	steps := []struct {
+		scan  system.SplitScan
+		notes int
+	}{
+		{system.SplitScan{Matched: []string{"code"}}, 0},
+		{system.SplitScan{Matched: []string{"claude", "code"}, Unclosed: []string{"claude"}}, 1},
+		// The same claude on the next tick: still open, already said.
+		{system.SplitScan{Matched: []string{"claude", "code"}, Unclosed: []string{"claude"}}, 0},
+		// claude exited, and its connections with it.
+		{system.SplitScan{Matched: []string{"code"}}, 0},
+		// A new claude whose old connections survived again is news.
+		{system.SplitScan{Matched: []string{"claude", "code"}, Unclosed: []string{"claude"}}, 1},
+	}
+	for i, s := range steps {
+		a.rescanSplit = func([]string) (system.SplitScan, error) { return s.scan, nil }
+		a.refreshSplit()
+
+		var notes []string
+		for len(a.statusCh) > 0 {
+			if u := <-a.statusCh; u.Note != "" {
+				notes = append(notes, u.Note)
+			}
+		}
+		if len(notes) != s.notes {
+			t.Errorf("step %d: notes = %q, want %d", i, notes, s.notes)
+			continue
+		}
+		for _, n := range notes {
+			if !strings.Contains(n, "claude") {
+				t.Errorf("step %d: note %q does not name the app", i, n)
+			}
+		}
+	}
+}
+
+// Bring-up has no screen yet: an app whose old connections survived the move is
+// named in the note the screen opens with, and the first rescan does not say it
+// again.
+func TestBringUpSplit_NotesUnclosed(t *testing.T) {
+	if system.SplitOverTUN {
+		t.Skip("split rides on the tunnel here; nothing is moved, nothing to close")
+	}
+	for _, unclosed := range [][]string{nil, {"code"}} {
+		a := newTemplateApp(t)
+		a.splitApps = []string{"code"}
+		scan := system.SplitScan{Matched: []string{"code"}, Unclosed: unclosed}
+		a.enableSplit = func([]string, int, int) (system.SplitScan, error) { return scan, nil }
+		a.bringUpSplit()
+		if got := strings.Contains(a.pendingNote, "code"); got != (unclosed != nil) {
+			t.Errorf("unclosed %v: pendingNote = %q", unclosed, a.pendingNote)
+		}
+
+		a.statusCh = make(chan tui.StatusUpdate, 8)
+		a.rescanSplit = func([]string) (system.SplitScan, error) { return scan, nil }
+		a.refreshSplit()
+		if len(a.statusCh) != 0 {
+			t.Errorf("unclosed %v: the first rescan sent %+v", unclosed, <-a.statusCh)
 		}
 	}
 }

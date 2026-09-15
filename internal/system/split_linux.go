@@ -5,10 +5,12 @@ package system
 import (
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,6 +94,11 @@ var splitDirectNets6 = "{ ::1/128, fe80::/10, fc00::/7, ff00::/8 }"
 var (
 	splitMu   sync.Mutex
 	splitHome = map[string]string{}
+	// splitUnclosed holds the moved PIDs whose connections from before the move
+	// killLeaked could not close. The rescan never retries them — by then their
+	// new sockets are tunnelled, and a kill would hit those too — so this is what
+	// keeps them reported until the process exits.
+	splitUnclosed = map[string]bool{}
 )
 
 // currentCgroup reads a PID's cgroup v2 path, e.g. "/user.slice/…/app.scope"
@@ -194,20 +201,20 @@ func procName(pid string) string {
 //
 // The rules are installed even when nothing matched, so the caller can move
 // late-starting processes in without rebuilding the ruleset.
-func EnableSplit(names []string, tcpPort, dnsPort int) ([]string, error) {
+func EnableSplit(names []string, tcpPort, dnsPort int) (SplitScan, error) {
 	if len(names) == 0 {
 		// A run killed before its teardown (SIGKILL, power loss) leaves the table
 		// and a populated cgroup behind, and those processes keep redirecting
 		// into a port nobody listens on. This is the only sweep that runs on
 		// every start, so an emptied apps.txt has to do the cleaning.
 		_ = DisableSplit()
-		return nil, nil
+		return SplitScan{}, nil
 	}
 	if err := nftCmd.lookPath("nft"); err != nil {
-		return nil, fmt.Errorf("nftables не найден: %w", err)
+		return SplitScan{}, fmt.Errorf("nftables не найден: %w", err)
 	}
 	if err := os.MkdirAll(splitCgroup, 0750); err != nil {
-		return nil, fmt.Errorf("создать cgroup %s: %w", splitCgroup, err)
+		return SplitScan{}, fmt.Errorf("создать cgroup %s: %w", splitCgroup, err)
 	}
 
 	// Rules before processes: a PID that joins the cgroup while the ruleset is
@@ -216,15 +223,15 @@ func EnableSplit(names []string, tcpPort, dnsPort int) ([]string, error) {
 		// Leave nothing half-built: the cgroup without rules would silently
 		// route nothing while the UI claims the processes are tunnelled.
 		_ = DisableSplit()
-		return nil, err
+		return SplitScan{}, err
 	}
 
-	matched, err := moveIntoSplit(names)
+	scan, err := moveIntoSplit(names)
 	if err != nil {
 		_ = DisableSplit()
-		return nil, err
+		return SplitScan{}, err
 	}
-	return matched, nil
+	return scan, nil
 }
 
 // installSplitRules writes the nat/output chain. The table is torn down first so
@@ -308,15 +315,15 @@ func installSplitRules(tcpPort, dnsPort int) error {
 // is what makes "start the app after connecting" work without a reconnect.
 //
 // It is a no-op when the split tunnel is not up: no cgroup, nothing to join.
-func RefreshSplit(names []string) ([]string, error) {
+func RefreshSplit(names []string) (SplitScan, error) {
 	if len(names) == 0 || !fileExists(splitCgroup) {
-		return nil, nil
+		return SplitScan{}, nil
 	}
 	return moveIntoSplit(names)
 }
 
 // moveIntoSplit puts every PID whose name is in the list into the split cgroup.
-func moveIntoSplit(names []string) ([]string, error) {
+func moveIntoSplit(names []string) (SplitScan, error) {
 	splitMu.Lock()
 	defer splitMu.Unlock()
 
@@ -327,12 +334,13 @@ func moveIntoSplit(names []string) ([]string, error) {
 
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
-		return nil, err
+		return SplitScan{}, err
 	}
 
 	procs := filepath.Join(splitCgroup, "cgroup.procs")
 	found := map[string]bool{}
 	moved := map[string]bool{}
+	seen := map[string]string{} // pid → name, every listed process in the cgroup now
 	for _, e := range entries {
 		if _, err := strconv.Atoi(e.Name()); err != nil {
 			continue
@@ -356,20 +364,33 @@ func moveIntoSplit(names []string) ([]string, error) {
 		if home != splitRel() {
 			// Процесс только что переехал снаружи: его старые сокеты мимо туннеля.
 			moved[e.Name()] = true
+			// A PID reused by a new process says nothing of the old one's sockets.
+			delete(splitUnclosed, e.Name())
 			if home != "" {
 				splitHome[e.Name()] = home
 			}
 		}
 		found[name] = true
+		seen[e.Name()] = name
 	}
-	killLeaked(moved)
+	maps.Copy(splitUnclosed, killLeaked(moved))
+	unclosed := map[string]bool{}
+	for pid := range splitUnclosed {
+		name, ok := seen[pid]
+		if !ok {
+			// The process exited, and its sockets with it.
+			delete(splitUnclosed, pid)
+			continue
+		}
+		unclosed[name] = true
+	}
 
 	out := make([]string, 0, len(found))
 	for n := range found {
 		out = append(out, n)
 	}
 	sort.Strings(out)
-	return out, nil
+	return SplitScan{Matched: out, Unclosed: slices.Sorted(maps.Keys(unclosed))}, nil
 }
 
 // killLeaked closes the TCP connections the given processes had open before they
@@ -383,16 +404,26 @@ func moveIntoSplit(names []string) ([]string, error) {
 // Closing the socket is the only lever left; the app reconnects at once and the
 // new socket is matched. Only PIDs that came from outside the cgroup are passed
 // in, so the one-second rescan cannot keep killing what it already tunnelled.
-func killLeaked(pids map[string]bool) {
+//
+// It returns the PIDs whose old connections it could not close: those keep going
+// past the tunnel until the app reconnects on its own, and saying nothing would
+// leave the process row reading as "all of it tunnelled" (14b).
+func killLeaked(pids map[string]bool) map[string]bool {
 	if len(pids) == 0 {
-		return
+		return nil
 	}
+	unclosed := map[string]bool{}
 	// ss prints the process next to each socket, which saves mapping inode
 	// numbers out of /proc/<pid>/fd ourselves.
 	out, err := nftCmd.run("ss", "-tnHp", "state", "established")
 	if err != nil {
-		slog.Debug("split: ss failed", "error", err)
-		return
+		// Without the list nothing was closed, and nothing says there was
+		// nothing to close.
+		slog.Warn("split: old connections not closed, they bypass the tunnel", "pids", slices.Sorted(maps.Keys(pids)), "error", err)
+		for pid := range pids {
+			unclosed[pid] = true
+		}
+		return unclosed
 	}
 	for line := range strings.SplitSeq(string(out), "\n") {
 		f := strings.Fields(line)
@@ -400,26 +431,53 @@ func killLeaked(pids map[string]bool) {
 			continue
 		}
 		local, peer, users := f[len(f)-3], f[len(f)-2], f[len(f)-1]
-		if !ownedBy(users, pids) || !routable(peer) {
+		owners := socketOwners(users, pids)
+		if len(owners) == 0 || !routable(peer) {
 			continue
 		}
-		if _, err := nftCmd.run("ss", "-K", "state", "established", "src", local, "dst", peer); err != nil {
-			slog.Debug("split: socket not closed", "src", local, "dst", peer, "error", err)
+		// ss -K is no answer on its own: it exits 0 when the kernel refuses (no
+		// CAP_NET_ADMIN, no CONFIG_INET_DIAG_DESTROY) and prints nothing then —
+		// nor when the connection ended by itself meanwhile, which is no leak.
+		// Whether the connection is still up afterwards is the answer.
+		res, err := nftCmd.run("ss", "-K", "state", "established", "src", local, "dst", peer)
+		if !stillOpen(local, peer) {
+			slog.Debug("split: closed pre-existing connection", "src", local, "dst", peer)
 			continue
 		}
-		slog.Debug("split: closed pre-existing connection", "src", local, "dst", peer)
+		slog.Warn("split: old connection not closed, it bypasses the tunnel",
+			"pids", owners, "src", local, "dst", peer, "error", err, "ss", strings.TrimSpace(string(res)))
+		for _, pid := range owners {
+			unclosed[pid] = true
+		}
 	}
+	return unclosed
 }
 
-// ownedBy reports whether ss's users:(("name",pid=N,fd=M),…) column names any of
-// the given PIDs.
-func ownedBy(users string, pids map[string]bool) bool {
-	for _, part := range strings.Split(users, "pid=")[1:] {
-		if pid, _, _ := strings.Cut(part, ","); pids[pid] {
+// stillOpen reports whether ss still lists the connection local → peer. A
+// listing that fails counts as open: nothing shows the connection is gone.
+func stillOpen(local, peer string) bool {
+	out, err := nftCmd.run("ss", "-tnH", "state", "established", "src", local, "dst", peer)
+	if err != nil {
+		return true
+	}
+	for line := range strings.SplitSeq(string(out), "\n") {
+		if f := strings.Fields(line); slices.Contains(f, local) && slices.Contains(f, peer) {
 			return true
 		}
 	}
 	return false
+}
+
+// socketOwners returns the given PIDs that ss's users:(("name",pid=N,fd=M),…)
+// column names: a socket inherited over fork has several.
+func socketOwners(users string, pids map[string]bool) []string {
+	var owners []string
+	for _, part := range strings.Split(users, "pid=")[1:] {
+		if pid, _, _ := strings.Cut(part, ","); pids[pid] {
+			owners = append(owners, pid)
+		}
+	}
+	return owners
 }
 
 // routable is the ss-address counterpart of the splitDirectNets bypass: only
@@ -471,6 +529,7 @@ func DisableSplit() error {
 		}
 	}
 	clear(splitHome)
+	clear(splitUnclosed)
 	// RemoveAll, not Remove: on cgroupfs the directory goes in one rmdir once it
 	// is empty of processes, and the fallback recursion is what makes the same
 	// call work on an ordinary directory under test.

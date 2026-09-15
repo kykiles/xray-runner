@@ -19,6 +19,14 @@ type Process struct {
 	PIDs int
 }
 
+// SplitScan is what one pass over the process list found: the listed names that
+// are running, and those of them whose connections from before the move still go
+// past the tunnel, because they could not be closed.
+type SplitScan struct {
+	Matched  []string
+	Unclosed []string
+}
+
 // LoadApps reads the process names to route through the proxy. Blank lines and
 // comments are dropped; names keep their original case (matching is done
 // case-insensitively) and duplicates are collapsed.

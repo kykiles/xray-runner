@@ -80,7 +80,10 @@ type App struct {
 	splitApps    []string
 	splitMatched []string
 	splitOn      bool
-	interfaces   func() ([]net.Interface, error)
+	// splitUnclosed: the running ones whose connections from before the move
+	// still go past the tunnel, as the last scan reported them (14b).
+	splitUnclosed []string
+	interfaces    func() ([]net.Interface, error)
 	// disableKillSwitch / restoreProxy are the teardown side of the two system
 	// changes a session makes; fields so tests can observe them without touching
 	// the machine's firewall or proxy settings.
@@ -96,7 +99,11 @@ type App struct {
 	enableKillSwitch  func(system.KillSwitchConfig) error
 	enableTunRouting  func(system.TunRouteConfig) error
 	disableTunRouting func() error
-	disableSplit      func() error
+	// enableSplit / rescanSplit / disableSplit are the split's system side,
+	// fields so tests can feed it scans without root, nft or /proc.
+	enableSplit  func(names []string, tcpPort, dnsPort int) (system.SplitScan, error)
+	rescanSplit  func(names []string) (system.SplitScan, error)
+	disableSplit func() error
 	// directBind reports how the TUN config's freedom outbounds leave past the
 	// tunnel; a field because on Windows the answer comes from the machine's
 	// physical adapter, which a unit test of the config must not depend on.
@@ -148,6 +155,8 @@ func New(cfg *config.Config, opts Options) *App {
 		enableKillSwitch:  system.EnableKillSwitch,
 		enableTunRouting:  system.EnableTunRouting,
 		disableTunRouting: system.DisableTunRouting,
+		enableSplit:       system.EnableSplit,
+		rescanSplit:       system.RefreshSplit,
 		disableSplit:      system.DisableSplit,
 		directBind:        system.DirectBind,
 		showStatus:        tui.ShowStatus,

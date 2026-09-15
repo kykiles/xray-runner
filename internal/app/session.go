@@ -669,7 +669,7 @@ func (a *App) bringUpSplit() {
 	}
 	// Called even with an empty list: that is how EnableSplit gets to sweep a
 	// ruleset an earlier killed run left behind.
-	matched, err := system.EnableSplit(a.splitApps, xraycfg.RedirectPort, xraycfg.RedirectDNS)
+	scan, err := a.enableSplit(a.splitApps, xraycfg.RedirectPort, xraycfg.RedirectDNS)
 	if len(a.splitApps) == 0 {
 		return
 	}
@@ -682,7 +682,19 @@ func (a *App) bringUpSplit() {
 		}
 		return
 	}
+	matched := scan.Matched
 	a.setSplitMatched(true, matched)
+	a.statusMu.Lock()
+	a.splitUnclosed = scan.Unclosed
+	a.statusMu.Unlock()
+	if len(scan.Unclosed) > 0 {
+		// No screen yet: the note waits in pendingNote.
+		note := unclosedNote(scan.Unclosed)
+		if a.pendingNote != "" {
+			note = a.pendingNote + " " + note
+		}
+		a.pendingNote = note
+	}
 
 	if len(matched) == 0 {
 		// Not a note: the rescan loop picks up apps started later, and a sticky
@@ -748,11 +760,12 @@ func (a *App) refreshSplit() {
 	if !a.splitState() {
 		return
 	}
-	matched, err := system.RefreshSplit(a.splitApps)
+	scan, err := a.rescanSplit(a.splitApps)
 	if err != nil {
 		slog.Debug("split tunnel rescan failed", "error", err)
 		return
 	}
+	matched := scan.Matched
 	// Non-nil even when empty: the screen reads a nil Apps as "no rescan in this
 	// update", so a list that emptied out would keep showing the old names.
 	if matched == nil {
@@ -762,12 +775,31 @@ func (a *App) refreshSplit() {
 	a.statusMu.Lock()
 	changed := !slices.Equal(matched, a.splitMatched)
 	a.splitMatched = matched
+	// Only the apps not reported yet: one stays in Unclosed on every rescan
+	// until it exits, and the note must not come back each second.
+	fresh := slices.DeleteFunc(slices.Clone(scan.Unclosed), func(n string) bool {
+		return slices.Contains(a.splitUnclosed, n)
+	})
+	a.splitUnclosed = scan.Unclosed
 	a.statusMu.Unlock()
+	if len(fresh) > 0 {
+		a.publishStatus(tui.StatusUpdate{Note: unclosedNote(fresh), Err: true})
+	}
 	if !changed {
 		return
 	}
 	slog.Info("split tunnel rescanned", "processes", matched)
 	a.publishStatus(tui.StatusUpdate{Apps: matched})
+}
+
+// unclosedNote names the apps whose connections from before they joined the
+// split could not be closed: those go past the VPN until the app reconnects, and
+// a restart is the sure way to make it (14b). Why it failed is in the log.
+func unclosedNote(names []string) string {
+	if len(names) == 1 {
+		return "Не удалось закрыть старые соединения " + names[0] + ": они идут мимо VPN, пока программа не переподключится — перезапустите её (подробности в логе)."
+	}
+	return "Не удалось закрыть старые соединения " + strings.Join(names, ", ") + ": они идут мимо VPN, пока программы не переподключатся — перезапустите их (подробности в логе)."
 }
 
 // tunLifecycle sets a tun session up around every core process (C01): each core

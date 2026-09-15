@@ -4,6 +4,7 @@ package system
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -53,6 +54,10 @@ type stubNft struct {
 	failOn  string
 	missing bool
 	ssOut   string // what "ss -tnHp" reports
+	noSS    bool   // ss is not installed
+	killOut string // what "ss -K" prints
+	killed  bool   // "ss -K" closes the connection it is given
+	gone    bool   // the connection ends on its own before "ss -K" gets to it
 }
 
 func (s *stubNft) lookPath(string) error {
@@ -64,11 +69,26 @@ func (s *stubNft) lookPath(string) error {
 
 func (s *stubNft) run(bin string, args ...string) ([]byte, error) {
 	s.calls = append(s.calls, append([]string{bin}, args...))
+	if bin == "ss" && s.noSS {
+		return nil, &exec.Error{Name: "ss", Err: exec.ErrNotFound}
+	}
 	if s.failOn != "" && strings.Contains(strings.Join(args, " "), s.failOn) {
 		return []byte("boom"), os.ErrPermission
 	}
 	if bin == "ss" && len(args) > 0 && args[0] == "-tnHp" {
 		return []byte(s.ssOut), nil
+	}
+	if bin == "ss" && len(args) > 0 && args[0] == "-K" {
+		// Like the real one, ss -K exits 0 whether it closed anything or not.
+		return []byte(s.killOut), nil
+	}
+	if bin == "ss" && len(args) > 0 && args[0] == "-tnH" {
+		// Is the connection from src to dst still up?
+		if s.killed || s.gone {
+			return nil, nil
+		}
+		src, dst := args[slices.Index(args, "src")+1], args[slices.Index(args, "dst")+1]
+		return []byte("0 0 " + src + " " + dst + "\n"), nil
 	}
 	return nil, nil
 }
@@ -85,9 +105,11 @@ func withFakes(t *testing.T, procs map[string]string) *stubNft {
 	oldProc, oldRoot, oldSplit, oldCmd := procRoot, cgroupRoot, splitCgroup, nftCmd
 	procRoot, cgroupRoot, splitCgroup, nftCmd = fakeProc(t, procs), cg, filepath.Join(cg, "xray-split"), stub
 	clear(splitHome)
+	clear(splitUnclosed)
 	t.Cleanup(func() {
 		procRoot, cgroupRoot, splitCgroup, nftCmd = oldProc, oldRoot, oldSplit, oldCmd
 		clear(splitHome)
+		clear(splitUnclosed)
 	})
 	return stub
 }
@@ -152,11 +174,11 @@ func TestRefreshSplitPicksUpLateProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	matched, err := RefreshSplit([]string{"code"})
+	scan, err := RefreshSplit([]string{"code"})
 	if err != nil {
 		t.Fatalf("RefreshSplit: %v", err)
 	}
-	if len(matched) != 1 || matched[0] != "code" {
+	if matched := scan.Matched; len(matched) != 1 || matched[0] != "code" {
 		t.Errorf("matched = %v, want [code]", matched)
 	}
 	procs, err := os.ReadFile(filepath.Join(splitCgroup, "cgroup.procs"))
@@ -214,16 +236,107 @@ func TestEnableSplitClosesPreExistingConnections(t *testing.T) {
 	}
 }
 
+// ss -K says nothing through its exit status: a refused kill (no CAP_NET_ADMIN,
+// a kernel without SOCK_DESTROY) exits 0 like a successful one. Whatever stopped
+// it, an app whose old connection is still up comes back in Unclosed — the move
+// itself worked, so the split stays up (14b). A connection that ended by itself
+// before the kill is no leak and no reason to warn.
+func TestSplitReportsUnclosedConnections(t *testing.T) {
+	refused := "SOCK_DESTROY answers: Operation not permitted\nNetid Recv-Q Send-Q Local Address:Port Peer Address:Port\n"
+	cases := []struct {
+		name  string
+		setup func(*stubNft)
+		want  []string
+	}{
+		{"closed", func(s *stubNft) { s.killed = true }, nil},
+		{"ended on its own", func(s *stubNft) { s.gone = true }, nil},
+		{"nothing to close", func(s *stubNft) {
+			s.ssOut = `0 0 127.0.0.1:37442 127.0.0.1:40276 users:(("code",pid=42,fd=62))`
+		}, nil},
+		{"ss missing", func(s *stubNft) { s.noSS = true }, []string{"code"}},
+		{"kill refused", func(s *stubNft) { s.killOut = refused }, []string{"code"}},
+		{"kill failed", func(s *stubNft) { s.failOn = "-K" }, []string{"code"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			stub := withFakes(t, map[string]string{"42": "code", "99": "sshd"})
+			stub.ssOut = strings.Join([]string{
+				`0 0 192.168.31.94:56196 160.79.104.10:443 users:(("code",pid=42,fd=20))`,
+				`0 0 192.168.31.94:45278 18.97.36.2:443 users:(("sshd",pid=99,fd=18))`,
+			}, "\n")
+			c.setup(stub)
+
+			scan, err := EnableSplit([]string{"code"}, 10810, 10853)
+			if err != nil {
+				t.Fatalf("EnableSplit: %v", err)
+			}
+			if !slices.Equal(scan.Matched, []string{"code"}) {
+				t.Errorf("Matched = %v, want [code]", scan.Matched)
+			}
+			if !slices.Equal(scan.Unclosed, c.want) {
+				t.Errorf("Unclosed = %v, want %v", scan.Unclosed, c.want)
+			}
+		})
+	}
+}
+
+// The rescan does not retry a failed kill — by then the app's new sockets are
+// tunnelled, and a kill would hit those — but it must not forget the failure
+// either: the app stays in Unclosed until it exits, so no scan reads as "all of
+// it tunnelled" while the old connection is still out there (14b).
+func TestSplitRescanKeepsUnclosedUntilExit(t *testing.T) {
+	stub := withFakes(t, map[string]string{"42": "code"})
+	stub.ssOut = `0 0 192.168.31.94:56196 160.79.104.10:443 users:(("code",pid=42,fd=20))`
+	stub.failOn = "-K"
+
+	scan, err := EnableSplit([]string{"code"}, 10810, 10853)
+	if err != nil {
+		t.Fatalf("EnableSplit: %v", err)
+	}
+	if !slices.Equal(scan.Unclosed, []string{"code"}) {
+		t.Fatalf("Unclosed = %v, want [code]", scan.Unclosed)
+	}
+
+	// Next tick: pid 42 is in the cgroup now.
+	if err := os.WriteFile(filepath.Join(procRoot, "42", "cgroup"), []byte("0::"+splitRel()+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stub.calls = nil
+	if scan, err = RefreshSplit([]string{"code"}); err != nil {
+		t.Fatalf("RefreshSplit: %v", err)
+	}
+	if !slices.Equal(scan.Unclosed, []string{"code"}) {
+		t.Errorf("rescan Unclosed = %v, want [code]: the failed kill was forgotten", scan.Unclosed)
+	}
+	for _, c := range stub.calls {
+		if c[0] == "ss" && c[1] == "-K" {
+			t.Errorf("rescan retried the kill on a process already in the tunnel: %v", c)
+		}
+	}
+
+	// The app restarted: pid 42 is gone, the new one comes in from outside, and
+	// its old connection closes.
+	procRoot = fakeProc(t, map[string]string{"43": "code"})
+	stub.ssOut = `0 0 192.168.31.94:56200 160.79.104.10:443 users:(("code",pid=43,fd=20))`
+	stub.failOn, stub.killed = "", true
+	if scan, err = RefreshSplit([]string{"code"}); err != nil {
+		t.Fatalf("RefreshSplit: %v", err)
+	}
+	if !slices.Equal(scan.Matched, []string{"code"}) || len(scan.Unclosed) != 0 {
+		t.Errorf("after the restart = %+v, want code matched and nothing unclosed", scan)
+	}
+}
+
 // A name in the list that is not running is skipped, not an error: the file is
 // a standing preference, and the task explicitly asks for silence here.
 func TestEnableSplitSkipsMissingProcesses(t *testing.T) {
 	withFakes(t, map[string]string{"42": "code", "99": "sshd"})
 
-	matched, err := EnableSplit([]string{"code", "telegram-desktop"}, 10810, 10853)
+	scan, err := EnableSplit([]string{"code", "telegram-desktop"}, 10810, 10853)
 	if err != nil {
 		t.Fatalf("EnableSplit: %v", err)
 	}
-	if len(matched) != 1 || matched[0] != "code" {
+	if matched := scan.Matched; len(matched) != 1 || matched[0] != "code" {
 		t.Fatalf("matched = %v, want [code]", matched)
 	}
 

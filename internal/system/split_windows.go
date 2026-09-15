@@ -52,8 +52,8 @@ func ListProcesses() ([]Process, error) {
 // EnableSplit/RefreshSplit/DisableSplit have nothing to do here: the tunnel
 // carries the traffic and xray matches the process, so there is no ruleset to
 // install, rescan or tear down (ADR-0003).
-func EnableSplit(names []string, tcpPort, dnsPort int) ([]string, error) { return nil, nil }
+func EnableSplit(names []string, tcpPort, dnsPort int) (SplitScan, error) { return SplitScan{}, nil }
 
-func RefreshSplit(names []string) ([]string, error) { return nil, nil }
+func RefreshSplit(names []string) (SplitScan, error) { return SplitScan{}, nil }
 
 func DisableSplit() error { return nil }
