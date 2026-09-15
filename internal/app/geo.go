@@ -4,8 +4,8 @@ package app
 // geosite:torrent, geosite:twitch-ads, geoip:direct — and xray refuses a config
 // naming a list it cannot resolve. The subscription says where those databases
 // are (subscription.GeoSources), so install them per subscription and point xray
-// at them; what stays unresolved after that is dropped by xraycfg as a last
-// resort.
+// at them; a list still missing after that stops the config with its name
+// (xraycfg.CheckGeoLists) rather than the rule naming it being dropped.
 
 import (
 	"context"
@@ -28,8 +28,9 @@ const panelGeoTTL = 24 * time.Hour
 
 // useGeoAssets installs the databases the subscription points at (when it points
 // at any) and makes both xray and the routing filter read from wherever the
-// active ones are. A failure here is never fatal: the core's own databases stay
-// in use and the rules naming lists they lack are dropped instead.
+// active ones are. A failed download stops nothing by itself: the core's own
+// databases stay in use, and a config naming lists they lack is refused when it
+// is built (xraycfg.CheckGeoLists).
 func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
 	dir := filepath.Dir(a.binary)
 	defer func() {

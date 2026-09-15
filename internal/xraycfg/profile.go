@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 )
 
 // panelOnlyFields are metadata the panel adds to a profile config; xray does not
@@ -43,6 +42,11 @@ func MergeProfileSingle(raw json.RawMessage, outboundTag string, inbounds []Inbo
 	}
 	if len(cfg["routing"]) == 0 {
 		return nil, ErrNoPanelRouting
+	}
+	// The rules name outbounds by tag: a server without one cannot be pinned
+	// under them, and the first untagged outbound is not necessarily it.
+	if outboundTag == "" {
+		return nil, errors.New("у выбранного сервера профиля нет tag — правила профиля к нему не привязать")
 	}
 
 	outbounds, err := pinOutbound(cfg["outbounds"], outboundTag)
@@ -87,12 +91,6 @@ func profileBase(raw json.RawMessage, inbounds []Inbound, logLevel string) (map[
 
 	for _, f := range panelOnlyFields {
 		delete(cfg, f)
-	}
-
-	// A rule naming a geo list our databases lack takes the whole config down —
-	// see dropUnknownGeo.
-	if n := dropUnknownGeo(cfg); n > 0 {
-		slog.Warn("routing rules name geo lists this geosite.dat/geoip.dat has no data for, dropped", "rules", n)
 	}
 
 	return cfg, nil

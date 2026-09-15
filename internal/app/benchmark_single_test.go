@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"xray-runner/internal/subscription"
@@ -21,9 +23,9 @@ func TestBuildSingleBenchConfigMatchesTheSession(t *testing.T) {
 	}
 	ports := portPair{socks: 41080, http: 41081}
 
-	raw, ok := pb.buildSingleBenchConfig(entry, benchInbounds(ports))
-	if !ok {
-		t.Fatal("buildSingleBenchConfig() = false, want the panel config to be used")
+	raw, ok, err := pb.buildSingleBenchConfig(entry, benchInbounds(ports))
+	if err != nil || !ok {
+		t.Fatalf("buildSingleBenchConfig() = %v, %v, want the panel config to be used", ok, err)
 	}
 
 	var got struct {
@@ -62,7 +64,53 @@ func TestBuildSingleBenchConfigMatchesTheSession(t *testing.T) {
 func TestBuildSingleBenchConfigSkipsEntriesWithoutPanelConfig(t *testing.T) {
 	pb := &ProxyBenchmarker{}
 	entry := subscription.SubEntry{Remarks: "B", Protocol: "vless", Address: "b.invalid", Port: 443}
-	if _, ok := pb.buildSingleBenchConfig(entry, benchInbounds(portPair{})); ok {
-		t.Error("buildSingleBenchConfig() = true, want false without a panel config")
+	if _, ok, err := pb.buildSingleBenchConfig(entry, benchInbounds(portPair{})); ok || err != nil {
+		t.Errorf("buildSingleBenchConfig() = %v, %v, want false and no error without a panel config", ok, err)
+	}
+}
+
+// E03: a panel profile that is there but cannot carry the server is an error,
+// not a ping measured on template.json instead.
+func TestBuildSingleBenchConfigBrokenProfileIsAnError(t *testing.T) {
+	pb := &ProxyBenchmarker{probeHosts: []string{"full:www.google.com"}}
+	for _, c := range brokenProfiles {
+		t.Run(c.name, func(t *testing.T) {
+			entry := subscription.SubEntry{
+				Remarks: "B", Protocol: "vless", Address: "b.invalid", Port: 443,
+				UUID:        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+				RawOutbound: c.outbound,
+				ProfileRaw:  c.profile,
+			}
+			if _, ok, err := pb.buildSingleBenchConfig(entry, benchInbounds(portPair{})); err == nil {
+				t.Errorf("buildSingleBenchConfig() = %v, nil, want an error", ok)
+			}
+		})
+	}
+}
+
+// E03: the ping goes through the same geo check as the session — a server or a
+// profile whose rules name a missing list is refused, with the list named,
+// before any core starts.
+func TestMeasureRefusesMissingGeoLists(t *testing.T) {
+	useSyntheticGeo(t)
+	profile := torrentProfile(t)
+	pb := &ProxyBenchmarker{probeHosts: []string{"full:www.google.com"}}
+	entry := subscription.SubEntry{
+		Remarks: "B", Protocol: "vless", Address: "b.invalid", Port: 443,
+		UUID:        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		RawOutbound: outboundNamed(t, "proxy-2"),
+		ProfileRaw:  profile,
+	}
+	ports := portPair{socks: 41080, http: 41081}
+
+	results := map[string]subscription.BenchmarkResult{
+		"single server": pb.measureEntry(context.Background(), entry, ports, t.TempDir()),
+		"whole profile": pb.measureProfileEntry(context.Background(),
+			subscription.Profile{Name: "Auto", Raw: profile, Entries: []subscription.SubEntry{entry}}, ports, t.TempDir()),
+	}
+	for name, res := range results {
+		if res.Error == nil || !strings.Contains(res.Error.Error(), "torrent") {
+			t.Errorf("%s: error = %v, want a refusal naming geosite:torrent", name, res.Error)
+		}
 	}
 }

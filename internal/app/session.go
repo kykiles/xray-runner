@@ -429,18 +429,33 @@ func (a *App) buildSessionConfig(t *target) (json.RawMessage, sessionPorts, erro
 }
 
 // buildModeConfig is the config a session with this target runs and its preview
-// shows. The local TLS policy is applied to it once, here, whichever source it
-// came from (A01): a profile or a preserved outbound brings tlsSettings of its
-// own, and only the finished config holds all of them.
+// shows, finished once, here, whichever source it came from (finalizeConfig).
 func (a *App) buildModeConfig(t *target) (json.RawMessage, sessionPorts, error) {
 	raw, ports, err := a.buildModeSource(t)
 	if err != nil {
 		return nil, sessionPorts{}, err
 	}
-	if raw, err = xraycfg.ApplySecurityPolicy(raw, a.cfg.AllowInsecure); err != nil {
-		return nil, sessionPorts{}, fmt.Errorf("политика TLS (ALLOW_INSECURE): %w", err)
+	if raw, err = finalizeConfig(raw, a.cfg.AllowInsecure); err != nil {
+		return nil, sessionPorts{}, err
 	}
 	return raw, ports, nil
+}
+
+// finalizeConfig is the last step of every config a core is handed — a
+// session's, its preview's and each ping's: the local TLS policy (A01), then the
+// check that the geo lists its rules name are in the databases (E03). Both need
+// the finished config: a profile or a preserved outbound brings tlsSettings of
+// its own, and the rules come from the profile or the template plus the split
+// and probe ones added on top.
+func finalizeConfig(raw json.RawMessage, allowInsecure bool) (json.RawMessage, error) {
+	raw, err := xraycfg.ApplySecurityPolicy(raw, allowInsecure)
+	if err != nil {
+		return nil, fmt.Errorf("политика TLS (ALLOW_INSECURE): %w", err)
+	}
+	if err := xraycfg.CheckGeoLists(raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 // explainInsecureRefusal says what to do about a core that refused a config
@@ -498,7 +513,11 @@ func (a *App) buildModeSource(t *target) (json.RawMessage, sessionPorts, error) 
 	// A single server picked out of a panel profile still runs under the panel's
 	// routing and dns: those rules (direct .ru, blocked hosts) are the point of
 	// the subscription, and rebuilding from template.json would drop them.
-	if raw, ok := a.singleServerFromProfile(t, inbounds); ok {
+	raw, usedProfile, err := a.singleServerFromProfile(t, inbounds)
+	if err != nil {
+		return nil, sessionPorts{}, err
+	}
+	if usedProfile {
 		ports, err := portsFromInbounds(inbounds, a.tunMode())
 		return raw, ports, err
 	}
@@ -512,7 +531,7 @@ func (a *App) buildModeSource(t *target) (json.RawMessage, sessionPorts, error) 
 	cfg := xraycfg.MergeConfig(&tc, outbound)
 	cfg.Log = &xraycfg.LogConfig{Loglevel: a.cfg.XrayLogLvl}
 
-	raw, err := json.Marshal(cfg)
+	raw, err = json.Marshal(cfg)
 	if err != nil {
 		return nil, sessionPorts{}, fmt.Errorf("marshal config: %w", err)
 	}
@@ -544,19 +563,21 @@ func (a *App) withSplitRouting(raw json.RawMessage) (json.RawMessage, error) {
 }
 
 // singleServerFromProfile builds the session from the profile the chosen server
-// came from, pinned to that one server. It reports false when there is nothing
-// to preserve — a URL-list subscription or a bare link — leaving the caller on
-// the template.json path.
-func (a *App) singleServerFromProfile(t *target, inbounds []xraycfg.Inbound) (json.RawMessage, bool) {
+// came from, pinned to that one server. usedProfile is false when there is
+// nothing to preserve — a URL-list subscription, a bare link, a profile with no
+// routing of its own — leaving the caller on the template.json path. A profile
+// that is there but cannot be applied is an error (E03): on template.json the
+// server would run without the panel's rules, and nothing on screen would say so.
+func (a *App) singleServerFromProfile(t *target, inbounds []xraycfg.Inbound) (raw json.RawMessage, usedProfile bool, err error) {
 	if len(t.profileRaw) == 0 || len(t.entry.RawOutbound) == 0 {
-		return nil, false
+		return nil, false, nil
 	}
 	tag := xraycfg.OutboundTag(t.entry.RawOutbound)
-	if tag == "" {
-		return nil, false
-	}
 
-	raw, err := xraycfg.MergeProfileSingle(t.profileRaw, tag, inbounds, a.cfg.XrayLogLvl)
+	raw, err = xraycfg.MergeProfileSingle(t.profileRaw, tag, inbounds, a.cfg.XrayLogLvl)
+	if errors.Is(err, xraycfg.ErrNoPanelRouting) {
+		return nil, false, nil
+	}
 	if err == nil {
 		raw, err = a.withSplitRouting(raw)
 	}
@@ -564,14 +585,9 @@ func (a *App) singleServerFromProfile(t *target, inbounds []xraycfg.Inbound) (js
 		raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs()))
 	}
 	if err != nil {
-		// Degrade to template.json rather than refuse to connect: the session
-		// still works, just without the panel's rules.
-		if !errors.Is(err, xraycfg.ErrNoPanelRouting) {
-			slog.Warn("panel routing not applied, falling back to template", "error", err)
-		}
-		return nil, false
+		return nil, false, fmt.Errorf("правила профиля не применить к серверу: %w", err)
 	}
-	return raw, true
+	return raw, true, nil
 }
 
 // portsFromInbounds finds the SOCKS/HTTP ports by protocol/tag rather than by

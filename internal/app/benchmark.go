@@ -162,7 +162,11 @@ func (pb *ProxyBenchmarker) measureEntry(ctx context.Context, entry subscription
 	// same dns, same routing, same outbound chain (ADR-0002). Rebuilding it on
 	// template.json instead is what made new subscriptions read "timeout" while
 	// connecting to them worked.
-	if data, ok := pb.buildSingleBenchConfig(entry, inbounds); ok {
+	data, usedProfile, err := pb.buildSingleBenchConfig(entry, inbounds)
+	if err != nil {
+		return subscription.BenchmarkResult{Error: err}
+	}
+	if usedProfile {
 		return pb.runAndMeasure(ctx, data, ports, dir)
 	}
 
@@ -185,7 +189,7 @@ func (pb *ProxyBenchmarker) measureEntry(ctx context.Context, entry subscription
 		Routing:   xraycfg.AddCatchAllRule(pb.template.Routing),
 	}
 
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err = json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
@@ -197,29 +201,26 @@ func (pb *ProxyBenchmarker) measureEntry(ctx context.Context, entry subscription
 }
 
 // buildSingleBenchConfig builds the session's own config for one server, pinned
-// to it. False means the server has no panel config behind it (URL list, bare
-// link) and the caller falls back to template.json, exactly as the session does.
-func (pb *ProxyBenchmarker) buildSingleBenchConfig(entry subscription.SubEntry, inbounds []xraycfg.Inbound) (json.RawMessage, bool) {
+// to it. usedProfile is false when the server has no panel config behind it (URL
+// list, bare link) or the profile has no routing of its own; the caller then
+// falls back to template.json, exactly as the session does. A profile that is
+// there but cannot be applied is an error, as it is for the session (E03).
+func (pb *ProxyBenchmarker) buildSingleBenchConfig(entry subscription.SubEntry, inbounds []xraycfg.Inbound) (raw json.RawMessage, usedProfile bool, err error) {
 	if len(entry.ProfileRaw) == 0 || len(entry.RawOutbound) == 0 {
-		return nil, false
+		return nil, false, nil
 	}
 	tag := xraycfg.OutboundTag(entry.RawOutbound)
-	if tag == "" {
-		return nil, false
+	raw, err = xraycfg.MergeProfileSingle(entry.ProfileRaw, tag, inbounds, pb.logLevel)
+	if errors.Is(err, xraycfg.ErrNoPanelRouting) {
+		return nil, false, nil
 	}
-	raw, err := xraycfg.MergeProfileSingle(entry.ProfileRaw, tag, inbounds, pb.logLevel)
+	if err == nil {
+		raw, err = xraycfg.PrependProbeRule(raw, pb.probeHosts)
+	}
 	if err != nil {
-		if !errors.Is(err, xraycfg.ErrNoPanelRouting) {
-			slog.Warn("panel routing not applied to the measured config", "server", entry.Remarks, "error", err)
-		}
-		return nil, false
+		return nil, false, fmt.Errorf("правила профиля не применить к серверу: %w", err)
 	}
-	raw, err = xraycfg.PrependProbeRule(raw, pb.probeHosts)
-	if err != nil {
-		slog.Warn("probe rule not applied to the measured config", "server", entry.Remarks, "error", err)
-		return nil, false
-	}
-	return raw, true
+	return raw, true, nil
 }
 
 // measureProfile times the profile as a whole, through its own balancer.
@@ -254,11 +255,11 @@ func (pb *ProxyBenchmarker) measureProfileEntry(ctx context.Context, p subscript
 // runAndMeasure starts xray on the given config and times a single request
 // through its http inbound.
 func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, ports portPair, dir string) subscription.BenchmarkResult {
-	// A01: whichever builder above produced the config, the core gets it only
-	// after the same TLS policy as the session's.
-	cfgJSON, err := xraycfg.ApplySecurityPolicy(cfgJSON, pb.allowInsecure)
+	// A01, E03: whichever builder above produced the config, the core gets it
+	// only after the same final step as the session's.
+	cfgJSON, err := finalizeConfig(cfgJSON, pb.allowInsecure)
 	if err != nil {
-		return subscription.BenchmarkResult{Error: fmt.Errorf("политика TLS (ALLOW_INSECURE): %w", err)}
+		return subscription.BenchmarkResult{Error: err}
 	}
 
 	tmpFile := filepath.Join(dir, fmt.Sprintf("xray-bench-%d-%d.json", ports.socks, ports.http))

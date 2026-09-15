@@ -2,13 +2,16 @@ package xraycfg
 
 // A panel's routing names geo lists its own databases carry, and ours are not
 // the same build: Loyalsoldier's geosite.dat has no "torrent" list, so a rule
-// saying geosite:torrent makes xray refuse the entire config — no session, no
-// ping, nothing. Reading the list names straight out of the .dat files lets the
-// profile merge drop exactly those references and keep the rest of the panel's
-// rules.
+// saying geosite:torrent makes xray refuse the entire config. Reading the list
+// names straight out of the .dat files lets the tool say which lists are
+// missing, and from which database, before a core is started (E03). The config
+// itself is never rewritten: a rule stripped of one matcher can select more
+// than the panel meant, and a dropped block rule lets through what it stopped.
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -18,27 +21,31 @@ import (
 )
 
 // geoAssets is the directory holding geosite.dat/geoip.dat, as passed to
-// SetGeoAssets. Empty (the default, and what tests get) filters nothing.
+// SetGeoAssets. Empty (the default, and what tests get) checks nothing.
 var geoAssets struct {
 	sync.Mutex
 	dir   string
 	lists func() map[string]bool
 }
 
-// SetGeoAssets points the geo filter at xray's database directory. Reading the
-// files is deferred to the first merge that needs them.
+// SetGeoAssets points the geo check at xray's database directory. Reading the
+// files is deferred to the first check that needs them.
 func SetGeoAssets(dir string) {
 	geoAssets.Lock()
 	defer geoAssets.Unlock()
 	geoAssets.dir = dir
+	if dir == "" {
+		geoAssets.lists = nil
+		return
+	}
 	geoAssets.lists = sync.OnceValue(func() map[string]bool {
 		known := map[string]bool{}
 		for _, f := range []string{"geosite.dat", "geoip.dat"} {
 			names, err := geoListNames(filepath.Join(dir, f))
 			if err != nil {
-				// Unreadable databases mean "filter nothing": xray will complain
-				// about them itself, and guessing here would strip valid rules.
-				slog.Warn("geo database unreadable, routing rules left as they are", "file", f, "error", err)
+				// Unreadable databases mean "check nothing": a core found on PATH
+				// keeps its databases elsewhere, and xray judges the config itself.
+				slog.Warn("geo database unreadable, geo lists in routing not checked", "file", f, "error", err)
 				return nil
 			}
 			for _, n := range names {
@@ -50,15 +57,16 @@ func SetGeoAssets(dir string) {
 }
 
 // knownGeoLists returns the list names both .dat files carry, keyed as
-// "GEOSITE:CN" / "GEOIP:RU". nil means no filtering.
-func knownGeoLists() map[string]bool {
+// "GEOSITE:CN" / "GEOIP:RU", and the directory they were read from. A nil map
+// means nothing to check against.
+func knownGeoLists() (map[string]bool, string) {
 	geoAssets.Lock()
-	f := geoAssets.lists
+	f, dir := geoAssets.lists, geoAssets.dir
 	geoAssets.Unlock()
 	if f == nil {
-		return nil
+		return nil, dir
 	}
-	return f()
+	return f(), dir
 }
 
 // geoListNames reads the list names from a .dat file. Both databases are a
@@ -111,162 +119,108 @@ func varint(b []byte, i int) (uint64, int) {
 	return 0, -1
 }
 
-// ruleMatchers are the fields that make a routing rule select traffic. A rule
-// stripped of all of them matches *everything*, so it must go rather than stay
-// behind as a catch-all pointing at the panel's blackhole.
-var ruleMatchers = []string{"domain", "domains", "ip", "port", "sourcePort", "network", "source", "user", "inboundTag", "protocol", "attrs"}
-
-// dropUnknownGeo removes references to geo lists our databases do not carry from
-// the config's routing rules and dns servers, returning how many of each it
-// touched. It is the fallback for when the panel's own databases could not be
-// installed — with those in place there is normally nothing to drop.
-func dropUnknownGeo(cfg map[string]json.RawMessage) int {
-	known := knownGeoLists()
+// CheckGeoLists refuses a config whose routing rules or dns servers name a geo
+// list the databases do not carry, naming every missing list under the database
+// it is missing from. The config is left as it is. Without readable databases
+// there is nothing to check against and nil is returned; the core's own start
+// has the last word then, as it has on everything else.
+func CheckGeoLists(raw json.RawMessage) error {
+	known, dir := knownGeoLists()
 	if len(known) == 0 {
-		return 0
-	}
-	return dropUnknownGeoRules(cfg, known) + dropUnknownGeoDNS(cfg, known)
-}
-
-// dropUnknownGeoDNS does the same for the dns section: a server narrowed to a
-// list of domains is dropped along with its last one, since without "domains" it
-// would answer every query instead.
-func dropUnknownGeoDNS(cfg map[string]json.RawMessage, known map[string]bool) int {
-	if len(cfg["dns"]) == 0 {
-		return 0
-	}
-	var dns map[string]json.RawMessage
-	if err := json.Unmarshal(cfg["dns"], &dns); err != nil || len(dns["servers"]) == 0 {
-		return 0
-	}
-	var servers []json.RawMessage
-	if err := json.Unmarshal(dns["servers"], &servers); err != nil {
-		return 0
+		return nil
 	}
 
-	touched := 0
-	kept := make([]json.RawMessage, 0, len(servers))
-	for _, s := range servers {
-		var srv map[string]json.RawMessage
+	var cfg struct {
+		Routing struct {
+			Rules []map[string]json.RawMessage `json:"rules"`
+		} `json:"routing"`
+		DNS struct {
+			Servers []json.RawMessage `json:"servers"`
+		} `json:"dns"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return fmt.Errorf("проверка гео-списков: %w", err)
+	}
+
+	var refs []string
+	for _, r := range cfg.Routing.Rules {
+		for _, field := range []string{"domain", "domains", "ip"} {
+			list, err := stringList(r[field])
+			if err != nil {
+				return fmt.Errorf("проверка гео-списков: правило маршрутизации, поле %s: %w", field, err)
+			}
+			refs = append(refs, list...)
+		}
+	}
+	for _, s := range cfg.DNS.Servers {
+		var srv struct {
+			Domains json.RawMessage `json:"domains"`
+		}
 		// A plain "https://8.8.8.8/dns-query" string names no lists.
-		if err := json.Unmarshal(s, &srv); err != nil {
-			kept = append(kept, s)
+		if json.Unmarshal(s, &srv) != nil {
 			continue
 		}
-		if !stripUnknownGeo(srv, known) {
-			kept = append(kept, s)
-			continue
-		}
-		touched++
-		if len(srv["domains"]) == 0 {
-			continue
-		}
-		enc, err := json.Marshal(srv)
+		list, err := stringList(srv.Domains)
 		if err != nil {
-			return 0
+			return fmt.Errorf("проверка гео-списков: dns-сервер, поле domains: %w", err)
 		}
-		kept = append(kept, enc)
-	}
-	if touched == 0 {
-		return 0
+		refs = append(refs, list...)
 	}
 
-	encServers, err := json.Marshal(kept)
-	if err != nil {
-		return 0
+	missing := map[string][]string{}
+	for _, ref := range refs {
+		if db, name, ok := unknownGeo(ref, known); ok && !slices.Contains(missing[db], name) {
+			missing[db] = append(missing[db], name)
+		}
 	}
-	dns["servers"] = encServers
-	encDNS, err := json.Marshal(dns)
-	if err != nil {
-		return 0
+	if len(missing) == 0 {
+		return nil
 	}
-	cfg["dns"] = encDNS
-	return touched
+	var parts []string
+	for _, db := range []string{"geosite.dat", "geoip.dat"} {
+		if len(missing[db]) > 0 {
+			parts = append(parts, db+" — "+strings.Join(missing[db], ", "))
+		}
+	}
+	return fmt.Errorf("в гео-базах (%s) нет списков, на которые ссылаются правила маршрутизации или DNS: %s", dir, strings.Join(parts, "; "))
 }
 
-// dropUnknownGeoRules strips the routing rules; a rule left with no matcher at
-// all would match everything, so it goes rather than stay behind as a catch-all.
-func dropUnknownGeoRules(cfg map[string]json.RawMessage, known map[string]bool) int {
-	if len(cfg["routing"]) == 0 {
-		return 0
+// stringList reads a rule's list field, which xray takes either as an array or
+// as one comma-separated string.
+func stringList(raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
 	}
-
-	var routing map[string]json.RawMessage
-	if err := json.Unmarshal(cfg["routing"], &routing); err != nil || len(routing["rules"]) == 0 {
-		return 0
+	var list []string
+	if err := json.Unmarshal(raw, &list); err == nil {
+		return list, nil
 	}
-	var rules []map[string]json.RawMessage
-	if err := json.Unmarshal(routing["rules"], &rules); err != nil {
-		return 0
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, errors.New("не список строк")
 	}
-
-	touched := 0
-	kept := make([]map[string]json.RawMessage, 0, len(rules))
-	for _, r := range rules {
-		if !stripUnknownGeo(r, known) {
-			kept = append(kept, r)
-			continue
-		}
-		touched++
-		if slices.ContainsFunc(ruleMatchers, func(k string) bool { return len(r[k]) > 0 }) {
-			kept = append(kept, r)
-		}
-	}
-	if touched == 0 {
-		return 0
-	}
-
-	encRules, err := json.Marshal(kept)
-	if err != nil {
-		return 0
-	}
-	routing["rules"] = encRules
-	encRouting, err := json.Marshal(routing)
-	if err != nil {
-		return 0
-	}
-	cfg["routing"] = encRouting
-	return touched
+	return strings.Split(s, ","), nil
 }
 
-// stripUnknownGeo drops the unknown geosite:/geoip: entries of one rule and
-// reports whether it changed anything.
-func stripUnknownGeo(rule map[string]json.RawMessage, known map[string]bool) bool {
-	changed := false
-	for _, field := range []string{"domain", "domains", "ip"} {
-		var list []string
-		if len(rule[field]) == 0 || json.Unmarshal(rule[field], &list) != nil {
-			continue
-		}
-		out := slices.DeleteFunc(slices.Clone(list), func(s string) bool { return isUnknownGeo(s, known) })
-		if len(out) == len(list) {
-			continue
-		}
-		changed = true
-		if len(out) == 0 {
-			delete(rule, field)
-			continue
-		}
-		if enc, err := json.Marshal(out); err == nil {
-			rule[field] = enc
+// unknownGeo reports the database and the list name of an entry naming a geo
+// list the databases do not have. Anything else — a plain domain, a CIDR, an
+// ext: file — is not ours to check.
+func unknownGeo(s string, known map[string]bool) (db, name string, ok bool) {
+	upper := strings.ToUpper(strings.TrimSpace(s))
+	prefix, db := "GEOSITE:", "geosite.dat"
+	name, found := strings.CutPrefix(upper, prefix)
+	if !found {
+		prefix, db = "GEOIP:", "geoip.dat"
+		if name, found = strings.CutPrefix(upper, prefix); !found {
+			return "", "", false
 		}
 	}
-	return changed
-}
-
-// isUnknownGeo reports whether a rule entry names a geo list the databases do
-// not have. Anything else — a plain domain, a CIDR, an ext: file — is left alone.
-func isUnknownGeo(s string, known map[string]bool) bool {
-	name, ok := strings.CutPrefix(strings.ToUpper(s), "GEOSITE:")
-	prefix := "GEOSITE:"
-	if !ok {
-		if name, ok = strings.CutPrefix(strings.ToUpper(s), "GEOIP:"); !ok {
-			return false
-		}
-		prefix = "GEOIP:"
-	}
-	// geosite:google@ads narrows a list by attribute; the list is what has to
-	// exist.
+	// geoip:!cn matches everything outside the list, and geosite:google@ads
+	// narrows a list by attribute; either way the list is what has to exist.
+	name = strings.TrimPrefix(name, "!")
 	name, _, _ = strings.Cut(name, "@")
-	return !known[prefix+name]
+	if known[prefix+name] {
+		return "", "", false
+	}
+	return db, strings.ToLower(name), true
 }

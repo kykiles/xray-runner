@@ -195,6 +195,23 @@ func TestMergeProfileSingle_UnknownTagIsRejected(t *testing.T) {
 	}
 }
 
+// E03: a server without a tag cannot be pinned — the panel's rules name
+// outbounds by tag — and must not quietly land on template.json either. Without
+// routing there is nothing to pin under, and the template fallback stays.
+func TestMergeProfileSingle_UntaggedServerIsRejected(t *testing.T) {
+	withRouting := json.RawMessage(`{
+	  "outbounds": [{"protocol": "freedom"}, {"tag": "direct", "protocol": "freedom"}],
+	  "routing": {"rules": [{"type": "field", "port": "443", "outboundTag": "direct"}]}
+	}`)
+	if _, err := MergeProfileSingle(withRouting, "", nil, "warning"); err == nil || errors.Is(err, ErrNoPanelRouting) {
+		t.Errorf("with routing: err = %v, want a refusal", err)
+	}
+	noRouting := json.RawMessage(`{"outbounds": [{"protocol": "freedom"}]}`)
+	if _, err := MergeProfileSingle(noRouting, "", nil, "warning"); !errors.Is(err, ErrNoPanelRouting) {
+		t.Errorf("without routing: err = %v, want ErrNoPanelRouting", err)
+	}
+}
+
 func TestMergeProfile_RejectsBrokenJSON(t *testing.T) {
 	if _, err := MergeProfile(json.RawMessage(`{"outbounds":`), nil, "warning"); err == nil {
 		t.Fatal("expected an error for malformed profile JSON")

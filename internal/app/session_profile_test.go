@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"xray-runner/internal/config"
@@ -127,6 +128,123 @@ func TestBuildSessionConfig_NoPanelRoutingFallsBackToTemplate(t *testing.T) {
 		t.Errorf("outbounds[0] = %q, want the template path's proxy", got.Outbounds[0].Tag)
 	}
 	validateWithXray(t, raw)
+}
+
+// brokenProfiles are panel profiles that are there but cannot carry the chosen
+// server under their routing.
+var brokenProfiles = []struct {
+	name     string
+	profile  json.RawMessage
+	outbound json.RawMessage
+}{
+	{
+		name:     "routing rules unreadable",
+		profile:  json.RawMessage(`{"outbounds": [{"tag": "proxy-2", "protocol": "freedom"}], "routing": {"rules": 5}}`),
+		outbound: json.RawMessage(`{"tag": "proxy-2", "protocol": "freedom"}`),
+	},
+	{
+		// The panel's rules name outbounds by tag; one without a tag cannot be
+		// pinned under them.
+		name:     "server has no tag",
+		profile:  json.RawMessage(`{"outbounds": [{"protocol": "freedom"}], "routing": {"rules": [{"port": "443", "outboundTag": "direct"}]}}`),
+		outbound: json.RawMessage(`{"protocol": "freedom"}`),
+	},
+}
+
+// E03: only a profile with no routing of its own falls back to template.json. A
+// profile that is there but broken is an error — the session used to run on the
+// template instead, without the panel's rules and without a word on screen.
+func TestBuildSessionConfigBrokenProfileIsAnError(t *testing.T) {
+	for _, c := range brokenProfiles {
+		t.Run(c.name, func(t *testing.T) {
+			a := newTemplateApp(t)
+			raw, _, err := a.buildSessionConfig(&target{
+				profileName: "Auto",
+				profileRaw:  c.profile,
+				entry: &subscription.SubEntry{
+					Protocol: "vless", Address: "b.invalid", Port: 443,
+					UUID:        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+					RawOutbound: c.outbound,
+				},
+			})
+			if err == nil {
+				t.Fatalf("buildSessionConfig() built a config (%d bytes), want an error", len(raw))
+			}
+		})
+	}
+}
+
+// E03: a profile naming a list the geo databases lack is refused with the list
+// named. The rule used to be dropped and the session ran without it. The
+// session, its preview and the ping all go through the same check.
+func TestBuildSessionConfigRefusesMissingGeoLists(t *testing.T) {
+	useSyntheticGeo(t)
+	profile := torrentProfile(t)
+	single := func() *target {
+		return &target{
+			profileName: "Auto",
+			profileRaw:  profile,
+			entry: &subscription.SubEntry{
+				Remarks: "B", Protocol: "vless", Address: "b.invalid", Port: 443,
+				UUID:        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+				RawOutbound: outboundNamed(t, "proxy-2"),
+			},
+		}
+	}
+	cases := []struct {
+		name  string
+		build func(a *App) error
+	}{
+		{"whole profile", func(a *App) error {
+			_, _, err := a.buildSessionConfig(&target{profileName: "Auto", profileRaw: profile})
+			return err
+		}},
+		{"single server", func(a *App) error {
+			_, _, err := a.buildSessionConfig(single())
+			return err
+		}},
+		{"preview", func(a *App) error {
+			_, err := a.previewConfig(single())
+			return err
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.build(newTemplateApp(t))
+			if err == nil || !strings.Contains(err.Error(), "torrent") {
+				t.Fatalf("err = %v, want a refusal naming geosite:torrent", err)
+			}
+		})
+	}
+}
+
+// torrentProfile is panelProfile with geosite:torrent — a list the synthetic
+// databases lack — added to its block rule next to a plain domain.
+func torrentProfile(t *testing.T) json.RawMessage {
+	t.Helper()
+	p := strings.Replace(panelProfile, `"domain": ["max.ru"]`, `"domain": ["max.ru", "geosite:torrent"]`, 1)
+	if p == panelProfile {
+		t.Fatal("the block rule of the test profile is gone")
+	}
+	return json.RawMessage(p)
+}
+
+// useSyntheticGeo points the geo check at databases carrying only google
+// (geosite) and private (geoip), for one test.
+func useSyntheticGeo(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	for file, name := range map[string]string{"geosite.dat": "google", "geoip.dat": "private"} {
+		// One entry of field 1 whose own field 1 is the list name — the shape of
+		// both real databases.
+		entry := append([]byte{0x0A, byte(len(name))}, name...)
+		dat := append([]byte{0x0A, byte(len(entry))}, entry...)
+		if err := os.WriteFile(filepath.Join(dir, file), dat, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	xraycfg.SetGeoAssets(dir)
+	t.Cleanup(func() { xraycfg.SetGeoAssets("") })
 }
 
 func newTemplateApp(t *testing.T) *App {

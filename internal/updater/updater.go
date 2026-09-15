@@ -561,7 +561,7 @@ func InstallPanelGeo(ctx context.Context, geoip, geosite Asset, dir string) erro
 // Both are fetched, verified and staged before either goes in, and each file
 // they replace is moved aside until both are in, so a failure at any point puts
 // the previous pair back — the same files, so the same bytes — instead of a
-// half-updated mix that dropUnknownGeo then has to paper over. It is a rollback
+// half-updated mix whose lists no longer match the rules naming them. It is a rollback
 // on error, not a transaction: a power loss between the two renames still
 // leaves a mixed pair.
 // allowUnpublished lets a database without a checksum file (a 404) through.

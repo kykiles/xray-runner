@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -23,13 +25,133 @@ func writeDat(t *testing.T, path string, names ...string) {
 	}
 }
 
-func TestDropUnknownGeo(t *testing.T) {
+// setGeo points the check at databases carrying category-ads and google
+// (geosite) and private (geoip), for one test.
+func setGeo(t *testing.T) {
+	t.Helper()
 	dir := t.TempDir()
 	writeDat(t, filepath.Join(dir, "geosite.dat"), "category-ads", "google")
-	writeDat(t, filepath.Join(dir, "geoip.dat"), "ru")
+	writeDat(t, filepath.Join(dir, "geoip.dat"), "private")
 	SetGeoAssets(dir)
 	t.Cleanup(func() { SetGeoAssets("") })
+}
 
+// E03: a list the databases lack is named in the error, by the database it is
+// missing from. The lists that are there are not blamed.
+func TestCheckGeoListsNamesMissingLists(t *testing.T) {
+	setGeo(t)
+	cases := []struct {
+		name    string
+		cfg     string
+		want    []string
+		notWant []string
+	}{
+		{
+			name: "geosite in a block rule",
+			cfg:  `{"routing": {"rules": [{"domain": ["geosite:torrent"], "outboundTag": "block"}]}}`,
+			want: []string{"geosite.dat", "torrent"},
+		},
+		{
+			name:    "geoip in a direct rule",
+			cfg:     `{"routing": {"rules": [{"ip": ["geoip:private", "geoip:nowhere"], "outboundTag": "direct"}]}}`,
+			want:    []string{"geoip.dat", "nowhere"},
+			notWant: []string{"private", "geosite.dat"},
+		},
+		{
+			name:    "mixed known and unknown matchers",
+			cfg:     `{"routing": {"rules": [{"domain": ["geosite:google@ads", "geosite:nosuchlist", "example.com"], "outboundTag": "direct"}]}}`,
+			want:    []string{"nosuchlist"},
+			notWant: []string{"google", "example.com"},
+		},
+		{
+			name:    "dns server",
+			cfg:     `{"dns": {"servers": ["https://8.8.8.8/dns-query", {"address": "https://8.8.8.8/dns-query", "domains": ["geosite:twitch-ads", "geosite:google"]}]}}`,
+			want:    []string{"geosite.dat", "twitch-ads"},
+			notWant: []string{"google"},
+		},
+		{
+			// xray reads a rule's string list from a comma-separated string too.
+			name:    "comma-separated string",
+			cfg:     `{"routing": {"rules": [{"domain": "geosite:google,geosite:torrent", "outboundTag": "block"}]}}`,
+			want:    []string{"torrent"},
+			notWant: []string{"google"},
+		},
+		{
+			name: "both databases",
+			cfg:  `{"routing": {"rules": [{"domain": ["geosite:torrent"], "outboundTag": "block"}, {"ip": ["geoip:nowhere"], "outboundTag": "direct"}]}}`,
+			want: []string{"geosite.dat", "torrent", "geoip.dat", "nowhere"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := CheckGeoLists(json.RawMessage(c.cfg))
+			if err == nil {
+				t.Fatalf("CheckGeoLists() = nil, want an error naming %v", c.want)
+			}
+			for _, w := range c.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error %q does not name %q", err, w)
+				}
+			}
+			for _, w := range c.notWant {
+				if strings.Contains(err.Error(), w) {
+					t.Errorf("error %q names %q, which is not missing", err, w)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckGeoListsPassesKnownLists(t *testing.T) {
+	setGeo(t)
+	cfg := `{
+		"dns": {"servers": ["1.1.1.1", {"address": "77.88.8.8", "domains": ["GeoSite:Google", "domain:ru"]}]},
+		"routing": {"rules": [
+			{"domain": ["geosite:category-ads@ads", "ext:custom.dat:x", "example.com"], "outboundTag": "block"},
+			{"ip": ["geoip:private", "10.0.0.0/8"], "outboundTag": "direct"},
+			{"port": "443", "outboundTag": "proxy"}
+		]}
+	}`
+	if err := CheckGeoLists(json.RawMessage(cfg)); err != nil {
+		t.Fatalf("CheckGeoLists() = %v, want nil: every list is in the databases", err)
+	}
+}
+
+// A rule the check cannot read is not waved through as checked; xray would not
+// accept it either.
+func TestCheckGeoListsRejectsUnreadableRules(t *testing.T) {
+	setGeo(t)
+	for _, cfg := range []string{
+		`{"routing": {"rules": 5}}`,
+		`{"routing": {"rules": [{"domain": 5, "outboundTag": "block"}]}}`,
+		`{"dns": {"servers": [{"address": "1.1.1.1", "domains": 5}]}}`,
+	} {
+		if err := CheckGeoLists(json.RawMessage(cfg)); err == nil {
+			t.Errorf("CheckGeoLists(%s) = nil, want an error", cfg)
+		}
+	}
+}
+
+// Without readable databases there is nothing to check against: a core found on
+// PATH keeps its databases elsewhere, and xray itself judges the config then.
+func TestCheckGeoListsWithoutAssets(t *testing.T) {
+	cfg := json.RawMessage(`{"routing": {"rules": [{"domain": ["geosite:torrent"], "outboundTag": "block"}]}}`)
+	SetGeoAssets("")
+	if err := CheckGeoLists(cfg); err != nil {
+		t.Errorf("no databases set: CheckGeoLists() = %v, want nil", err)
+	}
+	SetGeoAssets(t.TempDir())
+	t.Cleanup(func() { SetGeoAssets("") })
+	if err := CheckGeoLists(cfg); err != nil {
+		t.Errorf("databases unreadable: CheckGeoLists() = %v, want nil", err)
+	}
+}
+
+// E03: the merge leaves the panel's routing and dns exactly as they came. The
+// old filter dropped unknown lists, and a rule stripped of one matcher could
+// cover more traffic than the panel meant it to.
+func TestMergeProfileKeepsRoutingAndDNS(t *testing.T) {
+	setGeo(t)
 	raw := `{
 		"outbounds": [{"tag": "proxy", "protocol": "freedom"}],
 		"dns": {"servers": [
@@ -40,7 +162,7 @@ func TestDropUnknownGeo(t *testing.T) {
 		"routing": {"rules": [
 			{"domain": ["geosite:torrent"], "outboundTag": "block"},
 			{"domain": ["geosite:google@ads", "geosite:nosuchlist", "example.com"], "outboundTag": "direct"},
-			{"ip": ["geoip:ru", "geoip:nowhere"], "outboundTag": "direct"},
+			{"ip": ["geoip:private", "geoip:nowhere"], "outboundTag": "direct"},
 			{"port": "443", "outboundTag": "proxy"}
 		]}
 	}`
@@ -50,73 +172,19 @@ func TestDropUnknownGeo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var got struct {
-		Routing struct {
-			Rules []map[string]any `json:"rules"`
-		} `json:"routing"`
-		DNS struct {
-			Servers []any `json:"servers"`
-		} `json:"dns"`
-	}
-	if err := json.Unmarshal(merged, &got); err != nil {
+	var in, out map[string]any
+	if err := json.Unmarshal([]byte(raw), &in); err != nil {
 		t.Fatal(err)
 	}
-
-	// The plain address stays, the mixed server keeps its known list, and the
-	// server left without domains goes — it would have answered every query.
-	if len(got.DNS.Servers) != 2 {
-		t.Fatalf("dns servers = %d, want 2: %v", len(got.DNS.Servers), got.DNS.Servers)
-	}
-	if srv, ok := got.DNS.Servers[1].(map[string]any); !ok || !equalList(srv["domains"], "geosite:google") {
-		t.Errorf("dns server = %v", got.DNS.Servers[1])
-	}
-
-	// The torrent-only rule loses its last matcher and goes with it; a rule left
-	// with no matcher at all would match everything.
-	if len(got.Routing.Rules) != 3 {
-		t.Fatalf("rules = %d, want 3: %v", len(got.Routing.Rules), got.Routing.Rules)
-	}
-	if d := got.Routing.Rules[0]["domain"]; !equalList(d, "geosite:google@ads", "example.com") {
-		t.Errorf("domain = %v", d)
-	}
-	if ip := got.Routing.Rules[1]["ip"]; !equalList(ip, "geoip:ru") {
-		t.Errorf("ip = %v", ip)
-	}
-	if got.Routing.Rules[2]["port"] != "443" {
-		t.Errorf("untouched rule lost: %v", got.Routing.Rules[2])
-	}
-}
-
-// Without the databases nothing is filtered: guessing would strip valid rules.
-func TestDropUnknownGeoWithoutAssets(t *testing.T) {
-	SetGeoAssets("")
-	raw := `{"outbounds":[{"tag":"proxy"}],"routing":{"rules":[{"domain":["geosite:torrent"],"outboundTag":"block"}]}}`
-	merged, err := MergeProfile(json.RawMessage(raw), nil, "warning")
-	if err != nil {
+	if err := json.Unmarshal(merged, &out); err != nil {
 		t.Fatal(err)
 	}
-	var got struct {
-		Routing struct {
-			Rules []map[string]any `json:"rules"`
-		} `json:"routing"`
-	}
-	if err := json.Unmarshal(merged, &got); err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Routing.Rules) != 1 {
-		t.Fatalf("rules = %d, want 1", len(got.Routing.Rules))
-	}
-}
-
-func equalList(v any, want ...string) bool {
-	list, ok := v.([]any)
-	if !ok || len(list) != len(want) {
-		return false
-	}
-	for i, w := range want {
-		if list[i] != w {
-			return false
+	for _, k := range []string{"routing", "dns"} {
+		if !reflect.DeepEqual(in[k], out[k]) {
+			t.Errorf("%s changed by the merge:\n got %v\nwant %v", k, out[k], in[k])
 		}
 	}
-	return true
+	if err := CheckGeoLists(merged); err == nil || !strings.Contains(err.Error(), "torrent") {
+		t.Errorf("CheckGeoLists(merged) = %v, want the missing lists named", err)
+	}
 }
