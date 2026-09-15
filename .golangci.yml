@@ -8,16 +8,16 @@ linters-settings:
       - (net.Conn).Close
   gosec:
     # These rules don't fit this project's threat model:
-    #   G204 — every exec.Command uses an explicit argument vector (never a
-    #          shell string), so command injection is structurally impossible.
     #   G304 — file paths come from local config or our own directories, never
     #          from remote/web input.
     #   G302 — the xray core and its assets must be executable/readable.
     #   G115 — the only sites are the geo-database walk (geodata.go), where every
     #          int↔uint64 conversion is guarded by a preceding length check
     #          (size > uint64(len(data)-n)), so it cannot overflow.
+    # G204 stays on: not every command is an argument vector — the Windows route
+    # code hands PowerShell a -Command script (system.powershell). A site gosec
+    # flags carries its own //nolint with the reason.
     excludes:
-      - G204
       - G302
       - G304
       - G115

@@ -86,6 +86,10 @@ func DirectBind() (xraycfg.DirectBind, error) {
 // powershell runs a script and reads its output as UTF-8. Without the encoding
 // line the pipe carries the console OEM codepage (cp866 on a Russian Windows),
 // so any localized adapter alias arrives as mojibake.
+//
+// The script is shell text, not an argument vector, and gosec does not see into
+// it: every value spliced in must be a constant, an integer or a netip value,
+// never a string read from outside.
 func powershell(script string) ([]byte, error) {
 	return ipCmd.run("powershell", "-NoProfile", "-NonInteractive", "-Command",
 		"[Console]::OutputEncoding=[Text.Encoding]::UTF8; "+script)

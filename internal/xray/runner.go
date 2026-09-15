@@ -115,7 +115,7 @@ func (r *Runner) Start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.cmd = exec.CommandContext(ctx, r.binary, "run", "-c", r.config)
+	r.cmd = exec.CommandContext(ctx, r.binary, "run", "-c", r.config) //nolint:gosec // G204: argument vector, no shell: the core on our own config
 
 	stdout, err := r.cmd.StdoutPipe()
 	if err != nil {
@@ -182,7 +182,7 @@ func (r *Runner) takeRestart() bool {
 // TestConfig validates the config without starting the tunnel. A failure here
 // is a deterministic config error and must not be retried.
 func (r *Runner) TestConfig(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, r.binary, "run", "-test", "-c", r.config).CombinedOutput()
+	out, err := exec.CommandContext(ctx, r.binary, "run", "-test", "-c", r.config).CombinedOutput() //nolint:gosec // G204: argument vector, no shell: the core on our own config
 	if err != nil {
 		return fmt.Errorf("config test failed: %w\n%s", err, lastLines(out, 10))
 	}
