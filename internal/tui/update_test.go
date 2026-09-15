@@ -60,6 +60,17 @@ func TestUpdate_RefreshesGeoAfterInstall(t *testing.T) {
 	}
 }
 
+// A refused geo install — a checksum that failed, say — must not mark the
+// release installed, or the next → would skip it as up to date.
+func TestUpdate_GeoInstallErrorLeavesReleaseUnmarked(t *testing.T) {
+	const tag = "v-geo-install-error"
+	m := updateModel{dir: t.TempDir(), kind: kindGeo, geoTag: tag, stage: updWorking}
+	m.Update(installedMsg{err: os.ErrPermission})
+	if updater.GeoInstalled(tag) {
+		t.Error("a failed geo install marked the release installed")
+	}
+}
+
 func TestUpdateView_MarksInstalledRelease(t *testing.T) {
 	m := updateModel{
 		installed: "26.6.27",

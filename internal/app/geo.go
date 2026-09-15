@@ -58,14 +58,13 @@ func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
 		slog.Warn("гео-базы подписки не установлены", "error", err)
 		return
 	}
-	// Same installer as the update screen: staged download, atomic swap, owner
-	// restored after sudo. The panel publishes no checksums, so it warns and
-	// installs — a stale or odd geo database cannot execute anything.
+	// Same staged install as the update screen, held to the panel's checksum
+	// policy: https only, and a checksum enforced when the panel publishes one.
 	geoip := updater.Asset{Name: "geoip.dat", URL: src.IPURL}
 	geosite := updater.Asset{Name: "geosite.dat", URL: src.SiteURL}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if err := updater.InstallGeo(ctx, geoip, geosite, panelDir); err != nil {
+	if err := updater.InstallPanelGeo(ctx, geoip, geosite, panelDir); err != nil {
 		slog.Warn("гео-базы подписки не скачаны, остаюсь на базах ядра", "error", err)
 		return
 	}

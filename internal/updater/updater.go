@@ -139,12 +139,27 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 func newGet(ctx context.Context, rawURL string) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, redactURL(err)
 	}
 	if err := checkTransport(req.URL); err != nil {
 		return nil, err
 	}
 	return req, nil
+}
+
+// redactURL cuts the URL inside a *url.Error — net/http's error text carries the
+// whole of it, and a panel's database URL may hold a token — down to scheme and
+// host. Op and Err stay, so errors.Is still sees a timeout or a cancellation.
+func redactURL(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	origin := "<ссылка скрыта>"
+	if u, perr := url.Parse(ue.URL); perr == nil && u.Scheme != "" {
+		origin = u.Scheme + "://" + u.Host
+	}
+	return &url.Error{Op: ue.Op, URL: origin, Err: ue.Err}
 }
 
 // SameVersion reports whether a release tag names the installed core version.
@@ -275,6 +290,10 @@ func getJSON(ctx context.Context, url string, dst any) error {
 	return nil
 }
 
+// errNotPublished marks a checksum file the server answered 404 for: it says
+// there is none, as opposed to failing to say anything.
+var errNotPublished = errors.New("контрольная сумма не опубликована")
+
 // httpGetBytes fetches a small text asset (a checksum file) in full.
 func httpGetBytes(ctx context.Context, url string) ([]byte, error) {
 	req, err := newGet(ctx, url)
@@ -283,9 +302,12 @@ func httpGetBytes(ctx context.Context, url string) ([]byte, error) {
 	}
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactURL(err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("HTTP %s: %w", resp.Status, errNotPublished)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %s", resp.Status)
 	}
@@ -308,7 +330,7 @@ func parseDgst(body []byte) (string, error) {
 	for _, line := range strings.Split(string(body), "\n") {
 		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "SHA2-256="); ok {
 			if h := strings.TrimSpace(rest); h != "" {
-				return h, nil
+				return sha256Hex(h)
 			}
 		}
 	}
@@ -321,7 +343,16 @@ func parseSha256Sum(body []byte) (string, error) {
 	if len(fields) == 0 {
 		return "", fmt.Errorf("пустой файл контрольной суммы")
 	}
-	return fields[0], nil
+	return sha256Hex(fields[0])
+}
+
+// sha256Hex passes h through when it is a SHA-256 in hex, so a checksum file
+// holding something else fails as malformed rather than as a mismatch.
+func sha256Hex(h string) (string, error) {
+	if b, err := hex.DecodeString(h); err != nil || len(b) != sha256.Size {
+		return "", fmt.Errorf("в файле контрольной суммы не SHA-256")
+	}
+	return h, nil
 }
 
 // verifySHA256 fails unless what r holds hashes to want; name only labels the
@@ -422,7 +453,7 @@ func download(ctx context.Context, a Asset, dir string) (*os.File, error) {
 	}
 	resp, err := downloadClient().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("скачивание %s: %w", a.Name, err)
+		return nil, fmt.Errorf("скачивание %s: %w", a.Name, redactURL(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -502,14 +533,36 @@ func InstallCore(ctx context.Context, a Asset, xrayPath string) error {
 	return nil
 }
 
-// InstallGeo downloads both databases into dir, replacing the existing files.
+// InstallReleaseGeo installs the pair from the geo release. The release
+// publishes a .sha256sum next to each database, so one that is missing,
+// unreadable or wrong stops the install and the previous pair stays (E02).
+func InstallReleaseGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
+	return installGeo(ctx, geoip, geosite, dir, false)
+}
+
+// InstallPanelGeo installs the pair a subscription's panel points at, over https
+// only. Panels often publish no checksum, so a .sha256sum the panel answers 404
+// for counts as none and the pair goes in authenticated by TLS alone — nothing
+// vouches for its content independently. A checksum the panel does serve, and
+// any other failure to fetch one, is enforced like the release's (E02).
+func InstallPanelGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
+	for _, a := range []Asset{geoip, geosite} {
+		if u, err := url.Parse(a.URL); err != nil || u.Scheme != "https" {
+			return fmt.Errorf("гео-база панели %s не по https — отказ", a.Name)
+		}
+	}
+	return installGeo(ctx, geoip, geosite, dir, true)
+}
+
+// installGeo downloads both databases into dir, replacing the existing files.
 // Both are fetched, verified and staged before either goes in, and each file
 // they replace is moved aside until both are in, so a failure at any point puts
 // the previous pair back — the same files, so the same bytes — instead of a
 // half-updated mix that dropUnknownGeo then has to paper over. It is a rollback
 // on error, not a transaction: a power loss between the two renames still
 // leaves a mixed pair.
-func InstallGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
+// allowUnpublished lets a database without a checksum file (a 404) through.
+func installGeo(ctx context.Context, geoip, geosite Asset, dir string, allowUnpublished bool) error {
 	// The installed names are fixed: a name from the release JSON or the
 	// subscription never picks the file that gets replaced.
 	if geoip.Name != geoipName || geosite.Name != geositeName {
@@ -530,13 +583,18 @@ func InstallGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
 			return err
 		}
 		staged = append(staged, f)
-		// The geo repo publishes a "<name>.sha256sum" next to each database.
-		// Verify when present; if the checksum can't be fetched, warn and install
-		// anyway — a stale geo database is far less dangerous than a swapped core.
-		if want, cerr := fetchChecksum(ctx, a.URL+".sha256sum", parseSha256Sum); cerr != nil {
-			slog.Warn("контрольная сумма гео-базы недоступна, устанавливаю без проверки", "asset", a.Name, "error", cerr)
-		} else if verr := verifySHA256(f, a.Name, want); verr != nil {
-			return verr
+		// Both sources put a "<name>.sha256sum" next to each database: the
+		// release always, a panel when it chooses to.
+		want, cerr := fetchChecksum(ctx, a.URL+".sha256sum", parseSha256Sum)
+		switch {
+		case cerr == nil:
+			if verr := verifySHA256(f, a.Name, want); verr != nil {
+				return verr
+			}
+		case allowUnpublished && errors.Is(cerr, errNotPublished):
+			slog.Warn("панель не публикует контрольную сумму гео-базы, она поставлена без независимой проверки", "asset", a.Name)
+		default:
+			return fmt.Errorf("контрольная сумма %s: %w", a.Name, cerr)
 		}
 		if err := seal(f, a.Name, 0o644); err != nil {
 			return err
@@ -565,7 +623,7 @@ func InstallGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
 	return nil
 }
 
-// installed is one database InstallGeo has put in: where it went, and where the
+// installed is one database installGeo has put in: where it went, and where the
 // file it replaced was moved aside ("" when there was none).
 type installed struct{ dst, backup string }
 

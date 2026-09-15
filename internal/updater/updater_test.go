@@ -153,23 +153,33 @@ func tags(rels []Release) []string {
 }
 
 func TestParseDgst(t *testing.T) {
-	body := "MD5= ee4e2ff7\nSHA1= b55b06e7\nSHA2-256= 23cd9af937744d97\nSHA2-512= e8bc40a0\n"
+	const sum = "23cd9af937744d9723cd9af937744d9723cd9af937744d9723cd9af937744d97"
+	body := "MD5= ee4e2ff7\nSHA1= b55b06e7\nSHA2-256= " + sum + "\nSHA2-512= e8bc40a0\n"
 	got, err := parseDgst([]byte(body))
-	if err != nil || got != "23cd9af937744d97" {
+	if err != nil || got != sum {
 		t.Fatalf("parseDgst = %q, %v; want the SHA2-256 hex", got, err)
 	}
 	if _, err := parseDgst([]byte("MD5= abc\nSHA1= def\n")); err == nil {
 		t.Error("parseDgst without a SHA2-256 line should error")
 	}
+	// A SHA2-256 line holding no SHA-256 is malformed, not a hash to compare.
+	if _, err := parseDgst([]byte("SHA2-256= 23cd9af937744d97\n")); err == nil {
+		t.Error("parseDgst accepted a SHA2-256 value too short for a SHA-256")
+	}
 }
 
 func TestParseSha256Sum(t *testing.T) {
-	got, err := parseSha256Sum([]byte("07afbae04519eb7c  geoip.dat\n"))
-	if err != nil || got != "07afbae04519eb7c" {
+	const sum = "07afbae04519eb7c07afbae04519eb7c07afbae04519eb7c07afbae04519eb7c"
+	got, err := parseSha256Sum([]byte(sum + "  geoip.dat\n"))
+	if err != nil || got != sum {
 		t.Fatalf("parseSha256Sum = %q, %v", got, err)
 	}
 	if _, err := parseSha256Sum([]byte("   \n")); err == nil {
 		t.Error("parseSha256Sum on empty content should error")
+	}
+	// A page served in place of the file is malformed, not a hash to compare.
+	if _, err := parseSha256Sum([]byte("<!doctype html>\n<html>")); err == nil {
+		t.Error("parseSha256Sum accepted content that is no SHA-256")
 	}
 }
 

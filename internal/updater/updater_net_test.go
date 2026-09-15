@@ -115,8 +115,8 @@ func TestInstallGeoKeepsOldPairWhenSecondFails(t *testing.T) {
 
 	geoip := Asset{Name: geoipName, URL: srv.URL + "/" + geoipName}
 	geosite := Asset{Name: geositeName, URL: srv.URL + "/" + geositeName}
-	if err := InstallGeo(context.Background(), geoip, geosite, dir); err == nil {
-		t.Fatal("InstallGeo with a mismatched checksum returned no error")
+	if err := InstallReleaseGeo(context.Background(), geoip, geosite, dir); err == nil {
+		t.Fatal("InstallReleaseGeo with a mismatched checksum returned no error")
 	}
 
 	for _, name := range []string{geoipName, geositeName} {
@@ -202,8 +202,8 @@ func TestInstallGeo_RefusesForeignNames(t *testing.T) {
 			a := refusingServer(t)
 			geoip := Asset{Name: names[0], URL: a.URL}
 			geosite := Asset{Name: names[1], URL: a.URL}
-			if err := InstallGeo(context.Background(), geoip, geosite, dir); err == nil {
-				t.Fatalf("InstallGeo accepted the names %q", names)
+			if err := InstallReleaseGeo(context.Background(), geoip, geosite, dir); err == nil {
+				t.Fatalf("InstallReleaseGeo accepted the names %q", names)
 			}
 			assertDirHolds(t, dir)
 			assertDirHolds(t, root, "geo")
@@ -217,8 +217,8 @@ func TestInstallGeo_SecondDownloadFailsKeepsOldPair(t *testing.T) {
 	geoip, geosite := geoServer(t, newGeo, nil)
 	geosite.URL += ".missing"
 
-	if err := InstallGeo(context.Background(), geoip, geosite, dir); err == nil {
-		t.Fatal("InstallGeo with a failed second download returned no error")
+	if err := InstallReleaseGeo(context.Background(), geoip, geosite, dir); err == nil {
+		t.Fatal("InstallReleaseGeo with a failed second download returned no error")
 	}
 	assertOldGeo(t, dir)
 	assertDirHolds(t, dir, geoipName, geositeName)
@@ -234,8 +234,8 @@ func TestInstallGeo_SecondCommitFailsRestoresFirst(t *testing.T) {
 		return to == sitePath && !strings.HasSuffix(from, ".old") // the publish, not a restore
 	})
 
-	if err := InstallGeo(context.Background(), geoip, geosite, dir); err == nil {
-		t.Fatal("InstallGeo with a failed second commit returned no error")
+	if err := InstallReleaseGeo(context.Background(), geoip, geosite, dir); err == nil {
+		t.Fatal("InstallReleaseGeo with a failed second commit returned no error")
 	}
 	assertOldGeo(t, dir)
 	assertDirHolds(t, dir, geoipName, geositeName)
@@ -253,9 +253,9 @@ func TestInstallGeo_FailedRollbackKeepsBackup(t *testing.T) {
 		return (to == sitePath && !restore) || (to == ipPath && restore)
 	})
 
-	err := InstallGeo(context.Background(), geoip, geosite, dir)
+	err := InstallReleaseGeo(context.Background(), geoip, geosite, dir)
 	if err == nil {
-		t.Fatal("InstallGeo with a failed commit and rollback returned no error")
+		t.Fatal("InstallReleaseGeo with a failed commit and rollback returned no error")
 	}
 	if got := readFile(t, ipPath); got != newGeo(geoipName) {
 		t.Fatalf("%s = %q, want the new copy the failed rollback left", geoipName, got)
@@ -302,10 +302,10 @@ func TestInstallGeo_ConcurrentInstallsKeepTheirStaging(t *testing.T) {
 	fastIP, fastSite := geoServer(t, newGeo, nil)
 
 	slowErr := make(chan error, 1)
-	go func() { slowErr <- InstallGeo(context.Background(), slowIP, slowSite, dir) }()
+	go func() { slowErr <- InstallReleaseGeo(context.Background(), slowIP, slowSite, dir) }()
 	<-arrived // the slow install has geoip staged and is fetching geosite
 
-	if err := InstallGeo(context.Background(), fastIP, fastSite, dir); err != nil {
+	if err := InstallReleaseGeo(context.Background(), fastIP, fastSite, dir); err != nil {
 		t.Fatalf("second install: %v", err)
 	}
 	unblock()

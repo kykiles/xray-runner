@@ -90,8 +90,8 @@ func TestInstallGeo_PlantedLinksUntouched(t *testing.T) {
 			writeOldGeo(t, dir)
 
 			geoip, geosite := geoServer(t, newGeo, nil)
-			if err := InstallGeo(context.Background(), geoip, geosite, dir); err != nil {
-				t.Fatalf("InstallGeo: %v", err)
+			if err := InstallReleaseGeo(context.Background(), geoip, geosite, dir); err != nil {
+				t.Fatalf("InstallReleaseGeo: %v", err)
 			}
 
 			assertVictim(t, victim)

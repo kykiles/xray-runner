@@ -298,7 +298,7 @@ func (m updateModel) installCore(a updater.Asset) tea.Cmd {
 func (m updateModel) installGeo(geoip, geosite updater.Asset) tea.Cmd {
 	ctx, dir := m.ctx, m.dir
 	return func() tea.Msg {
-		return installedMsg{err: updater.InstallGeo(ctx, geoip, geosite, dir)}
+		return installedMsg{err: updater.InstallReleaseGeo(ctx, geoip, geosite, dir)}
 	}
 }
 
