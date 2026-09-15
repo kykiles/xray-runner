@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -27,19 +28,21 @@ import (
 const panelGeoTTL = 24 * time.Hour
 
 // useGeoAssets installs the databases the subscription points at (when it points
-// at any) and makes both xray and the routing filter read from wherever the
-// active ones are. A failed download stops nothing by itself: the core's own
-// databases stay in use, and a config naming lists they lack is refused when it
-// is built (xraycfg.CheckGeoLists).
+// at any) and makes both xray and the geo check read from wherever the active
+// ones are. A failed update stops nothing by itself: the panel's previous pair
+// stays in use — the core's own databases when there is none — the session's
+// screen says so (noteGeoDatabases), and a config naming lists they lack is
+// refused when it is built, the failed update named (xraycfg.CheckGeoLists).
 func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
-	dir := filepath.Dir(a.binary)
+	dir, note := filepath.Dir(a.binary), ""
 	defer func() {
 		// XRAY_LOCATION_ASSET is inherited by every xray we spawn — the session,
 		// the config test and each benchmark probe — so one env var covers them all.
 		if err := os.Setenv("XRAY_LOCATION_ASSET", dir); err != nil {
 			slog.Warn("не удалось указать xray каталог гео-баз", "dir", dir, "error", err)
 		}
-		xraycfg.SetGeoAssets(dir)
+		xraycfg.SetGeoAssets(dir, note)
+		a.geoNote = note
 		slog.Info("geo databases in use", "dir", dir)
 	}()
 
@@ -51,12 +54,13 @@ func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
 	pruneGeoDirs(root, subURL)
 
 	panelDir := filepath.Join(root, subKey(subURL))
-	if geoFresh(panelDir) {
+	if age, ok := geoAge(panelDir); ok && age <= panelGeoTTL {
 		dir = panelDir
 		return
 	}
 	if err := os.MkdirAll(panelDir, 0o750); err != nil {
 		slog.Warn("гео-базы подписки не установлены", "error", err)
+		note = fmt.Sprintf("Гео-базы панели не скачаны (%v) — используются базы ядра.", err)
 		return
 	}
 	// Same staged install as the update screen, held to the panel's checksum
@@ -66,23 +70,50 @@ func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	if err := updater.InstallPanelGeo(ctx, geoip, geosite, panelDir); err != nil {
+		// E03: a failed install puts the previous pair back as it was, age
+		// included, so the next open tries again. The panel's rules were written
+		// against that pair, so it serves until then; whether it still carries
+		// every list they name is the geo check's call.
+		if _, ok := geoAge(panelDir); ok {
+			slog.Warn("гео-базы подписки не обновились, работаю на прошлой копии", "error", err)
+			note = fmt.Sprintf("Гео-базы панели не обновились (%v) — используется прошлая скачанная копия.", err)
+			dir = panelDir
+			return
+		}
 		slog.Warn("гео-базы подписки не скачаны, остаюсь на базах ядра", "error", err)
+		note = fmt.Sprintf("Гео-базы панели не скачаны (%v) — используются базы ядра.", err)
 		return
 	}
 	slog.Info("panel geo databases installed", "dir", panelDir)
 	dir = panelDir
 }
 
-// geoFresh reports whether both databases are already installed and young enough
-// to reuse.
-func geoFresh(dir string) bool {
+// noteGeoDatabases puts the note of a failed panel geo update on the screen the
+// session opens with: its rules are checked against databases other than the
+// panel's current ones. Called at bring-up, before any screen is up.
+func (a *App) noteGeoDatabases() {
+	if a.geoNote == "" {
+		return
+	}
+	note := a.geoNote
+	if a.pendingNote != "" {
+		note = a.pendingNote + " " + note
+	}
+	a.pendingNote = note
+}
+
+// geoAge reports whether both databases are installed in dir, and how old the
+// older of the two is.
+func geoAge(dir string) (time.Duration, bool) {
+	var age time.Duration
 	for _, name := range []string{"geoip.dat", "geosite.dat"} {
 		fi, err := os.Stat(filepath.Join(dir, name))
-		if err != nil || fi.Size() == 0 || time.Since(fi.ModTime()) > panelGeoTTL {
-			return false
+		if err != nil || fi.Size() == 0 {
+			return 0, false
 		}
+		age = max(age, time.Since(fi.ModTime()))
 	}
-	return true
+	return age, true
 }
 
 // pruneGeoDirs removes the database directories of subscriptions that are gone.

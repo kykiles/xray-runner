@@ -20,20 +20,24 @@ import (
 	"sync"
 )
 
-// geoAssets is the directory holding geosite.dat/geoip.dat, as passed to
-// SetGeoAssets. Empty (the default, and what tests get) checks nothing.
+// geoAssets is the directory holding geosite.dat/geoip.dat and why it is the
+// one in use, as passed to SetGeoAssets. Empty (the default, and what tests get)
+// checks nothing.
 var geoAssets struct {
 	sync.Mutex
 	dir   string
+	why   string
 	lists func() map[string]bool
 }
 
-// SetGeoAssets points the geo check at xray's database directory. Reading the
-// files is deferred to the first check that needs them.
-func SetGeoAssets(dir string) {
+// SetGeoAssets points the geo check at xray's database directory. why, when set,
+// says why those databases are in use — an update of the panel's has failed —
+// and a refusal carries it after the missing lists. Reading the files is
+// deferred to the first check that needs them.
+func SetGeoAssets(dir, why string) {
 	geoAssets.Lock()
 	defer geoAssets.Unlock()
-	geoAssets.dir = dir
+	geoAssets.dir, geoAssets.why = dir, why
 	if dir == "" {
 		geoAssets.lists = nil
 		return
@@ -57,16 +61,16 @@ func SetGeoAssets(dir string) {
 }
 
 // knownGeoLists returns the list names both .dat files carry, keyed as
-// "GEOSITE:CN" / "GEOIP:RU", and the directory they were read from. A nil map
-// means nothing to check against.
-func knownGeoLists() (map[string]bool, string) {
+// "GEOSITE:CN" / "GEOIP:RU", the directory they were read from and why it is in
+// use. A nil map means nothing to check against.
+func knownGeoLists() (map[string]bool, string, string) {
 	geoAssets.Lock()
-	f, dir := geoAssets.lists, geoAssets.dir
+	f, dir, why := geoAssets.lists, geoAssets.dir, geoAssets.why
 	geoAssets.Unlock()
 	if f == nil {
-		return nil, dir
+		return nil, dir, why
 	}
-	return f(), dir
+	return f(), dir, why
 }
 
 // geoListNames reads the list names from a .dat file. Both databases are a
@@ -125,7 +129,7 @@ func varint(b []byte, i int) (uint64, int) {
 // there is nothing to check against and nil is returned; the core's own start
 // has the last word then, as it has on everything else.
 func CheckGeoLists(raw json.RawMessage) error {
-	known, dir := knownGeoLists()
+	known, dir, why := knownGeoLists()
 	if len(known) == 0 {
 		return nil
 	}
@@ -182,7 +186,11 @@ func CheckGeoLists(raw json.RawMessage) error {
 			parts = append(parts, db+" — "+strings.Join(missing[db], ", "))
 		}
 	}
-	return fmt.Errorf("в гео-базах (%s) нет списков, на которые ссылаются правила маршрутизации или DNS: %s", dir, strings.Join(parts, "; "))
+	err := fmt.Errorf("в гео-базах (%s) нет списков, на которые ссылаются правила маршрутизации или DNS: %s", dir, strings.Join(parts, "; "))
+	if why != "" {
+		err = fmt.Errorf("%w. %s", err, why)
+	}
+	return err
 }
 
 // stringList reads a rule's list field, which xray takes either as an array or

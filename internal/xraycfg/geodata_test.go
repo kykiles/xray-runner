@@ -32,8 +32,8 @@ func setGeo(t *testing.T) {
 	dir := t.TempDir()
 	writeDat(t, filepath.Join(dir, "geosite.dat"), "category-ads", "google")
 	writeDat(t, filepath.Join(dir, "geoip.dat"), "private")
-	SetGeoAssets(dir)
-	t.Cleanup(func() { SetGeoAssets("") })
+	SetGeoAssets(dir, "")
+	t.Cleanup(func() { SetGeoAssets("", "") })
 }
 
 // E03: a list the databases lack is named in the error, by the database it is
@@ -136,14 +136,34 @@ func TestCheckGeoListsRejectsUnreadableRules(t *testing.T) {
 // PATH keeps its databases elsewhere, and xray itself judges the config then.
 func TestCheckGeoListsWithoutAssets(t *testing.T) {
 	cfg := json.RawMessage(`{"routing": {"rules": [{"domain": ["geosite:torrent"], "outboundTag": "block"}]}}`)
-	SetGeoAssets("")
+	SetGeoAssets("", "")
 	if err := CheckGeoLists(cfg); err != nil {
 		t.Errorf("no databases set: CheckGeoLists() = %v, want nil", err)
 	}
-	SetGeoAssets(t.TempDir())
-	t.Cleanup(func() { SetGeoAssets("") })
+	SetGeoAssets(t.TempDir(), "")
+	t.Cleanup(func() { SetGeoAssets("", "") })
 	if err := CheckGeoLists(cfg); err != nil {
 		t.Errorf("databases unreadable: CheckGeoLists() = %v, want nil", err)
+	}
+}
+
+// E03: the databases in use are not always the ones the rules were written
+// against — an update of the panel's has failed. A refusal says so next to the
+// missing lists, so the reason reaches the screen and not only the log; a
+// config that passes is not refused over it.
+func TestCheckGeoListsSaysWhyTheseDatabases(t *testing.T) {
+	dir := t.TempDir()
+	writeDat(t, filepath.Join(dir, "geosite.dat"), "google")
+	writeDat(t, filepath.Join(dir, "geoip.dat"), "private")
+	SetGeoAssets(dir, "Гео-базы панели не обновились: сеть недоступна.")
+	t.Cleanup(func() { SetGeoAssets("", "") })
+
+	err := CheckGeoLists(json.RawMessage(`{"routing": {"rules": [{"domain": ["geosite:torrent"], "outboundTag": "block"}]}}`))
+	if err == nil || !strings.Contains(err.Error(), "torrent") || !strings.Contains(err.Error(), "не обновились") {
+		t.Errorf("CheckGeoLists() = %v, want the missing list and why these databases", err)
+	}
+	if err := CheckGeoLists(json.RawMessage(`{"routing": {"rules": [{"domain": ["geosite:google"], "outboundTag": "direct"}]}}`)); err != nil {
+		t.Errorf("known list: CheckGeoLists() = %v, want nil", err)
 	}
 }
 

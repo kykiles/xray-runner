@@ -243,8 +243,8 @@ func useSyntheticGeo(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	xraycfg.SetGeoAssets(dir)
-	t.Cleanup(func() { xraycfg.SetGeoAssets("") })
+	xraycfg.SetGeoAssets(dir, "")
+	t.Cleanup(func() { xraycfg.SetGeoAssets("", "") })
 }
 
 func newTemplateApp(t *testing.T) *App {

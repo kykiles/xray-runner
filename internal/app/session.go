@@ -58,6 +58,9 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	// A11: before our core listens, a system proxy on a dead local port can only
 	// be a leftover — say so before the session snapshots it as the original.
 	a.warnDeadLoopbackProxy()
+	// E03: the rules were checked against databases that are not the panel's
+	// current ones — the screen says why.
+	a.noteGeoDatabases()
 	if err := a.writeConfigJSON(cfgJSON); err != nil {
 		return tui.StatusQuit, err
 	}
