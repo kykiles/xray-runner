@@ -131,6 +131,9 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 	if err := checkTransport(req.URL); err != nil {
 		return fmt.Errorf("перенаправление: %w", err)
 	}
+	// Go sets the Referer of a redirect to the previous URL, path and query
+	// included — a panel's token with them. Nothing the updater fetches needs it.
+	req.Header.Del("Referer")
 	return nil
 }
 
