@@ -151,10 +151,12 @@ func TestProxyHealth_InboundFailureIsNotHealthy(t *testing.T) {
 }
 
 // A working path: the inbound tunnels to a TLS target (CONNECT) and the target
-// answers 204.
+// answers 204. It answers after a pause: Windows reads its clock at the timer
+// tick, and a loopback round trip fits inside one — measured as 0.
 func TestProxyHealth_AnswerThroughTheInboundIsHealthy(t *testing.T) {
 	fastHealth(t)
 	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(20 * time.Millisecond)
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer target.Close()
