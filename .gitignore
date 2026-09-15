@@ -47,6 +47,7 @@ PROJECT.md
 .opencode
 .claude
 .superpowers/
+.agents/
 
 # Working specs, audit notes, ADRs and agent config — kept locally, not published
 docs/
