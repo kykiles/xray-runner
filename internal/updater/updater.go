@@ -15,7 +15,9 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -70,14 +72,79 @@ type Release struct {
 // rename is os.Rename, swapped by tests to fail one step of an install.
 var rename = os.Rename
 
-func httpClient() *http.Client { return &http.Client{Timeout: 60 * time.Second} }
+// testTransport, when a test sets it, stands in for both clients' transports.
+var testTransport http.RoundTripper
+
+func httpClient() *http.Client {
+	return &http.Client{Timeout: 60 * time.Second, CheckRedirect: checkRedirect, Transport: testTransport}
+}
 
 // downloadClient is for the release artifacts. http.Client.Timeout covers
 // reading the body, and the core zip is ~20 MB, so a flat 60s cap would kill
 // the download on a slow link. Only the wait for response headers is bounded
 // here; the transfer itself is bounded by the caller's context.
 func downloadClient() *http.Client {
-	return &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 30 * time.Second}}
+	var tr http.RoundTripper = &http.Transport{ResponseHeaderTimeout: 30 * time.Second}
+	if testTransport != nil {
+		tr = testTransport
+	}
+	return &http.Client{Transport: tr, CheckRedirect: checkRedirect}
+}
+
+// maxRedirects is the hop cap of Go's default redirect policy, which supplying
+// CheckRedirect replaces, cap included.
+const maxRedirects = 10
+
+// isLoopbackHost reports whether a URL host never leaves the machine.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// checkTransport is the rule for the first URL of every request and for each
+// redirect target: https anywhere, plain http only to loopback — tests, or a
+// mirror on the same machine. What the updater fetches gets installed, and the
+// core runs as root, so it only comes over a transport that authenticates the
+// server (E02).
+func checkTransport(u *url.URL) error {
+	switch {
+	case u.Scheme == "https":
+		return nil
+	case u.Scheme == "http" && isLoopbackHost(u.Hostname()):
+		return nil
+	}
+	return fmt.Errorf("%s://%s отклонён — обновления скачиваются только по https", u.Scheme, u.Host)
+}
+
+// checkRedirect holds every redirect target to checkTransport, refuses any step
+// down from https — to loopback http too — and restores the hop cap.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("больше %d перенаправлений — отказ", maxRedirects)
+	}
+	if via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme != "https" {
+		return fmt.Errorf("перенаправление с https на %s://%s — отказ", req.URL.Scheme, req.URL.Host)
+	}
+	if err := checkTransport(req.URL); err != nil {
+		return fmt.Errorf("перенаправление: %w", err)
+	}
+	return nil
+}
+
+// newGet builds a GET for rawURL once rawURL passes checkTransport, so the first
+// request is held to the same rule as the redirects after it.
+func newGet(ctx context.Context, rawURL string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkTransport(req.URL); err != nil {
+		return nil, err
+	}
+	return req, nil
 }
 
 // SameVersion reports whether a release tag names the installed core version.
@@ -189,7 +256,7 @@ func FetchLatestGeoRelease(ctx context.Context) (Release, error) {
 }
 
 func getJSON(ctx context.Context, url string, dst any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := newGet(ctx, url)
 	if err != nil {
 		return err
 	}
@@ -210,7 +277,7 @@ func getJSON(ctx context.Context, url string, dst any) error {
 
 // httpGetBytes fetches a small text asset (a checksum file) in full.
 func httpGetBytes(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := newGet(ctx, url)
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +416,7 @@ func discard(f *os.File) {
 // going to be installed in — and returns it open at its start. The caller owns
 // the file and must discard it unless it publishes it.
 func download(ctx context.Context, a Asset, dir string) (*os.File, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.URL, nil)
+	req, err := newGet(ctx, a.URL)
 	if err != nil {
 		return nil, err
 	}
