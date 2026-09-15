@@ -16,8 +16,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"xray-runner/internal/bundle"
 )
 
 type Runner struct {
@@ -52,15 +50,6 @@ func FindBinary() (string, error) {
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, nil
 		}
-	}
-
-	// A single-executable build carries the core inside itself; it is unpacked
-	// into the user's cache on first run. A core placed next to the app still
-	// wins, so a newer one can be dropped in by hand.
-	if dir, err := bundle.Dir(); err != nil {
-		slog.Warn("встроенное ядро не распаковано", "error", err)
-	} else if dir != "" {
-		return filepath.Join(dir, name), nil
 	}
 
 	if p, err := exec.LookPath(name); err == nil {

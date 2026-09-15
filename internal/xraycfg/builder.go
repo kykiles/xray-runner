@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 )
 
-// defaultTemplate is the template shipped inside the binary, so a release can be
-// a single executable. A template.json next to the app still wins over it.
+// defaultTemplate is the template shipped inside the binary, so a release needs
+// no template.json of its own. A template.json next to the app still wins over it.
 //
 //go:embed template.json
 var defaultTemplate []byte

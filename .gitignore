@@ -73,8 +73,6 @@ configs/
 # Geo databases installed per subscription
 geo/
 
-# Assets staged into the single-file build
-internal/bundle/assets/
 .task/
 
 # Local issue tracker (specs and tickets for the agent skills)

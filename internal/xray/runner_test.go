@@ -355,6 +355,35 @@ func TestFindBinaryNotFound(t *testing.T) {
 	}
 }
 
+// The core next to the app wins over one on PATH; PATH is only the fallback.
+func TestFindBinaryOrder(t *testing.T) {
+	name := "xray"
+	if runtime.GOOS == "windows" {
+		name = "xray.exe"
+	}
+	appDir, pathDir := t.TempDir(), t.TempDir()
+	onPath := filepath.Join(pathDir, name)
+	if err := os.WriteFile(onPath, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origExe := osExecutable
+	defer func() { osExecutable = origExe }()
+	osExecutable = func() (string, error) { return filepath.Join(appDir, "test.exe"), nil }
+	t.Setenv("PATH", pathDir)
+
+	if got, err := FindBinary(); err != nil || got != onPath {
+		t.Fatalf("nothing next to the app: FindBinary() = %q, %v; want %q from PATH", got, err, onPath)
+	}
+
+	beside := filepath.Join(appDir, name)
+	if err := os.WriteFile(beside, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := FindBinary(); err != nil || got != beside {
+		t.Fatalf("core next to the app: FindBinary() = %q, %v; want %q", got, err, beside)
+	}
+}
+
 // buildChattyXray builds a mock that floods stdout and stderr, then exits.
 func buildChattyXray(t *testing.T, lines int) string {
 	t.Helper()
