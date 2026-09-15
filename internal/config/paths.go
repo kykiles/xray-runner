@@ -38,9 +38,15 @@ func DataDir() string {
 		return ""
 	}
 	// Created by root under sudo, and the next run without sudo would not be
-	// able to read its own subscriptions. Best-effort, as everywhere else.
+	// able to read its own subscriptions, so it is handed back to the invoking
+	// user. Best-effort, as everywhere else — except that a symlink at the final
+	// component is not followed but refused: the handback would otherwise give
+	// the user whatever the link pointed at, a path to root. A tampered data dir
+	// is dropped rather than written to.
 	if uid, gid, ok := sudoOwner(); ok {
-		_ = os.Chown(dir, uid, gid)
+		if err := chownDirToSudoUser(dir, uid, gid); err != nil {
+			return ""
+		}
 	}
 	return dir
 }
