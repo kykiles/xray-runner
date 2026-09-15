@@ -10,8 +10,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -64,6 +66,9 @@ type Release struct {
 	Prerelease bool    `json:"prerelease"`
 	Assets     []Asset `json:"assets"`
 }
+
+// rename is os.Rename, swapped by tests to fail one step of an install.
+var rename = os.Rename
 
 func httpClient() *http.Client { return &http.Client{Timeout: 60 * time.Second} }
 
@@ -252,20 +257,16 @@ func parseSha256Sum(body []byte) (string, error) {
 	return fields[0], nil
 }
 
-// verifySHA256 fails unless the file at path hashes to want.
-func verifySHA256(path, want string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+// verifySHA256 fails unless what r holds hashes to want; name only labels the
+// error.
+func verifySHA256(r io.Reader, name, want string) error {
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, r); err != nil {
 		return err
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if !strings.EqualFold(got, want) {
-		return fmt.Errorf("контрольная сумма %s не совпала: ожидалось %s, получено %s", filepath.Base(path), want, got)
+		return fmt.Errorf("контрольная сумма %s не совпала: ожидалось %s, получено %s", name, want, got)
 	}
 	return nil
 }
@@ -326,24 +327,43 @@ func GeoAssets(r Release) (geoip, geosite Asset, ok bool) {
 	return geoip, geosite, geoip.URL != "" && geosite.URL != ""
 }
 
-// download streams the asset to a freshly created temp file and returns its
-// path. The caller owns the file and must remove it.
-func download(ctx context.Context, a Asset) (string, error) {
+// stage creates the file that will become dir/name: a new temp with a unique
+// name in dir itself, so publishing it is a rename within one filesystem, never
+// a copy. The O_EXCL create means a link planted under any name in dir is never
+// opened, and two installs never share a temp (E02).
+func stage(dir, name string) (*os.File, error) {
+	f, err := os.CreateTemp(dir, "."+name+"-*.tmp")
+	if err != nil {
+		return nil, fmt.Errorf("временный файл для %s: %w", name, err)
+	}
+	return f, nil
+}
+
+// discard closes and removes a staged file that is not going to be published.
+func discard(f *os.File) {
+	_ = f.Close() // already closed once sealed
+	_ = os.Remove(f.Name())
+}
+
+// download streams the asset into a staged file in dir — the directory it is
+// going to be installed in — and returns it open at its start. The caller owns
+// the file and must discard it unless it publishes it.
+func download(ctx context.Context, a Asset, dir string) (*os.File, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.URL, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	resp, err := downloadClient().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("скачивание %s: %w", a.Name, err)
+		return nil, fmt.Errorf("скачивание %s: %w", a.Name, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("скачивание %s: %s", a.Name, resp.Status)
+		return nil, fmt.Errorf("скачивание %s: %s", a.Name, resp.Status)
 	}
-	tmp, err := os.CreateTemp("", "xray-update-*")
+	tmp, err := stage(dir, a.Name)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	// The release JSON states the exact asset size, so anything longer is a
 	// server we should not be streaming to disk. Read one byte past the limit to
@@ -354,35 +374,37 @@ func download(ctx context.Context, a Asset) (string, error) {
 	}
 	n, err := io.CopyN(tmp, resp.Body, limit+1)
 	if err != nil && err != io.EOF {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-		return "", fmt.Errorf("запись %s: %w", a.Name, err)
+		discard(tmp)
+		return nil, fmt.Errorf("запись %s: %w", a.Name, err)
 	}
 	if n > limit {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-		return "", fmt.Errorf("скачивание %s: размер превышает %d байт", a.Name, limit)
+		discard(tmp)
+		return nil, fmt.Errorf("скачивание %s: размер превышает %d байт", a.Name, limit)
 	}
-	// Flush to disk before anyone renames this file into place: verifySHA256
-	// reads back through the page cache and would not notice a half-written
-	// file that a crash later leaves on disk.
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-		return "", fmt.Errorf("запись %s: %w", a.Name, err)
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		discard(tmp)
+		return nil, fmt.Errorf("запись %s: %w", a.Name, err)
 	}
-	_ = tmp.Close()
-	return tmp.Name(), nil
+	return tmp, nil
 }
 
-// InstallCore downloads the core zip, extracts the xray binary and swaps it in
-// atomically, then fixes its mode/owner so it stays usable by the invoking user.
+// InstallCore downloads the core zip, extracts the xray binary into a staged
+// file next to xrayPath and renames it over the old core. Only the core's own
+// file name is accepted as xrayPath.
 func InstallCore(ctx context.Context, a Asset, xrayPath string) error {
-	zipPath, err := download(ctx, a)
+	binName := "xray"
+	if runtime.GOOS == "windows" {
+		binName = "xray.exe"
+	}
+	if filepath.Base(xrayPath) != binName {
+		return fmt.Errorf("ядро ставится только как %s, а не %s", binName, filepath.Base(xrayPath))
+	}
+	dir := filepath.Dir(xrayPath)
+	zf, err := download(ctx, a, dir)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(zipPath) }()
+	defer discard(zf)
 
 	// The core binary replaces our own; a corrupted or tampered download must
 	// never be installed, so a missing/invalid .dgst is a hard failure here.
@@ -390,132 +412,199 @@ func InstallCore(ctx context.Context, a Asset, xrayPath string) error {
 	if err != nil {
 		return fmt.Errorf("контрольная сумма ядра недоступна: %w", err)
 	}
-	if err := verifySHA256(zipPath, want); err != nil {
+	if err := verifySHA256(zf, a.Name, want); err != nil {
 		return err
 	}
 
-	binName := "xray"
-	if runtime.GOOS == "windows" {
-		binName = "xray.exe"
-	}
-	newPath := xrayPath + ".new"
-	if err := extractZipFile(zipPath, binName, newPath); err != nil {
+	bin, err := stage(dir, binName)
+	if err != nil {
 		return err
 	}
-	if err := os.Chmod(newPath, 0o755); err != nil {
-		_ = os.Remove(newPath)
+	if err := extractZipFile(zf, binName, bin); err != nil {
+		discard(bin)
 		return err
 	}
-	if err := swap(newPath, xrayPath); err != nil {
-		_ = os.Remove(newPath)
+	if err := seal(bin, binName, 0o755); err != nil {
+		discard(bin)
 		return err
 	}
-	return finalizeFile(xrayPath, 0o755)
+	if err := swap(bin.Name(), xrayPath); err != nil {
+		discard(bin)
+		return err
+	}
+	return nil
 }
 
 // InstallGeo downloads both databases into dir, replacing the existing files.
-// Both are fetched and verified before either is swapped in, and a replaced file
-// is kept until both are in, so a failure at any point leaves the previous pair
-// intact instead of a half-updated mix — a mismatched geoip/geosite is exactly
-// what dropUnknownGeo then has to paper over.
+// Both are fetched, verified and staged before either goes in, and each file
+// they replace is moved aside until both are in, so a failure at any point puts
+// the previous pair back — the same files, so the same bytes — instead of a
+// half-updated mix that dropUnknownGeo then has to paper over. It is a rollback
+// on error, not a transaction: a power loss between the two renames still
+// leaves a mixed pair.
 func InstallGeo(ctx context.Context, geoip, geosite Asset, dir string) error {
-	staged := make(map[string]string, 2) // dst -> staged .new path
-	cleanup := func() {
-		for _, newPath := range staged {
-			_ = os.Remove(newPath)
-		}
+	// The installed names are fixed: a name from the release JSON or the
+	// subscription never picks the file that gets replaced.
+	if geoip.Name != geoipName || geosite.Name != geositeName {
+		return fmt.Errorf("гео-базы ставятся только как %s и %s, а не %q и %q", geoipName, geositeName, geoip.Name, geosite.Name)
 	}
-	for _, a := range []Asset{geoip, geosite} {
-		src, err := download(ctx, a)
+	assets := []Asset{geoip, geosite}
+	staged := make([]*os.File, 0, len(assets))
+	defer func() {
+		for _, f := range staged {
+			if f != nil {
+				discard(f)
+			}
+		}
+	}()
+	for _, a := range assets {
+		f, err := download(ctx, a, dir)
 		if err != nil {
-			cleanup()
 			return err
 		}
+		staged = append(staged, f)
 		// The geo repo publishes a "<name>.sha256sum" next to each database.
 		// Verify when present; if the checksum can't be fetched, warn and install
 		// anyway — a stale geo database is far less dangerous than a swapped core.
 		if want, cerr := fetchChecksum(ctx, a.URL+".sha256sum", parseSha256Sum); cerr != nil {
 			slog.Warn("контрольная сумма гео-базы недоступна, устанавливаю без проверки", "asset", a.Name, "error", cerr)
-		} else if verr := verifySHA256(src, want); verr != nil {
-			_ = os.Remove(src)
-			cleanup()
+		} else if verr := verifySHA256(f, a.Name, want); verr != nil {
 			return verr
 		}
-		dst := filepath.Join(dir, a.Name)
-		newPath := dst + ".new"
-		if err := os.Rename(src, newPath); err != nil {
-			// os.Rename fails across filesystems; fall back to a copy.
-			if err := copyFile(src, newPath); err != nil {
-				_ = os.Remove(src)
-				cleanup()
-				return err
-			}
-			_ = os.Remove(src)
+		if err := seal(f, a.Name, 0o644); err != nil {
+			return err
 		}
-		staged[dst] = newPath
 	}
+
 	// The second rename can still fail — a database held open by a running core
-	// on Windows — so the file it replaces is moved aside rather than
-	// overwritten, and put back if anything goes wrong.
-	backups := make(map[string]string, 2) // dst -> .old path
-	restore := func() {
-		for dst, old := range backups {
-			_ = os.Rename(old, dst)
-		}
-	}
-	for dst, newPath := range staged {
-		old := dst + ".old"
-		if err := os.Rename(dst, old); err == nil {
-			backups[dst] = old
-		}
-		if err := swap(newPath, dst); err != nil {
-			restore()
-			cleanup()
+	// on Windows — so the first is put back if it does.
+	var done []installed
+	for i, a := range assets {
+		in, err := commit(staged[i].Name(), dir, a.Name)
+		if err != nil {
+			if rerr := rollback(done); rerr != nil {
+				err = errors.Join(err, rerr)
+			}
 			return err
 		}
-		if err := finalizeFile(dst, 0o644); err != nil {
-			restore()
-			cleanup()
-			return err
-		}
+		staged[i] = nil
+		done = append(done, in)
 	}
-	for _, old := range backups {
-		_ = os.Remove(old)
+	for _, in := range done {
+		if in.backup != "" {
+			_ = os.Remove(in.backup)
+		}
 	}
 	return nil
+}
+
+// installed is one database InstallGeo has put in: where it went, and where the
+// file it replaced was moved aside ("" when there was none).
+type installed struct{ dst, backup string }
+
+// commit renames the sealed temp src over dir/name. The file it replaces is
+// moved aside first and named in the result, so the caller can put it back; if
+// the rename itself fails, commit puts it back on the spot.
+func commit(src, dir, name string) (installed, error) {
+	dst := filepath.Join(dir, name)
+	backup, err := moveAside(dir, name)
+	if err != nil {
+		return installed{}, err
+	}
+	if err := swap(src, dst); err != nil {
+		if backup != "" {
+			if rerr := rename(backup, dst); rerr != nil {
+				return installed{}, errors.Join(err, keptAside(name, backup, rerr))
+			}
+		}
+		return installed{}, err
+	}
+	return installed{dst: dst, backup: backup}, nil
+}
+
+// moveAside renames dir/name to a new unique name next to it and returns that
+// name, or "" when there was nothing to move. The name is claimed by an O_EXCL
+// create and the rename replaces that placeholder, so no fixed name — and no
+// link planted under one — takes part.
+func moveAside(dir, name string) (string, error) {
+	ph, err := os.CreateTemp(dir, "."+name+"-*.old")
+	if err != nil {
+		return "", fmt.Errorf("резервная копия %s: %w", name, err)
+	}
+	_ = ph.Close()
+	if err := rename(filepath.Join(dir, name), ph.Name()); err != nil {
+		_ = os.Remove(ph.Name())
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("резервная копия %s: %w", name, err)
+	}
+	return ph.Name(), nil
+}
+
+// rollback puts back what the databases in done replaced: a moved-aside file
+// returns under its name, and a database that did not exist before is removed.
+// A file that cannot be put back stays where it was moved, and the error names
+// the place.
+func rollback(done []installed) error {
+	var errs []error
+	for _, in := range done {
+		if in.backup == "" {
+			if err := os.Remove(in.dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("откат %s: %w", filepath.Base(in.dst), err))
+			}
+			continue
+		}
+		if err := rename(in.backup, in.dst); err != nil {
+			errs = append(errs, keptAside(filepath.Base(in.dst), in.backup, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func keptAside(name, backup string, err error) error {
+	return fmt.Errorf("прежний %s не возвращён на место, он лежит в %s: %w", name, backup, err)
 }
 
 // swap atomically replaces dst with newPath. On Linux os.Rename overwrites an
 // existing dst in place, so no backup is left behind.
 func swap(newPath, dst string) error {
-	if err := os.Rename(newPath, dst); err != nil {
+	if err := rename(newPath, dst); err != nil {
 		return fmt.Errorf("замена %s: %w", filepath.Base(dst), err)
 	}
 	return nil
 }
 
-// finalizeFile fixes the installed file so it is usable by the person who ran
-// the tool: it sets mode, and when running as root under sudo it hands ownership
-// back to the invoking user (SUDO_UID/SUDO_GID). Without this a download made
-// under sudo lands as root-owned 0600 — unreadable to the user afterwards.
-func finalizeFile(path string, mode os.FileMode) error {
-	if err := os.Chmod(path, mode); err != nil {
-		return fmt.Errorf("права %s: %w", filepath.Base(path), err)
+// seal readies a staged file for its rename into place. It sets mode and, when
+// running as root under sudo, hands ownership back to the invoking user
+// (SUDO_UID/SUDO_GID) — without this a download made under sudo lands as
+// root-owned 0600, unreadable to the user afterwards. Both go through the
+// descriptor, so no link on disk can redirect them. Then it flushes the file,
+// which is about to be renamed over the one in use, and closes it.
+func seal(f *os.File, name string, mode os.FileMode) error {
+	if err := f.Chmod(mode); err != nil {
+		return fmt.Errorf("права %s: %w", name, err)
 	}
-	if err := system.RestoreSudoOwner(path); err != nil {
-		return fmt.Errorf("владелец %s: %w", filepath.Base(path), err)
+	if err := system.RestoreSudoOwnerFile(f); err != nil {
+		return fmt.Errorf("владелец %s: %w", name, err)
 	}
-	return nil
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("запись %s: %w", name, err)
+	}
+	return f.Close()
 }
 
-// extractZipFile writes the single entry whose base name is want from the zip at
-// zipPath to dst.
-func extractZipFile(zipPath, want, dst string) error {
-	r, err := zip.OpenReader(zipPath)
+// extractZipFile writes the single entry of the zip zf whose base name is want
+// to dst.
+func extractZipFile(zf *os.File, want string, dst io.Writer) error {
+	fi, err := zf.Stat()
 	if err != nil {
 		return fmt.Errorf("открытие архива: %w", err)
 	}
-	defer func() { _ = r.Close() }()
+	r, err := zip.NewReader(zf, fi.Size())
+	if err != nil {
+		return fmt.Errorf("открытие архива: %w", err)
+	}
 	for _, f := range r.File {
 		if filepath.Base(f.Name) != want {
 			continue
@@ -525,55 +614,23 @@ func extractZipFile(zipPath, want, dst string) error {
 	return fmt.Errorf("%s не найден в архиве", want)
 }
 
-// writeZipEntry writes one zip entry to dst. It is its own function so the
-// readers close on every path without a defer inside the search loop.
-func writeZipEntry(f *zip.File, dst string) error {
+// writeZipEntry writes one zip entry to out. It is its own function so the
+// reader closes on every path without a defer inside the search loop.
+func writeZipEntry(f *zip.File, out io.Writer) error {
 	rc, err := f.Open()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rc.Close() }()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
 	// Bound the write so a decompression bomb can't fill the disk (gosec
 	// G110). io.CopyN stops at the cap and reports io.EOF for a normal,
 	// smaller entry; hitting the cap exactly means the entry is oversized.
 	n, err := io.CopyN(out, rc, maxUncompressedSize)
 	if err != nil && err != io.EOF {
-		_ = out.Close()
-		_ = os.Remove(dst)
 		return err
 	}
 	if n == maxUncompressedSize {
-		_ = out.Close()
-		_ = os.Remove(dst)
 		return fmt.Errorf("%s в архиве превышает лимит %d байт", filepath.Base(f.Name), maxUncompressedSize)
 	}
-	// This file is renamed over the running core, so it must be on disk
-	// before the swap, not just in the page cache.
-	if err := out.Sync(); err != nil {
-		_ = out.Close()
-		_ = os.Remove(dst)
-		return err
-	}
-	return out.Close()
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
+	return nil
 }

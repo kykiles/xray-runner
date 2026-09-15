@@ -2,8 +2,10 @@ package updater
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -70,16 +72,21 @@ func TestExtractZipFile(t *testing.T) {
 		"xray":      "BINARY",
 	})
 
-	dst := filepath.Join(dir, "xray.new")
-	if err := extractZipFile(zipPath, "xray", dst); err != nil {
+	zf, err := os.Open(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zf.Close()
+
+	var got bytes.Buffer
+	if err := extractZipFile(zf, "xray", &got); err != nil {
 		t.Fatalf("extract: %v", err)
 	}
-	got, _ := os.ReadFile(dst)
-	if string(got) != "BINARY" {
-		t.Errorf("extracted %q, want BINARY", got)
+	if got.String() != "BINARY" {
+		t.Errorf("extracted %q, want BINARY", got.String())
 	}
 
-	if err := extractZipFile(zipPath, "missing", filepath.Join(dir, "x")); err == nil {
+	if err := extractZipFile(zf, "missing", io.Discard); err == nil {
 		t.Error("extract of a missing entry should error")
 	}
 }
@@ -167,19 +174,14 @@ func TestParseSha256Sum(t *testing.T) {
 }
 
 func TestVerifySHA256(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "blob")
 	data := []byte("hello xray")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	sum := sha256.Sum256(data)
 	want := hex.EncodeToString(sum[:])
 
-	if err := verifySHA256(path, want); err != nil {
+	if err := verifySHA256(bytes.NewReader(data), "blob", want); err != nil {
 		t.Errorf("verifySHA256 with the correct hash errored: %v", err)
 	}
-	if err := verifySHA256(path, "deadbeef"); err == nil {
+	if err := verifySHA256(bytes.NewReader(data), "blob", "deadbeef"); err == nil {
 		t.Error("verifySHA256 with a wrong hash should error")
 	}
 }
