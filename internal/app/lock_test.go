@@ -1,33 +1,66 @@
 package app
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+
+	"xray-runner/internal/config"
 )
 
-// newLockApp builds a minimal App wired for lock tests: its lock file lives in a
-// fresh temp dir and process liveness is stubbed so the outcome is deterministic.
-func newLockApp(t *testing.T, alive func(int) bool) *App {
-	t.Helper()
-	dir := t.TempDir()
+// newLockApp builds a minimal App wired for lock tests: its config and lock file
+// sit side by side in dir, as New puts them. Apps built on the same dir contend
+// for one lock, the way instances of one install do.
+func newLockApp(dir string) *App {
 	return &App{
 		tmpFile:  filepath.Join(dir, "xray_config.json"),
 		lockFile: filepath.Join(dir, "xray_config.json.lock"),
-		pidAlive: alive,
 	}
 }
 
-// writeInstanceFiles plants another instance's config and lock, the way a run
-// that holds the lock leaves them on disk.
-func writeInstanceFiles(t *testing.T, a *App, config, lock string) {
+// ownLock takes the lock in dir for the whole test. The cleanup lets it go
+// before the temp dir is removed — Windows will not delete an open file.
+func ownLock(t *testing.T, dir string) *App {
 	t.Helper()
-	if err := os.WriteFile(a.tmpFile, []byte(config), 0o600); err != nil {
-		t.Fatal(err)
+	a := newLockApp(dir)
+	if err := a.acquireLock(); err != nil {
+		t.Fatalf("acquireLock: %v", err)
 	}
-	if err := os.WriteFile(a.lockFile, []byte(lock), 0o600); err != nil {
+	t.Cleanup(a.cleanup)
+	return a
+}
+
+// assertLockTaken fails if another instance could take the lock at lockFile.
+func assertLockTaken(t *testing.T, lockFile string) {
+	t.Helper()
+	if lockProbe(t, lockFile).acquireLock() == nil {
+		t.Error("another instance got the lock while its owner still holds it")
+	}
+}
+
+// assertLockFree fails unless another instance can take the lock at lockFile.
+func assertLockFree(t *testing.T, lockFile string) {
+	t.Helper()
+	if err := lockProbe(t, lockFile).acquireLock(); err != nil {
+		t.Errorf("lock not free for the next instance: %v", err)
+	}
+}
+
+// lockProbe contends for lockFile with a config of its own elsewhere, so its
+// cleanup cannot take the config a test is watching.
+func lockProbe(t *testing.T, lockFile string) *App {
+	p := &App{tmpFile: filepath.Join(t.TempDir(), "probe.json"), lockFile: lockFile}
+	t.Cleanup(p.cleanup)
+	return p
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -44,113 +77,249 @@ func assertFileHolds(t *testing.T, path, want string) {
 	}
 }
 
+func ownPidLine() string { return strconv.Itoa(os.Getpid()) + "\n" }
+
 // A07: an instance refused by a live lock used to delete the config of the
 // instance that holds it — the core running there reads that file on its next
 // restart.
 func TestCleanup_RefusedInstanceKeepsOwnersFiles(t *testing.T) {
-	a := newLockApp(t, func(int) bool { return true })
-	writeInstanceFiles(t, a, "active-instance-config", "4242\n")
+	dir := t.TempDir()
+	owner := ownLock(t, dir)
+	writeFile(t, owner.tmpFile, "active-instance-config")
 
-	if err := a.acquireLock(); err == nil {
-		t.Fatal("acquireLock should refuse when the owner process is alive")
+	second := newLockApp(dir)
+	err := second.acquireLock()
+	if err == nil {
+		t.Fatal("acquireLock should refuse while another instance holds the lock")
 	}
-	a.cleanup()
+	if !strings.Contains(err.Error(), strconv.Itoa(os.Getpid())) {
+		t.Errorf("refusal %q does not name the owner's pid %d", err, os.Getpid())
+	}
+	second.cleanup()
 
-	assertFileHolds(t, a.tmpFile, "active-instance-config")
-	assertFileHolds(t, a.lockFile, "4242\n")
+	assertFileHolds(t, owner.tmpFile, "active-instance-config")
+	assertFileHolds(t, owner.lockFile, ownPidLine())
+	assertLockTaken(t, owner.lockFile)
 }
 
-func TestCleanup_OwnerRemovesItsConfigAndLock(t *testing.T) {
-	a := newLockApp(t, func(int) bool { return true })
+// The owner takes its config away and lets the lock go, but the lock file stays:
+// unlinking it would let the next instance lock a new file while a third still
+// has the old one open — two owners at once (11a). Until 11a, cleanup removed
+// the lock file too, and this test checked that.
+func TestCleanup_OwnerRemovesConfigKeepsLockFile(t *testing.T) {
+	a := newLockApp(t.TempDir())
 	if err := a.acquireLock(); err != nil {
 		t.Fatalf("acquireLock: %v", err)
 	}
-	if err := os.WriteFile(a.tmpFile, []byte("own-config"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, a.tmpFile, "own-config")
 
 	a.cleanup()
 
-	for _, p := range []string{a.tmpFile, a.lockFile} {
-		if _, err := os.Stat(p); !os.IsNotExist(err) {
-			t.Errorf("%s left behind after the owner's cleanup (stat err = %v)", filepath.Base(p), err)
-		}
+	if _, err := os.Stat(a.tmpFile); !os.IsNotExist(err) {
+		t.Errorf("config left behind after the owner's cleanup (stat err = %v)", err)
 	}
-	if a.lockHeld {
-		t.Error("lockHeld still set after the lock was released")
+	if _, err := os.Stat(a.lockFile); err != nil {
+		t.Errorf("lock file removed by cleanup: %v", err)
 	}
+	assertLockFree(t, a.lockFile)
 }
 
 // Once released, the lock belongs to whoever takes it next: a second cleanup
-// must not remove the next instance's lock and config.
+// must neither remove the next instance's config nor free its lock.
 func TestCleanup_TwiceLeavesNextOwnersFiles(t *testing.T) {
-	a := newLockApp(t, func(int) bool { return true })
+	dir := t.TempDir()
+	a := newLockApp(dir)
 	if err := a.acquireLock(); err != nil {
 		t.Fatalf("acquireLock: %v", err)
 	}
 	a.cleanup()
 
-	writeInstanceFiles(t, a, "next-instance-config", "4343\n")
+	next := ownLock(t, dir)
+	writeFile(t, next.tmpFile, "next-instance-config")
 	a.cleanup()
 
-	assertFileHolds(t, a.tmpFile, "next-instance-config")
-	assertFileHolds(t, a.lockFile, "4343\n")
+	assertFileHolds(t, next.tmpFile, "next-instance-config")
+	assertLockTaken(t, next.lockFile)
 }
 
 func TestAcquireLock_CleanDir(t *testing.T) {
-	a := newLockApp(t, func(int) bool { return true })
-	if err := a.acquireLock(); err != nil {
-		t.Fatalf("acquireLock on clean dir: %v", err)
-	}
-	if !a.lockHeld {
-		t.Error("lockHeld should be true after a successful acquire")
-	}
-	data, err := os.ReadFile(a.lockFile)
-	if err != nil {
-		t.Fatalf("read lock file: %v", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid != os.Getpid() {
-		t.Errorf("lock file should hold our pid %d, got %q", os.Getpid(), data)
+	a := ownLock(t, t.TempDir())
+	assertFileHolds(t, a.lockFile, ownPidLine())
+}
+
+// A lock file nobody holds is free, whatever it says: the pid in it only names
+// the owner, it is no evidence that the owner still runs. A killed run leaves
+// such a file, and since 11a so does every clean exit. Before, a live pid there
+// — a recycled one, any process at all — kept every later run out.
+func TestAcquireLock_UnheldFileIsFree(t *testing.T) {
+	for name, body := range map[string]string{
+		"empty":    "",
+		"garbage":  "not-a-pid\n",
+		"zero":     "0\n",
+		"live pid": strconv.Itoa(os.Getppid()) + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := newLockApp(t.TempDir())
+			writeFile(t, a.lockFile, body)
+			if err := a.acquireLock(); err != nil {
+				t.Fatalf("lock file %q with no holder should be taken, got: %v", body, err)
+			}
+			t.Cleanup(a.cleanup)
+			assertFileHolds(t, a.lockFile, ownPidLine())
+		})
 	}
 }
 
-func TestAcquireLock_StalePidReclaimed(t *testing.T) {
-	a := newLockApp(t, func(int) bool { return false }) // owner is dead
-	if err := os.WriteFile(a.lockFile, []byte("4242\n"), 0o600); err != nil {
+// Between taking the lock and writing its pid the owner leaves an empty file.
+// The pid protocol read that as stale and took the lock over from the running
+// owner, so two instances shared one config (A07).
+func TestAcquireLock_EmptyFileOfLiveOwnerRefused(t *testing.T) {
+	dir := t.TempDir()
+	owner := ownLock(t, dir)
+	writeFile(t, owner.tmpFile, "active-instance-config")
+	writeFile(t, owner.lockFile, "")
+
+	second := newLockApp(dir)
+	if err := second.acquireLock(); err == nil {
+		t.Fatal("an empty lock file was taken over while its owner holds the lock")
+	}
+	second.cleanup()
+
+	assertFileHolds(t, owner.tmpFile, "active-instance-config")
+}
+
+// A lock that cannot be taken for a reason other than a live owner is an error
+// of its own, and the refused run leaves whatever sits at those paths alone.
+func TestAcquireLock_OpenFailure(t *testing.T) {
+	a := newLockApp(t.TempDir())
+	if err := os.Mkdir(a.lockFile, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.acquireLock(); err != nil {
-		t.Fatalf("stale lock should be reclaimed, got: %v", err)
+	writeFile(t, a.tmpFile, "someone-elses-config")
+
+	err := a.acquireLock()
+	if err == nil {
+		t.Fatal("acquireLock should fail when the lock file cannot be opened")
 	}
-	if !a.lockHeld {
-		t.Error("lockHeld should be true after reclaiming a stale lock")
+	if strings.Contains(err.Error(), "другой экземпляр") {
+		t.Errorf("error %q blames another instance for a lock file it could not open", err)
+	}
+	a.cleanup()
+
+	assertFileHolds(t, a.tmpFile, "someone-elses-config")
+	if fi, err := os.Stat(a.lockFile); err != nil || !fi.IsDir() {
+		t.Errorf("the directory at the lock path was touched (stat err = %v)", err)
 	}
 }
 
-func TestAcquireLock_LivePidRefused(t *testing.T) {
-	a := newLockApp(t, func(int) bool { return true }) // owner is alive
-	if err := os.WriteFile(a.lockFile, []byte("4242\n"), 0o600); err != nil {
-		t.Fatal(err)
+// The pid is only a diagnostic, but a failed write of it is still an error, not
+// dropped on the floor, and the lock taken for it is let go.
+func TestAcquireLock_PidWriteFailureLetsGo(t *testing.T) {
+	orig := writeLockPID
+	writeLockPID = func(*os.File) error { return errors.New("disk full") }
+	t.Cleanup(func() { writeLockPID = orig })
+
+	a := newLockApp(t.TempDir())
+	writeFile(t, a.tmpFile, "someone-elses-config")
+	err := a.acquireLock()
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("acquireLock err = %v, want the pid write failure", err)
 	}
-	if err := a.acquireLock(); err == nil {
-		t.Fatal("acquireLock should refuse when the owner process is alive")
-	}
-	if a.lockHeld {
-		t.Error("lockHeld must stay false when the lock is refused")
-	}
+	a.cleanup()
+	writeLockPID = orig
+
+	assertFileHolds(t, a.tmpFile, "someone-elses-config")
+	assertLockFree(t, a.lockFile)
 }
 
-func TestAcquireLock_BrokenLockReclaimed(t *testing.T) {
-	// An empty or garbage lock file (e.g. a crash between create and write)
-	// carries no usable pid, so it must be treated as stale, not live.
-	for _, body := range []string{"", "not-a-pid\n", "0\n"} {
-		a := newLockApp(t, func(int) bool { return true })
-		if err := os.WriteFile(a.lockFile, []byte(body), 0o600); err != nil {
+// In TUN mode root opens the lock file in the user's own directory and writes
+// its pid into it. The pid protocol created the file exclusively and removed
+// whatever it found; since 11a the file is opened as it is, so a link planted at
+// the path must not carry root's truncate to another file, or its create to
+// another place.
+func TestAcquireLock_DoesNotWriteThroughLinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("link planting is the unix sudo scenario; symlinks on Windows are privileged, as for the log")
+	}
+	for name, plant := range map[string]func(target, link string) error{
+		"symlink":  os.Symlink,
+		"hardlink": os.Link,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			victim := filepath.Join(dir, "victim")
+			writeFile(t, victim, "must survive")
+			a := newLockApp(dir)
+			if err := plant(victim, a.lockFile); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.acquireLock(); err == nil {
+				a.cleanup()
+				t.Error("acquireLock took a lock file that is a link to another file")
+			}
+			assertFileHolds(t, victim, "must survive")
+		})
+	}
+	t.Run("dangling symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "created-by-root")
+		a := newLockApp(dir)
+		if err := os.Symlink(target, a.lockFile); err != nil {
 			t.Fatal(err)
 		}
-		if err := a.acquireLock(); err != nil {
-			t.Fatalf("broken lock %q should be reclaimed, got: %v", body, err)
+		if err := a.acquireLock(); err == nil {
+			a.cleanup()
+			t.Error("acquireLock took a lock file that is a dangling symlink")
 		}
+		if _, err := os.Lstat(target); !os.IsNotExist(err) {
+			t.Errorf("the open created the symlink's target (lstat err = %v)", err)
+		}
+	})
+}
+
+// Under sudo root creates the lock file, and since 11a it outlives the run:
+// left root-owned 0600, it would keep the next run without sudo from opening
+// it. The owner hands it back by descriptor, the way the log does.
+func TestAcquireLock_HandsLockFileBackToSudoUser(t *testing.T) {
+	orig := restoreLockOwner
+	var got []string
+	restoreLockOwner = func(f *os.File) error { got = append(got, f.Name()); return nil }
+	t.Cleanup(func() { restoreLockOwner = orig })
+
+	a := ownLock(t, t.TempDir())
+
+	if len(got) != 1 || got[0] != a.lockFile {
+		t.Errorf("lock file handed back as %q, want once as %q", got, a.lockFile)
+	}
+}
+
+// The lock guards the config next to it, so it is found together with the
+// config, not looked up on its own. A stray lock file in the working directory
+// used to put the lock there while the config went to the data dir — and a run
+// from any other directory then shared that config under a lock of its own.
+func TestNew_LockSitsNextToConfig(t *testing.T) {
+	for name, tc := range map[string]struct {
+		plant string
+		inCWD bool // the config, and so the lock, stay in the working directory
+	}{
+		"fresh":                {"", false},
+		"stray lock in cwd":    {"xray_config.json.lock", false},
+		"legacy config in cwd": {"xray_config.json", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateState(t)
+			if tc.plant != "" {
+				writeFile(t, tc.plant, "")
+			}
+
+			a := New(&config.Config{}, Options{})
+
+			if a.lockFile != a.tmpFile+".lock" {
+				t.Errorf("lock %q is not next to config %q", a.lockFile, a.tmpFile)
+			}
+			if got := a.tmpFile == "xray_config.json"; got != tc.inCWD {
+				t.Errorf("config at %q, want in working dir = %v", a.tmpFile, tc.inCWD)
+			}
+		})
 	}
 }

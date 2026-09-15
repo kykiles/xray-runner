@@ -50,7 +50,7 @@ type App struct {
 	proxy         *system.ProxyManager
 	tmpFile       string
 	lockFile      string
-	lockHeld      bool
+	lock          *os.File // lockFile, open while this instance holds its lock
 	binary        string
 	template      *xraycfg.XrayConfig
 	mode          string // active mode (proxy/tun); starts at cfg.Mode or the saved mode, toggled by the m key
@@ -98,9 +98,6 @@ type App struct {
 	// checkPrivileges reports whether tun mode may be used; a field so tests can
 	// exercise both outcomes without being root.
 	checkPrivileges func() error
-	// pidAlive reports whether the process that owns an existing lock file is
-	// still running; a field so tests can stub liveness deterministically.
-	pidAlive func(pid int) bool
 	// healthLoop overrides the mode's health loop; a field so tests can observe
 	// the loop's lifetime without a network or a running core.
 	healthLoop func(context.Context, sessionPorts)
@@ -126,16 +123,18 @@ type App struct {
 
 func New(cfg *config.Config, opts Options) *App {
 	proxy := system.New()
+	// Looked up once for both: the lock guards the config it sits next to, and a
+	// lookup of its own could put it anywhere a stray lock file lies.
+	tmpFile := config.Path("xray_config.json")
 	return &App{
 		cfg:               cfg,
 		opts:              opts,
 		mode:              cfg.Mode,
 		proxy:             proxy,
-		tmpFile:           config.Path("xray_config.json"),
-		lockFile:          config.Path("xray_config.json.lock"),
+		tmpFile:           tmpFile,
+		lockFile:          tmpFile + ".lock",
 		interfaces:        net.Interfaces,
 		checkPrivileges:   checkTunPrivileges,
-		pidAlive:          processAlive,
 		noTTY:             !term.IsTerminal(int(os.Stdin.Fd())),
 		disableKillSwitch: system.DisableKillSwitch,
 		restoreProxy:      proxy.Restore,
@@ -356,62 +355,84 @@ func (a *App) cleanup() {
 	a.releaseSession()
 	// The config is ours only while the lock is: an instance refused by a live
 	// lock shares the path with the owner, whose core reads that file on its next
-	// restart (A07). Config first, then the lock that guards it; the flag drops
-	// with the lock, so a second cleanup cannot take the next owner's files.
-	if a.lockHeld {
+	// restart (A07). Config first, then the lock that guards it; the handle goes
+	// with the lock, so a second cleanup cannot take the next owner's files. The
+	// lock file itself stays — see acquireLock.
+	if a.lock != nil {
 		_ = os.Remove(a.tmpFile)
-		_ = os.Remove(a.lockFile)
-		a.lockHeld = false
+		_ = unlock(a.lock)
+		_ = a.lock.Close()
+		a.lock = nil
 	}
 }
 
-// acquireLock creates an exclusive lock file next to the config so a second
-// instance from the same directory refuses to start (R-3). An existing lock left
-// behind by a crashed or killed run (a "stale" lock) is reclaimed automatically:
-// the file carries the owner's pid, and if that process is gone we remove the
-// lock and take it over instead of forcing the user to delete the file by hand.
+// errLockBusy is tryLock's answer when another open file holds the lock.
+var errLockBusy = errors.New("lock held by another open file")
+
+// acquireLock takes an OS lock on a file next to the config, so a second
+// instance working on the same config refuses to start (R-3, A07). The lock
+// lasts while this process keeps the file open and goes with the process,
+// however it ends: a killed run's lock frees itself, and nothing on disk has to
+// be judged stale. The pid written into the file only names the owner in a
+// refusal (11a).
+//
+// The file is never removed, not by cleanup either: an instance that opened it
+// just before the unlink would lock the removed file while the next run created
+// and locked a new one — two owners of one config.
 func (a *App) acquireLock() error {
-	err := a.createLock()
-	if err == nil {
-		return nil
+	f, err := openLockFile(a.lockFile)
+	if err != nil {
+		return fmt.Errorf("открытие lock-файла: %w", err)
 	}
-	if !os.IsExist(err) {
-		return fmt.Errorf("создание lock-файла: %w", err)
+	if err := tryLock(f); err != nil {
+		_ = f.Close()
+		if errors.Is(err, errLockBusy) {
+			return fmt.Errorf("lock-файл %s занят — уже запущен другой экземпляр%s", a.lockFile, lockOwner(a.lockFile))
+		}
+		return fmt.Errorf("захват lock-файла %s: %w", a.lockFile, err)
 	}
-
-	// A lock already exists. If its owner is still running, this is a genuine
-	// second instance and we refuse. Otherwise the lock is stale — reclaim it.
-	if pid, ok := readLockPID(a.lockFile); ok && a.pidAlive(pid) {
-		return fmt.Errorf("обнаружен lock-файл %s — уже запущен другой экземпляр (pid %d)", a.lockFile, pid)
+	// Under sudo root creates the file, and it outlives the run: root-owned
+	// 0600, it would keep the next run without sudo from opening it. By
+	// descriptor, so the handback cannot be redirected; best-effort, as for the
+	// log.
+	if err := restoreLockOwner(f); err != nil {
+		slog.Warn("could not hand the lock file back to the sudo user", "file", a.lockFile, "error", err)
 	}
-
-	slog.Warn("reclaiming stale lock file", "file", a.lockFile)
-	if err := os.Remove(a.lockFile); err != nil {
-		return fmt.Errorf("удаление протухшего lock-файла %s: %w", a.lockFile, err)
+	if err := writeLockPID(f); err != nil {
+		_ = unlock(f)
+		_ = f.Close()
+		return fmt.Errorf("запись pid в lock-файл %s: %w", a.lockFile, err)
 	}
-	if err := a.createLock(); err != nil {
-		return fmt.Errorf("создание lock-файла: %w", err)
-	}
+	a.lock = f
 	return nil
 }
 
-// createLock atomically creates the lock file and records our pid in it, so a
-// later run can tell a live owner from a stale one.
-func (a *App) createLock() error {
-	f, err := os.OpenFile(a.lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
+// writeLockPID puts our pid into the lock file in place of the last owner's; a
+// var so a test can fail it.
+var writeLockPID = func(f *os.File) error {
+	if err := f.Truncate(0); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
-	if err := f.Close(); err != nil {
-		return err
+	_, err := f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+	return err
+}
+
+// restoreLockOwner hands the lock file back to the sudo user; a var so a test
+// can see it called without being root.
+var restoreLockOwner = system.RestoreSudoOwnerFile
+
+// lockOwner names the lock's owner in a refusal: " (pid N)", or nothing when the
+// file names no running process — the owner writes its pid only after it has
+// taken the lock, so for a moment the file still holds the previous one.
+func lockOwner(path string) string {
+	if pid, ok := readLockPID(path); ok && processAlive(pid) {
+		return fmt.Sprintf(" (pid %d)", pid)
 	}
-	a.lockHeld = true
-	return nil
+	return ""
 }
 
 // readLockPID reads the owner pid from an existing lock file. A missing, empty
-// or unparseable file returns ok=false, which callers treat as a stale lock.
+// or unparseable file returns ok=false.
 func readLockPID(path string) (int, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
