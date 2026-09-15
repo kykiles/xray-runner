@@ -61,22 +61,26 @@ func (pm *ProxyManager) Enable(port int, saved ProxyState) error {
 	return nil
 }
 
-// forceDisable is the last resort after an exact restore failed: the settings
-// still name our port, so switch the proxy off and take our own server string
-// out. A value somebody else put there is left alone — we could not read it or
-// could not write it back, but it is not ours to erase.
+// forceDisable is the last resort after an exact restore failed: while the
+// settings still name our port, switch the proxy off and take our own server
+// string out. Ownership is checked before anything is written: a server somebody
+// else put there — or one that cannot be read — means the proxy, switch
+// included, is not ours to erase or turn off.
 func (pm *ProxyManager) forceDisable() {
 	if pm.ourServer == "" {
+		return
+	}
+	if v, err := regGetString("ProxyServer"); err != nil || v != pm.ourServer {
+		slog.Warn("точный откат прокси не удался, а в настройках уже не наш сервер — оставляю как есть", "key", regKey)
+		pm.ourServer = ""
 		return
 	}
 	if err := regSetInt("ProxyEnable", 0); err != nil {
 		slog.Error("аварийное выключение прокси не удалось", "key", regKey, "error", err)
 		return
 	}
-	if v, err := regGetString("ProxyServer"); err == nil && v == pm.ourServer {
-		if err := regDelete("ProxyServer"); err != nil {
-			slog.Warn("не удалось удалить наш ProxyServer", "key", regKey, "error", err)
-		}
+	if err := regDelete("ProxyServer"); err != nil {
+		slog.Warn("не удалось удалить наш ProxyServer", "key", regKey, "error", err)
 	}
 	pm.ourServer = ""
 	notifyWinINet()

@@ -189,8 +189,9 @@ func TestRestoreFallsBackToDisablingOurProxy(t *testing.T) {
 }
 
 // TestRestoreFallbackKeepsForeignProxyServer: the fallback is a blunt tool, so
-// it only removes the exact value we wrote. Anything else in ProxyServer was
-// put there by somebody else and is not ours to erase.
+// it only acts while the settings still name the exact server we wrote. A proxy
+// somebody else put there meanwhile — its server and its switch alike — is not
+// ours to erase or turn off.
 func TestRestoreFallbackKeepsForeignProxyServer(t *testing.T) {
 	f := useFakeRegistry(t, &fakeRegistry{ints: map[string]uint64{"ProxyEnable": 0}})
 
@@ -206,7 +207,7 @@ func TestRestoreFallbackKeepsForeignProxyServer(t *testing.T) {
 	if got := f.strs["ProxyServer"]; got != "proxy.corp.local:3128" {
 		t.Errorf("ProxyServer = %q, want the foreign value left alone", got)
 	}
-	if got := f.ints["ProxyEnable"]; got != 0 {
-		t.Errorf("ProxyEnable = %d, want 0", got)
+	if got := f.ints["ProxyEnable"]; got != 1 {
+		t.Errorf("ProxyEnable = %d, want 1: a foreign enabled proxy was switched off", got)
 	}
 }

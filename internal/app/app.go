@@ -86,6 +86,11 @@ type App struct {
 	// the machine's firewall or proxy settings.
 	disableKillSwitch func() error
 	restoreProxy      func(system.ProxyState) error
+	// readProxyState / proxyListening feed the check for a proxy left on a dead
+	// local port (warnDeadLoopbackProxy), fields so tests need neither the
+	// desktop's settings nor the network.
+	readProxyState func() system.ProxyState
+	proxyListening func(addr string) bool
 	// enableKillSwitch / enableTunRouting / disableTunRouting are the tun
 	// bring-up's system changes, fields for the same reason.
 	enableKillSwitch  func(system.KillSwitchConfig) error
@@ -137,6 +142,8 @@ func New(cfg *config.Config, opts Options) *App {
 		checkPrivileges:   checkTunPrivileges,
 		noTTY:             !term.IsTerminal(int(os.Stdin.Fd())),
 		disableKillSwitch: system.DisableKillSwitch,
+		readProxyState:    system.ReadProxyState,
+		proxyListening:    listeningAt,
 		restoreProxy:      proxy.Restore,
 		enableKillSwitch:  system.EnableKillSwitch,
 		enableTunRouting:  system.EnableTunRouting,
