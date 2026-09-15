@@ -150,7 +150,7 @@ func TestWriteConfigJSON_FailedStepKeepsOldFile(t *testing.T) {
 		// The handle stays open: cleanup has to close it before the temp goes,
 		// or Windows refuses to delete it.
 		{"close", func() { stagedClose = func(*os.File) error { return injected } }},
-		{"publish", func() { publishStaged = func(string, string) error { return injected } }},
+		{"publish", func() { publishStaged = func(*os.Root, string, string) error { return injected } }},
 	} {
 		t.Run(c.step, func(t *testing.T) {
 			w, s, cl, p := stagedWrite, stagedSync, stagedClose, publishStaged
