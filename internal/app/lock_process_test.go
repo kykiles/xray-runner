@@ -28,6 +28,10 @@ func TestLockHelperProcess(t *testing.T) {
 	if dir == "" {
 		t.Skip("helper process for the lock tests")
 	}
+	// The contender's runtime dir is the parent's concern no more than its own:
+	// a process of its own, it would take the machine's (an elevated run's is the
+	// system temp) and be refused by that, not by the lock.
+	isolateRuntime(t)
 	a := newLockApp(dir)
 	in := bufio.NewReader(os.Stdin)
 	fmt.Println("ready")

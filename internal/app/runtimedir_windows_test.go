@@ -3,6 +3,7 @@
 package app
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -137,8 +138,13 @@ func TestCreateProtectedDir(t *testing.T) {
 }
 
 // The base an elevated run takes must pass on a stock system, or TUN would
-// never start.
+// never start. This checks the machine, not the code — TestCheckTrustedSD has
+// the stock descriptor — so it runs on request: CI images are not stock (GitHub's
+// grants Users full control of the system temp, runner-images#1704).
 func TestCheckTrustedDirs_SystemTemp(t *testing.T) {
+	if os.Getenv("XRAY_RUNNER_MACHINE_CHECKS") != "1" {
+		t.Skip("checks this machine's system temp; set XRAY_RUNNER_MACHINE_CHECKS=1 to run")
+	}
 	win, err := windows.GetSystemWindowsDirectory()
 	if err != nil {
 		t.Fatal(err)
