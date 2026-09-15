@@ -98,7 +98,7 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 		// X-1: validate the config up front; a test failure is a deterministic
 		// error and must not be retried.
 		if err := a.runner.TestConfig(sessCtx); err != nil {
-			return fmt.Errorf("проверка конфигурации xray не прошла: %w", err)
+			return fmt.Errorf("проверка конфигурации xray не прошла: %w", explainInsecureRefusal(err))
 		}
 		// A tun session is set up around every core, not once: each core brings
 		// up its own interface, and the routes on the last one went with it (C01).
@@ -425,9 +425,36 @@ func (a *App) buildSessionConfig(t *target) (json.RawMessage, sessionPorts, erro
 	return bound, ports, nil
 }
 
-// buildModeConfig picks the config source for the target: a profile as-is, a
-// single server under its profile's routing, or template.json.
+// buildModeConfig is the config a session with this target runs and its preview
+// shows. The local TLS policy is applied to it once, here, whichever source it
+// came from (A01): a profile or a preserved outbound brings tlsSettings of its
+// own, and only the finished config holds all of them.
 func (a *App) buildModeConfig(t *target) (json.RawMessage, sessionPorts, error) {
+	raw, ports, err := a.buildModeSource(t)
+	if err != nil {
+		return nil, sessionPorts{}, err
+	}
+	if raw, err = xraycfg.ApplySecurityPolicy(raw, a.cfg.AllowInsecure); err != nil {
+		return nil, sessionPorts{}, fmt.Errorf("политика TLS (ALLOW_INSECURE): %w", err)
+	}
+	return raw, ports, nil
+}
+
+// explainInsecureRefusal says what to do about a core that refused a config
+// over allowInsecure. xray 26.7.28 refuses the setting outright, so
+// ALLOW_INSECURE=true meets it with a server that asks for it; the core's words
+// name the replacement settings, but the tool does not fill them in — a
+// certificate seen over an untrusted network is no pin.
+func explainInsecureRefusal(err error) error {
+	if err == nil || !strings.Contains(err.Error(), "allowInsecure") {
+		return err
+	}
+	return fmt.Errorf("ядро не поддерживает allowInsecure (отключение проверки сертификата): нужен сервер с действительным сертификатом либо доверенный pin (pinnedPeerCertSha256), заданный вами; %w", err)
+}
+
+// buildModeSource picks the config source for the target: a profile as-is, a
+// single server under its profile's routing, or template.json.
+func (a *App) buildModeSource(t *target) (json.RawMessage, sessionPorts, error) {
 	inbounds := a.template.Inbounds
 	if a.tunMode() {
 		// A10: the probe goes through a loopback inbound of its own rather than

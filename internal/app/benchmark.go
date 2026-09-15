@@ -250,6 +250,13 @@ func (pb *ProxyBenchmarker) measureProfileEntry(ctx context.Context, p subscript
 // runAndMeasure starts xray on the given config and times a single request
 // through its http inbound.
 func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, ports portPair, dir string) subscription.BenchmarkResult {
+	// A01: whichever builder above produced the config, the core gets it only
+	// after the same TLS policy as the session's.
+	cfgJSON, err := xraycfg.ApplySecurityPolicy(cfgJSON, pb.allowInsecure)
+	if err != nil {
+		return subscription.BenchmarkResult{Error: fmt.Errorf("политика TLS (ALLOW_INSECURE): %w", err)}
+	}
+
 	tmpFile := filepath.Join(dir, fmt.Sprintf("xray-bench-%d-%d.json", ports.socks, ports.http))
 	// H-2: bench configs carry the same secrets as the main config; keep them
 	// 0600 inside a private 0700 dir instead of world-readable /tmp.
@@ -277,7 +284,7 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 			testCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			if err := runner.TestConfig(testCtx); err != nil {
-				return subscription.BenchmarkResult{Error: fmt.Errorf("%w: %w", subscription.ErrConfigRejected, err)}
+				return subscription.BenchmarkResult{Error: fmt.Errorf("%w: %w", subscription.ErrConfigRejected, explainInsecureRefusal(err))}
 			}
 		}
 		return subscription.BenchmarkResult{Error: fmt.Errorf("%w: порт %d так и не открылся", subscription.ErrCoreNotReady, ports.http)}

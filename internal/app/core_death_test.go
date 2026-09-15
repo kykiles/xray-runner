@@ -20,8 +20,10 @@ import (
 	"xray-runner/internal/system"
 )
 
-// buildSessionXray builds a mock core that passes "run -test" and, when run for
-// real, either dies half a second in (MOCK_XRAY_DIE=1) or stays up.
+// buildSessionXray builds a mock core that passes "run -test" — or refuses it in
+// the words of MOCK_XRAY_REFUSE — and, when run for real, copies its config to
+// MOCK_XRAY_RECORD if set, then either dies half a second in (MOCK_XRAY_DIE=1)
+// or stays up.
 func buildSessionXray(t *testing.T) string {
 	t.Helper()
 	src := `package main
@@ -34,8 +36,16 @@ import (
 func main() {
 	for _, a := range os.Args[1:] {
 		if a == "-test" {
+			if msg := os.Getenv("MOCK_XRAY_REFUSE"); msg != "" {
+				os.Stdout.WriteString(msg + "\n")
+				os.Exit(23)
+			}
 			return
 		}
+	}
+	if rec := os.Getenv("MOCK_XRAY_RECORD"); rec != "" {
+		cfg, _ := os.ReadFile(os.Args[len(os.Args)-1])
+		_ = os.WriteFile(rec, cfg, 0600)
 	}
 	if os.Getenv("MOCK_XRAY_DIE") == "1" {
 		time.Sleep(500 * time.Millisecond)
