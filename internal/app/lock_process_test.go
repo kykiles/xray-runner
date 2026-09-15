@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -20,8 +21,8 @@ const lockHelperEnv = "XRAY_RUNNER_LOCK_HELPER"
 
 // TestLockHelperProcess is not a test but one contender, started by the tests
 // below with its directory in lockHelperEnv. It waits on stdin for the start,
-// tries the lock and says how it went on stdout. A winner writes its config and
-// holds the lock until stdin closes; a loser cleans up and exits.
+// claims the install and says how it went on stdout. A winner writes its config,
+// names it, and holds the lock until stdin closes; a loser cleans up and exits.
 func TestLockHelperProcess(t *testing.T) {
 	dir := os.Getenv(lockHelperEnv)
 	if dir == "" {
@@ -33,7 +34,7 @@ func TestLockHelperProcess(t *testing.T) {
 	if _, err := in.ReadString('\n'); err != nil {
 		os.Exit(2)
 	}
-	if err := a.acquireLock(); err != nil {
+	if err := a.claimInstance(); err != nil {
 		fmt.Println("refused")
 		a.cleanup()
 		os.Exit(0)
@@ -42,7 +43,7 @@ func TestLockHelperProcess(t *testing.T) {
 		fmt.Println("error", err)
 		os.Exit(2)
 	}
-	fmt.Println("won")
+	fmt.Println("won", a.tmpFile)
 	_, _ = io.Copy(io.Discard, in)
 	a.cleanup()
 	os.Exit(0)
@@ -121,9 +122,11 @@ func (c *contender) wait(t *testing.T) {
 }
 
 // Contenders started together on one install: exactly one owns the lock, the
-// others leave its config alone. When the owner is killed, with no cleanup, the
-// next run gets the lock.
+// others leave its config alone — once they are gone it is still where the
+// owner's core reads it on a restart. When the owner is killed, with no
+// cleanup, the next run gets the lock.
 func TestAcquireLock_ProcessesContend(t *testing.T) {
+	isolateRuntime(t)
 	dir := t.TempDir()
 	cs := make([]*contender, 8)
 	for i := range cs {
@@ -135,14 +138,15 @@ func TestAcquireLock_ProcessesContend(t *testing.T) {
 	}
 
 	var winner *contender
+	var config string
 	for _, c := range cs {
-		switch got := c.next(t); got {
-		case "won":
+		switch got := c.next(t); {
+		case strings.HasPrefix(got, "won "):
 			if winner != nil {
 				t.Fatal("two processes hold the lock at once")
 			}
-			winner = c
-		case "refused":
+			winner, config = c, strings.TrimPrefix(got, "won ")
+		case got == "refused":
 			c.wait(t)
 		default:
 			t.Fatalf("contender said %q", got)
@@ -151,11 +155,12 @@ func TestAcquireLock_ProcessesContend(t *testing.T) {
 	if winner == nil {
 		t.Fatal("no process got the lock")
 	}
-	config := filepath.Join(dir, "xray_config.json")
 	assertFileHolds(t, config, configOf(winner.cmd.Process.Pid))
 
 	_ = winner.cmd.Process.Kill()
 	_ = winner.cmd.Wait()
+	// Killed, the owner leaves its runtime dir behind.
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(config)) })
 
 	// Linux lets a dead process's lock go by the time Wait returns; Windows only
 	// promises to do it "depending on available system resources", so a refusal
@@ -165,7 +170,7 @@ func TestAcquireLock_ProcessesContend(t *testing.T) {
 		next := startContender(t, dir)
 		fmt.Fprintln(next.start, "go")
 		got := next.next(t)
-		if got == "won" {
+		if strings.HasPrefix(got, "won ") {
 			break
 		}
 		if got != "refused" || time.Now().After(deadline) {

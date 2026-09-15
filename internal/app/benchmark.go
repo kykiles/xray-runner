@@ -59,6 +59,10 @@ type ProxyBenchmarker struct {
 	// that disagrees with what connects is diagnosed from the core's routing
 	// lines, and those were unreachable without rebuilding the app.
 	logLevel string
+	// runDir is the instance's runtime dir: the bench configs are read by the
+	// same core as the session's, so they get the same protection (11b). Empty in
+	// tests, which take the temp dir.
+	runDir string
 }
 
 // probeHosts turns the check URLs into exact-match routing domains, so the
@@ -399,7 +403,7 @@ func runBatch[T any](
 	measure func(context.Context, T, portPair, string) subscription.BenchmarkResult,
 	onResult func(subscription.BenchmarkResult),
 ) []subscription.BenchmarkResult {
-	dir, err := os.MkdirTemp("", "xray-bench-*")
+	dir, err := os.MkdirTemp(pb.runDir, "xray-bench-*")
 	if err != nil {
 		results := make([]subscription.BenchmarkResult, len(items))
 		for i := range results {

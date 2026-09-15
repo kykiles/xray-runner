@@ -12,9 +12,10 @@ import (
 	"xray-runner/internal/config"
 )
 
-// newLockApp builds a minimal App wired for lock tests: its config and lock file
-// sit side by side in dir, as New puts them. Apps built on the same dir contend
-// for one lock, the way instances of one install do.
+// newLockApp builds a minimal App wired for lock tests: its lock file in dir, as
+// New puts it, and a config beside it for the tests of acquireLock alone —
+// claimInstance moves the config into a runtime dir of its own. Apps built on
+// the same dir contend for one lock, the way instances of one install do.
 func newLockApp(dir string) *App {
 	return &App{
 		tmpFile:  filepath.Join(dir, "xray_config.json"),
@@ -81,14 +82,15 @@ func ownPidLine() string { return strconv.Itoa(os.Getpid()) + "\n" }
 
 // A07: an instance refused by a live lock used to delete the config of the
 // instance that holds it — the core running there reads that file on its next
-// restart.
+// restart. Since 11b the owner's config is in its runtime dir.
 func TestCleanup_RefusedInstanceKeepsOwnersFiles(t *testing.T) {
+	isolateRuntime(t)
 	dir := t.TempDir()
-	owner := ownLock(t, dir)
+	owner := ownClaim(t, dir)
 	writeFile(t, owner.tmpFile, "active-instance-config")
 
 	second := newLockApp(dir)
-	err := second.acquireLock()
+	err := second.claimInstance()
 	if err == nil {
 		t.Fatal("acquireLock should refuse while another instance holds the lock")
 	}
@@ -105,11 +107,13 @@ func TestCleanup_RefusedInstanceKeepsOwnersFiles(t *testing.T) {
 // The owner takes its config away and lets the lock go, but the lock file stays:
 // unlinking it would let the next instance lock a new file while a third still
 // has the old one open — two owners at once (11a). Until 11a, cleanup removed
-// the lock file too, and this test checked that.
+// the lock file too, and this test checked that. Since 11b the config goes with
+// the instance's runtime dir.
 func TestCleanup_OwnerRemovesConfigKeepsLockFile(t *testing.T) {
+	isolateRuntime(t)
 	a := newLockApp(t.TempDir())
-	if err := a.acquireLock(); err != nil {
-		t.Fatalf("acquireLock: %v", err)
+	if err := a.claimInstance(); err != nil {
+		t.Fatalf("claimInstance: %v", err)
 	}
 	writeFile(t, a.tmpFile, "own-config")
 
@@ -127,14 +131,15 @@ func TestCleanup_OwnerRemovesConfigKeepsLockFile(t *testing.T) {
 // Once released, the lock belongs to whoever takes it next: a second cleanup
 // must neither remove the next instance's config nor free its lock.
 func TestCleanup_TwiceLeavesNextOwnersFiles(t *testing.T) {
+	isolateRuntime(t)
 	dir := t.TempDir()
 	a := newLockApp(dir)
-	if err := a.acquireLock(); err != nil {
-		t.Fatalf("acquireLock: %v", err)
+	if err := a.claimInstance(); err != nil {
+		t.Fatalf("claimInstance: %v", err)
 	}
 	a.cleanup()
 
-	next := ownLock(t, dir)
+	next := ownClaim(t, dir)
 	writeFile(t, next.tmpFile, "next-instance-config")
 	a.cleanup()
 
@@ -232,14 +237,25 @@ func TestAcquireLock_PidWriteFailureLetsGo(t *testing.T) {
 	assertLockFree(t, a.lockFile)
 }
 
-// In TUN mode root opens the lock file in the user's own directory and writes
-// its pid into it. The pid protocol created the file exclusively and removed
-// whatever it found; since 11a the file is opened as it is, so a link planted at
-// the path must not carry root's truncate to another file, or its create to
-// another place.
+// In TUN mode root, or an elevated run on Windows, opens the lock file in the
+// user's own directory and writes its pid into it. The pid protocol created the
+// file exclusively and removed whatever it found; since 11a the file is opened
+// as it is, so a link planted at the path must not carry the truncate to
+// another file, or the create to another place.
 func TestAcquireLock_DoesNotWriteThroughLinks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("link planting is the unix sudo scenario; symlinks on Windows are privileged, as for the log")
+	// Windows gives symlinks to administrators and developer mode only, and wine
+	// reports one made without making it.
+	plantOrSkip := func(t *testing.T, link string, err error) {
+		t.Helper()
+		if err == nil {
+			_, err = os.Lstat(link)
+		}
+		if err != nil && runtime.GOOS == "windows" {
+			t.Skipf("cannot plant the link here: %v", err)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	for name, plant := range map[string]func(target, link string) error{
 		"symlink":  os.Symlink,
@@ -250,9 +266,7 @@ func TestAcquireLock_DoesNotWriteThroughLinks(t *testing.T) {
 			victim := filepath.Join(dir, "victim")
 			writeFile(t, victim, "must survive")
 			a := newLockApp(dir)
-			if err := plant(victim, a.lockFile); err != nil {
-				t.Fatal(err)
-			}
+			plantOrSkip(t, a.lockFile, plant(victim, a.lockFile))
 			if err := a.acquireLock(); err == nil {
 				a.cleanup()
 				t.Error("acquireLock took a lock file that is a link to another file")
@@ -264,9 +278,7 @@ func TestAcquireLock_DoesNotWriteThroughLinks(t *testing.T) {
 		dir := t.TempDir()
 		target := filepath.Join(dir, "created-by-root")
 		a := newLockApp(dir)
-		if err := os.Symlink(target, a.lockFile); err != nil {
-			t.Fatal(err)
-		}
+		plantOrSkip(t, a.lockFile, os.Symlink(target, a.lockFile))
 		if err := a.acquireLock(); err == nil {
 			a.cleanup()
 			t.Error("acquireLock took a lock file that is a dangling symlink")
@@ -293,14 +305,15 @@ func TestAcquireLock_HandsLockFileBackToSudoUser(t *testing.T) {
 	}
 }
 
-// The lock guards the config next to it, so it is found together with the
-// config, not looked up on its own. A stray lock file in the working directory
-// used to put the lock there while the config went to the data dir — and a run
-// from any other directory then shared that config under a lock of its own.
-func TestNew_LockSitsNextToConfig(t *testing.T) {
+// The lock stays where 11a put it, beside where config.Path finds the config,
+// so the runs of one install keep meeting at one lock; a stray lock file in the
+// working directory still does not pull it there. The config itself has no
+// path until claimInstance makes the runtime dir (11b) — until then this test
+// checked that the lock sat next to the config.
+func TestNew_LockStaysWhereTheConfigWas(t *testing.T) {
 	for name, tc := range map[string]struct {
 		plant string
-		inCWD bool // the config, and so the lock, stay in the working directory
+		inCWD bool // a legacy config keeps the lock in the working directory
 	}{
 		"fresh":                {"", false},
 		"stray lock in cwd":    {"xray_config.json.lock", false},
@@ -314,11 +327,15 @@ func TestNew_LockSitsNextToConfig(t *testing.T) {
 
 			a := New(&config.Config{}, Options{})
 
-			if a.lockFile != a.tmpFile+".lock" {
-				t.Errorf("lock %q is not next to config %q", a.lockFile, a.tmpFile)
+			want := filepath.Join(config.DataDir(), "xray_config.json.lock")
+			if tc.inCWD {
+				want = "xray_config.json.lock"
 			}
-			if got := a.tmpFile == "xray_config.json"; got != tc.inCWD {
-				t.Errorf("config at %q, want in working dir = %v", a.tmpFile, tc.inCWD)
+			if a.lockFile != want {
+				t.Errorf("lock at %q, want %q", a.lockFile, want)
+			}
+			if a.tmpFile != "" {
+				t.Errorf("config path %q chosen before the instance made its runtime dir", a.tmpFile)
 			}
 		})
 	}
