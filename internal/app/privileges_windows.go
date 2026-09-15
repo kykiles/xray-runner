@@ -18,7 +18,7 @@ func checkTunPrivileges() error {
 		0, 0, 0, 0, 0, 0, &sid); err != nil {
 		return nil // cannot determine, let xray try
 	}
-	defer windows.FreeSid(sid)
+	defer func() { _ = windows.FreeSid(sid) }()
 
 	elevated, err := windows.Token(0).IsMember(sid)
 	if err != nil || elevated {

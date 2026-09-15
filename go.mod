@@ -2,6 +2,8 @@ module xray-runner
 
 go 1.25.0
 
+toolchain go1.26.8
+
 require (
 	github.com/joho/godotenv v1.5.1
 	golang.org/x/term v0.45.0

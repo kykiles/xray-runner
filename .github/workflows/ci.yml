@@ -17,6 +17,9 @@ jobs:
           # with go1.24 and refuse a module that targets a newer Go.
           version: v1.64.8
           install-mode: goinstall
+      # Pinned like the linter. It fails on a vulnerability the code reaches,
+      # standard library included — the Go version above is part of what it checks.
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
   test-windows:
     name: Test (Windows)

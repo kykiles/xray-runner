@@ -207,7 +207,7 @@ func daclEntries(sd *windows.SECURITY_DESCRIPTOR) ([]aceEntry, error) {
 		}
 		e := aceEntry{typ: ace.Header.AceType, flags: ace.Header.AceFlags, mask: ace.Mask}
 		if e.typ == windows.ACCESS_ALLOWED_ACE_TYPE || e.typ == windows.ACCESS_DENIED_ACE_TYPE {
-			e.sid = (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+			e.sid = (*windows.SID)(unsafe.Pointer(&ace.SidStart)) //nolint:gosec // G103: an allowed/denied ACE keeps its SID in place from SidStart on
 		}
 		entries = append(entries, e)
 	}

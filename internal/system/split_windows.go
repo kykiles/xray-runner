@@ -24,7 +24,7 @@ func ListProcesses() ([]Process, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer windows.CloseHandle(snapshot)
+	defer func() { _ = windows.CloseHandle(snapshot) }()
 
 	var e windows.ProcessEntry32
 	e.Size = uint32(unsafe.Sizeof(e))

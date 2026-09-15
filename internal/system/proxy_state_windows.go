@@ -125,7 +125,7 @@ func realRegGetInt(name string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer k.Close()
+	defer func() { _ = k.Close() }()
 	v, _, err := k.GetIntegerValue(name)
 	return v, err
 }
@@ -135,7 +135,7 @@ func realRegGetString(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer k.Close()
+	defer func() { _ = k.Close() }()
 	v, _, err := k.GetStringValue(name)
 	return v, err
 }
@@ -145,7 +145,7 @@ func realRegSetInt(name string, v uint32) error {
 	if err != nil {
 		return err
 	}
-	defer k.Close()
+	defer func() { _ = k.Close() }()
 	return k.SetDWordValue(name, v)
 }
 
@@ -154,7 +154,7 @@ func realRegSetString(name, v string) error {
 	if err != nil {
 		return err
 	}
-	defer k.Close()
+	defer func() { _ = k.Close() }()
 	return k.SetStringValue(name, v)
 }
 
@@ -163,6 +163,6 @@ func realRegDelete(name string) error {
 	if err != nil {
 		return err
 	}
-	defer k.Close()
+	defer func() { _ = k.Close() }()
 	return k.DeleteValue(name)
 }

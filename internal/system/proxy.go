@@ -4,7 +4,7 @@ type ProxyManager struct {
 	// ourServer is the "127.0.0.1:PORT" Enable put into the system settings,
 	// empty until it succeeds. forceDisable removes only this exact value, so
 	// it can never wipe a proxy somebody else configured.
-	ourServer string
+	ourServer string //nolint:unused // Windows only: proxy_windows.go
 }
 
 func New() *ProxyManager {
