@@ -502,7 +502,7 @@ func (a *App) writeConfigJSON(raw json.RawMessage) error {
 	}
 	// H-2: the config holds UUIDs, passwords and keys — keep it owner-only, and
 	// never write the full (unmasked) config to the log, only its path.
-	if err := os.WriteFile(a.tmpFile, pretty.Bytes(), 0600); err != nil {
+	if err := replaceFile(a.tmpFile, pretty.Bytes()); err != nil {
 		return err
 	}
 	slog.Debug("generated xray config", "path", a.tmpFile)

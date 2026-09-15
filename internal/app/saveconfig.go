@@ -33,7 +33,7 @@ func (a *App) saveConfig(name, text string) (string, error) {
 	// the owner only — the user's own editor opens it fine. Ownership is handed
 	// back when the tool runs under sudo (TUN mode).
 	path := filepath.Join(dir, safeName(name)+".json")
-	if err := os.WriteFile(path, []byte(text+"\n"), 0o600); err != nil {
+	if err := replaceFile(path, []byte(text+"\n")); err != nil {
 		return "", fmt.Errorf("записать %s: %w", path, err)
 	}
 	_ = system.RestoreSudoOwner(dir)
