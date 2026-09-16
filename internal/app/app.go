@@ -67,7 +67,7 @@ type App struct {
 	serverUDP     bool
 	originalProxy system.ProxyState
 	proxyTouched  bool
-	tunRouted     bool // tun routes installed; teardown must remove them
+	tunRouted     bool // tun routing attempted; teardown must take ours back out
 	// The active config routes something past the tunnel — as a rule the panel
 	// profile's own direct rules. The TUN label says so instead of promising
 	// that every packet goes through the VPN (A03).

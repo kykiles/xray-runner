@@ -916,10 +916,17 @@ func (l *tunLifecycle) setUp(ctx context.Context) error {
 		}
 		l.route = &routeCfg
 	}
+	// Claimed before the call, not after it: an Enable that fails part way may
+	// leave what it already added behind — its own rollback is allowed not to
+	// finish, and says so — and only a session that counts itself routed sends
+	// the Disable that takes those leftovers out (F01). The flag means cleanup
+	// may be needed, not that the setup succeeded; with nothing installed that
+	// Disable is a no-op, so claiming it early costs nothing.
+	a.tunRouted = true
 	if err := a.enableTunRouting(*l.route); err != nil {
+		// Left claimed on purpose: afterStop, then the final release, retry.
 		return fmt.Errorf("настроить маршрутизацию TUN: %w", err)
 	}
-	a.tunRouted = true
 	if l.sent {
 		return nil
 	}

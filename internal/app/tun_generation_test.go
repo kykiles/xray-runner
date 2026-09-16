@@ -461,7 +461,10 @@ func TestTunSession_SetupFailureAfterRestartEndsSession(t *testing.T) {
 	if n := coreStarts(t); n != 2 {
 		t.Errorf("core started %d times, want 2 — no new core after a failed setup", n)
 	}
-	assertEvents(t, n, "route 10", "ks on", "unroute", "route failed", "ks off")
+	// The failed Enable may have left routes of ours behind — its rollback is
+	// allowed not to finish — so the session takes a cleanup pass over them
+	// before the kill switch goes (F01).
+	assertEvents(t, n, "route 10", "ks on", "unroute", "route failed", "unroute", "ks off")
 }
 
 // Routes that would not come out after the core died end the session: a new
@@ -506,6 +509,106 @@ func TestReleaseSession_KeepsRoutesItFailedToRemove(t *testing.T) {
 	a.releaseSession()
 	if calls != 2 || a.tunRouted {
 		t.Errorf("after a second teardown: %d removals, tunRouted = %v; want 2, false", calls, a.tunRouted)
+	}
+}
+
+// F01: an Enable that failed part way may leave routes of ours in the table —
+// it says so and keeps them owned — so the session owns the cleanup from the
+// moment it calls Enable, not from the moment Enable succeeds.
+func TestTunSetup_PartialEnableFailureIsStillCleanedUp(t *testing.T) {
+	var spy killSwitchSpy
+	a := newKillSwitchApp(&spy, func(system.KillSwitchConfig) error { return nil })
+	cause := errors.New("исключить сервер из туннеля: откат не завершён")
+	a.enableTunRouting = func(system.TunRouteConfig) error { return cause }
+
+	l := a.newTunLifecycle(killSwitchTarget(), sessionPorts{}, false)
+	err := l.afterStart(context.Background())
+	if err == nil {
+		t.Fatal("tun setup succeeded although Enable failed")
+	}
+	// The reason the user sees is the one the platform gave, not a replacement.
+	if !errors.Is(err, cause) {
+		t.Errorf("setup err = %v, want it to wrap the Enable failure", err)
+	}
+	if !a.tunRouted {
+		t.Fatal("ownership dropped after a failed Enable: the leftovers would never come out")
+	}
+
+	if err := l.afterStop(); err != nil {
+		t.Errorf("afterStop: %v", err)
+	}
+	if spy.unrouted != 1 {
+		t.Fatalf("tun routes removed %d times after the failed Enable, want 1", spy.unrouted)
+	}
+	if a.tunRouted {
+		t.Error("still marked routed although the cleanup succeeded")
+	}
+	a.releaseSession()
+	if spy.unrouted != 1 {
+		t.Errorf("tun routes removed %d times in total, want 1 — the cleanup had already succeeded", spy.unrouted)
+	}
+}
+
+// The cleanup after a failed Enable can fail in its turn. The routes stay ours
+// and the session's final teardown tries again, as it does for a cleanup that
+// failed after a successful Enable.
+func TestTunSetup_FailedCleanupAfterFailedEnableIsRetried(t *testing.T) {
+	var spy killSwitchSpy
+	a := newKillSwitchApp(&spy, func(system.KillSwitchConfig) error { return nil })
+	a.enableTunRouting = func(system.TunRouteConfig) error {
+		return errors.New("направить трафик в xray-tun: откат не завершён")
+	}
+	a.disableTunRouting = func() error {
+		spy.unrouted++
+		if spy.unrouted == 1 {
+			return errors.New("RTNETLINK answers: Operation not permitted")
+		}
+		return nil
+	}
+
+	l := a.newTunLifecycle(killSwitchTarget(), sessionPorts{}, false)
+	if err := l.afterStart(context.Background()); err == nil {
+		t.Fatal("tun setup succeeded although Enable failed")
+	}
+	if err := l.afterStop(); err == nil {
+		t.Fatal("afterStop reported success with the cleanup refused")
+	}
+	if !a.tunRouted {
+		t.Fatal("ownership dropped although the routes are still in")
+	}
+
+	a.releaseSession()
+	if spy.unrouted != 2 || a.tunRouted {
+		t.Errorf("after the retry: %d removals, tunRouted = %v; want 2, false", spy.unrouted, a.tunRouted)
+	}
+}
+
+// A setup that fails before it ever calls Enable installed nothing. Claiming
+// ownership there would make the teardown's Disable the session's only change
+// to the routing table — against a table it never touched.
+func TestTunSetup_FailureBeforeEnableClaimsNothing(t *testing.T) {
+	var spy killSwitchSpy
+	a := newKillSwitchApp(&spy, func(system.KillSwitchConfig) error { return nil })
+	a.interfaces = func() ([]net.Interface, error) { return nil, nil } // the tun never comes up
+	a.enableTunRouting = func(system.TunRouteConfig) error {
+		t.Error("Enable called although the interface never came up")
+		return nil
+	}
+	// Cancelled, so the interface wait ends now instead of sitting out its timeout.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	l := a.newTunLifecycle(killSwitchTarget(), sessionPorts{}, false)
+	if err := l.afterStart(ctx); err == nil {
+		t.Fatal("tun setup succeeded with no interface")
+	}
+	if a.tunRouted {
+		t.Fatal("ownership claimed although Enable was never called")
+	}
+
+	a.releaseSession()
+	if spy.unrouted != 0 {
+		t.Errorf("tun routes removed %d times, want 0 — nothing was ever installed", spy.unrouted)
 	}
 }
 
