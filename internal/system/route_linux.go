@@ -361,9 +361,12 @@ func (e tunEntry) args(verb string) []string {
 	return args
 }
 
-// find looks the entry up in the host's state. present means it is still
-// there as it was added; foreign means it is gone but another entry now holds
-// its prefix, which the teardown must leave alone.
+// find looks the entry up in the host's state. present means it is still there
+// as it was added, route type included: the kernel's IPv6 delete ignores the
+// type, so `del unreachable ::/1` would take a prohibit route sitting where
+// ours was (F03), and the only defence is not to send that delete. foreign
+// means the entry is gone but another one now holds its prefix, which the
+// teardown must leave alone.
 func (e tunEntry) find(routes []ipRoute, rules []ipRule) (present, foreign bool, err error) {
 	if e.rule {
 		mark := fmt.Sprintf("%#x", xraycfg.DirectFwMark)
@@ -385,7 +388,7 @@ func (e tunEntry) find(routes []ipRoute, rules []ipRule) (present, foreign bool,
 		if p != e.prefix {
 			continue
 		}
-		if r.Gateway == e.via && r.Dev == e.dev && r.Metric == e.metric {
+		if routeType(r.Type) == e.typ && r.Gateway == e.via && r.Dev == e.dev && r.Metric == e.metric {
 			return true, false, nil
 		}
 		foreign = true
@@ -411,7 +414,7 @@ func (e tunEntry) ownsPrefix(routes []ipRoute) (mine, shared bool, err error) {
 		if p != e.prefix {
 			continue
 		}
-		if r.Gateway == e.via && r.Dev == e.dev && r.Metric == e.metric {
+		if routeType(r.Type) == e.typ && r.Gateway == e.via && r.Dev == e.dev && r.Metric == e.metric {
 			mine = true
 			continue
 		}
@@ -543,6 +546,26 @@ type ipRoute struct {
 	Dev     string `json:"dev"`
 	Table   string `json:"table"`
 	Metric  int    `json:"metric"`
+	// Type is absent for a plain unicast route. A document that puts something
+	// other than a string here fails to decode, which stays a read error: a
+	// type nobody could read must never pass for unicast.
+	Type string `json:"type"`
+}
+
+// routeType normalizes the route type as ip prints it. Queries carry -N, so the
+// kernel's numbers come through as strings ("6" blackhole, "7" unreachable,
+// "8" prohibit) and a unicast route carries no type at all; without -N the same
+// types print by name. Only the two kinds this code installs are named. Any
+// other valid type is left as it came and so compares unequal to both — it is
+// somebody else's entry, which is the answer ownership needs.
+func routeType(s string) string {
+	switch s {
+	case "", "1", "unicast":
+		return ""
+	case "7", "unreachable":
+		return "unreachable"
+	}
+	return s
 }
 
 func (r ipRoute) describe(dst string) string {

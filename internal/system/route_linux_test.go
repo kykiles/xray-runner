@@ -1227,3 +1227,67 @@ func TestDisableTunRouting_ForeignRouteInPlaceOfOursBeforeTheSnapshot(t *testing
 		t.Errorf("sent a delete for a prefix that was not ours: %v", f.cmds)
 	}
 }
+
+// F03: the kernel's IPv6 delete ignores the route type, so `del unreachable`
+// on its own removes whatever route holds the prefix — verified on a live
+// kernel in .scratch/repair-2026-09-16/route6-type-proof.log. The teardown has
+// to read the type out of the snapshot and compare it: a client that put
+// another kind of route exactly where ours was owns it now. Only the type
+// differs here; prefix, device and metric are ours, which is what makes the
+// case sharp.
+func TestDisableTunRouting_LeavesAForeignIPv6TypeAlone(t *testing.T) {
+	// Types as `ip -N` prints them: 6 blackhole, 8 prohibit, absent unicast.
+	for name, typ := range map[string]string{"prohibit": "8", "blackhole": "6", "unicast": ""} {
+		t.Run(name, func(t *testing.T) {
+			withIPv6Stack(t, true)
+			f := cleanHost()
+			withFakeIP(t, f)
+			if err := EnableTunRouting(tunCfg6); err != nil {
+				t.Fatalf("EnableTunRouting: %v", err)
+			}
+			ours := fakeRoute{v6: true, typ: "7", dst: pfx("::/1"), dev: "lo", metric: 1024}
+			i := slices.Index(f.routes, ours)
+			if i < 0 {
+				t.Fatalf("EnableTunRouting did not add %+v", ours)
+			}
+			theirs := ours
+			theirs.typ = typ
+			f.routes[i] = theirs
+			f.cmds = nil
+
+			if err := DisableTunRouting(); err != nil {
+				t.Fatalf("DisableTunRouting: %v", err)
+			}
+			if !slices.Contains(f.routes, theirs) {
+				t.Errorf("teardown deleted a foreign %s route: %v", name, f.cmds)
+			}
+			if f.has("route del unreachable ::/1") {
+				t.Errorf("sent a delete for a prefix that was not ours: %v", f.cmds)
+			}
+		})
+	}
+}
+
+// A snapshot that cannot be read is no reason to guess a type. The teardown
+// fails, deletes nothing, and keeps the entries owned for the next attempt.
+func TestDisableTunRouting_KeepsOwnershipOnAnUnreadableType(t *testing.T) {
+	withIPv6Stack(t, true)
+	f := cleanHost()
+	withFakeIP(t, f)
+	if err := EnableTunRouting(tunCfg6); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	// A type that is not a string at all: the document does not decode.
+	f.raw = map[string]string{"route6": `[{"type":7,"dst":"::/1","dev":"lo","metric":1024}]`}
+	f.cmds = nil
+
+	if err := DisableTunRouting(); err == nil {
+		t.Fatal("an unreadable snapshot passed for a clean teardown")
+	}
+	if len(f.cmds) != 0 {
+		t.Errorf("deleted something from a snapshot it could not read: %v", f.cmds)
+	}
+	if len(installed) == 0 {
+		t.Error("ownership dropped after a teardown that could not read the host")
+	}
+}
