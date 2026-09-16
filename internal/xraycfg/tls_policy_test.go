@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -144,5 +145,159 @@ func TestApplySecurityPolicy_SourceUntouched(t *testing.T) {
 	}
 	if !bytes.Equal(src, keep) {
 		t.Error("the source config was modified in place")
+	}
+}
+
+// insecureAt spells the four names on the policy's path, each optionally in
+// another case, around a flag the opt-out has to remove.
+func insecureAt(outbounds, stream, tls, flag string) string {
+	return `{"` + outbounds + `": [{"tag": "proxy", "protocol": "trojan",
+	  "` + stream + `": {"network": "tcp", "security": "tls",
+	    "` + tls + `": {"serverName": "a.example", "` + flag + `": true, "futureKnob": "keep"}}}]}`
+}
+
+// F05: the core decodes JSON into Go structs, which match field names without
+// regard to case, so "TlsSettings" and "AllowInsecure" reached it exactly as
+// the lowercase spellings did — while a policy comparing exact keys walked past
+// them and left ALLOW_INSECURE=false unenforced.
+func TestApplySecurityPolicy_MixedCaseKeysAreEnforced(t *testing.T) {
+	cases := map[string]string{
+		"outbounds":      insecureAt("Outbounds", "streamSettings", "tlsSettings", "allowInsecure"),
+		"streamSettings": insecureAt("outbounds", "StreamSettings", "tlsSettings", "allowInsecure"),
+		"tlsSettings":    insecureAt("outbounds", "streamSettings", "TlsSettings", "allowInsecure"),
+		"allowInsecure":  insecureAt("outbounds", "streamSettings", "tlsSettings", "AllowInsecure"),
+		"all four":       insecureAt("Outbounds", "StreamSettings", "TLSSettings", "AllowInsecure"),
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			// An unambiguous config must be normalized, never refused: making
+			// these green by rejecting mixed case would break working profiles.
+			got, err := ApplySecurityPolicy(json.RawMessage(raw), false)
+			if err != nil {
+				t.Fatalf("unambiguous mixed-case config must be accepted: %v", err)
+			}
+			var cfg struct {
+				Outbounds []struct {
+					StreamSettings struct {
+						TLSSettings map[string]any
+					}
+				}
+			}
+			if err := json.Unmarshal(got, &cfg); err != nil {
+				t.Fatalf("result is not JSON: %v", err)
+			}
+			if len(cfg.Outbounds) != 1 {
+				t.Fatalf("outbounds lost: %s", got)
+			}
+			settings := cfg.Outbounds[0].StreamSettings.TLSSettings
+			for k, v := range settings {
+				if strings.EqualFold(k, "allowInsecure") {
+					t.Errorf("case-insensitive key bypassed ALLOW_INSECURE=false: %s = %v", k, v)
+				}
+			}
+			// Everything else the profile asked for survives untouched.
+			if settings["serverName"] != "a.example" || settings["futureKnob"] != "keep" {
+				t.Errorf("the policy changed more than the flag: %v", settings)
+			}
+		})
+	}
+}
+
+// The opt-in keeps a mixed-case flag exactly as it keeps a lowercase one, and
+// still adds nothing of its own.
+func TestApplySecurityPolicy_MixedCaseOptInKeeps(t *testing.T) {
+	raw := insecureAt("Outbounds", "StreamSettings", "TLSSettings", "AllowInsecure")
+	got, err := ApplySecurityPolicy(json.RawMessage(raw), true)
+	if err != nil {
+		t.Fatalf("ApplySecurityPolicy: %v", err)
+	}
+	sameJSON(t, got, raw)
+}
+
+// Two spellings of one security key, or the same spelling twice, are two
+// answers to the same question. A Go map keeps one of them and loses the order,
+// so the honest answer is to refuse rather than to pick — under either setting.
+func TestApplySecurityPolicy_RepeatedSecurityKeyIsRefused(t *testing.T) {
+	const tlsBody = `{"serverName": "a.example", "allowInsecure": true}`
+	cases := map[string]struct{ raw, names string }{
+		"tlsSettings twice, mixed case": {
+			`{"outbounds": [{"streamSettings": {"security": "tls",
+			  "tlsSettings": ` + tlsBody + `, "TLSSettings": ` + tlsBody + `}}]}`, "tlsSettings"},
+		"tlsSettings twice, other order": {
+			`{"outbounds": [{"streamSettings": {"security": "tls",
+			  "TLSSettings": ` + tlsBody + `, "tlsSettings": ` + tlsBody + `}}]}`, "tlsSettings"},
+		"allowInsecure twice, mixed case": {
+			`{"outbounds": [{"streamSettings": {"security": "tls",
+			  "tlsSettings": {"allowInsecure": true, "AllowInsecure": false}}}]}`, "allowInsecure"},
+		"allowInsecure twice, same spelling": {
+			`{"outbounds": [{"streamSettings": {"security": "tls",
+			  "tlsSettings": {"allowInsecure": true, "allowInsecure": false}}}]}`, "allowInsecure"},
+		"streamSettings twice": {
+			`{"outbounds": [{"streamSettings": {"security": "tls", "tlsSettings": ` + tlsBody + `},
+			  "StreamSettings": {"security": "tls", "tlsSettings": ` + tlsBody + `}}]}`, "streamSettings"},
+		"outbounds twice": {
+			`{"outbounds": [{"streamSettings": {"security": "tls", "tlsSettings": ` + tlsBody + `}}],
+			  "Outbounds": [{"streamSettings": {"security": "tls", "tlsSettings": ` + tlsBody + `}}]}`, "outbounds"},
+	}
+	for name, c := range cases {
+		for _, allow := range []bool{false, true} {
+			t.Run(name, func(t *testing.T) {
+				got, err := ApplySecurityPolicy(json.RawMessage(c.raw), allow)
+				if err == nil {
+					t.Fatalf("allow=%v: an ambiguous config passed: %s", allow, got)
+				}
+				// The message has to name the key the user must fix, not just
+				// report that something was wrong somewhere.
+				if !strings.Contains(err.Error(), c.names) {
+					t.Errorf("allow=%v: error does not name %s: %v", allow, c.names, err)
+				}
+			})
+		}
+	}
+}
+
+// The policy's reach is that one path. A field of the same name belonging to
+// something else stays where it is, whatever its case.
+func TestApplySecurityPolicy_LookAlikeOutsideTLSSurvives(t *testing.T) {
+	raw := `{"outbounds": [
+	  {"tag": "odd", "protocol": "future", "settings": {"AllowInsecure": true}},
+	  {"tag": "proxy", "protocol": "trojan",
+	   "streamSettings": {"security": "tls", "TlsSettings": {"serverName": "a", "AllowInsecure": true}}}]}`
+
+	got, err := ApplySecurityPolicy(json.RawMessage(raw), false)
+	if err != nil {
+		t.Fatalf("ApplySecurityPolicy: %v", err)
+	}
+	var cfg struct {
+		Outbounds []map[string]json.RawMessage
+	}
+	if err := json.Unmarshal(got, &cfg); err != nil {
+		t.Fatalf("result is not JSON: %v", err)
+	}
+	if !strings.Contains(string(cfg.Outbounds[0]["settings"]), "AllowInsecure") {
+		t.Errorf("a look-alike outside tlsSettings was removed: %s", cfg.Outbounds[0]["settings"])
+	}
+
+	// The TLS flag itself has to be gone whatever case it was written in, and
+	// the rest of tlsSettings has to stay. Read through the decoder rather than
+	// searched for as text: the marshalled spacing is not the contract.
+	var shaped struct {
+		Outbounds []struct {
+			StreamSettings struct {
+				TLSSettings map[string]any
+			}
+		}
+	}
+	if err := json.Unmarshal(got, &shaped); err != nil {
+		t.Fatalf("result is not JSON: %v", err)
+	}
+	settings := shaped.Outbounds[1].StreamSettings.TLSSettings
+	for k, v := range settings {
+		if strings.EqualFold(k, "allowInsecure") {
+			t.Errorf("the TLS flag survived as %s = %v", k, v)
+		}
+	}
+	if settings["serverName"] != "a" {
+		t.Errorf("tlsSettings lost serverName: %v", settings)
 	}
 }
