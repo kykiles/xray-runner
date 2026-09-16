@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"xray-runner/internal/neterr"
 	"xray-runner/internal/system"
 )
 
@@ -142,27 +143,12 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 func newGet(ctx context.Context, rawURL string) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, redactURL(err)
+		return nil, neterr.Safe(err)
 	}
 	if err := checkTransport(req.URL); err != nil {
 		return nil, err
 	}
 	return req, nil
-}
-
-// redactURL cuts the URL inside a *url.Error — net/http's error text carries the
-// whole of it, and a panel's database URL may hold a token — down to scheme and
-// host. Op and Err stay, so errors.Is still sees a timeout or a cancellation.
-func redactURL(err error) error {
-	var ue *url.Error
-	if !errors.As(err, &ue) {
-		return err
-	}
-	origin := "<ссылка скрыта>"
-	if u, perr := url.Parse(ue.URL); perr == nil && u.Scheme != "" {
-		origin = u.Scheme + "://" + u.Host
-	}
-	return &url.Error{Op: ue.Op, URL: origin, Err: ue.Err}
 }
 
 // SameVersion reports whether a release tag names the installed core version.
@@ -281,7 +267,7 @@ func getJSON(ctx context.Context, url string, dst any) error {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return fmt.Errorf("запрос к GitHub: %w", err)
+		return fmt.Errorf("запрос к GitHub: %w", neterr.Safe(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -305,7 +291,7 @@ func httpGetBytes(ctx context.Context, url string) ([]byte, error) {
 	}
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return nil, redactURL(err)
+		return nil, neterr.Safe(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
@@ -456,7 +442,7 @@ func download(ctx context.Context, a Asset, dir string) (*os.File, error) {
 	}
 	resp, err := downloadClient().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("скачивание %s: %w", a.Name, redactURL(err))
+		return nil, fmt.Errorf("скачивание %s: %w", a.Name, neterr.Safe(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

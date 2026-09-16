@@ -53,6 +53,20 @@ func TestFetchBody_ErrorsHideToken(t *testing.T) {
 	}
 }
 
+// A Location net/http cannot parse fails inside the library, before
+// checkRedirect sees the target, and the error it builds quotes that target in
+// full — the token in its path and its query with it.
+func TestFetchBody_MalformedRedirectHidesToken(t *testing.T) {
+	const start = "https://panel.invalid/start"
+	withChain(t, map[string]string{start: "https://panel.invalid/sub/SECRETTOKEN/%zz?x=SECRET2"})
+
+	_, _, err := fetchBody(context.Background(), start)
+	if err == nil {
+		t.Fatal("malformed redirect accepted")
+	}
+	assertNoToken(t, "error", err.Error())
+}
+
 // The redacted error still answers errors.Is for a timeout, so callers that
 // tell a slow panel from a broken one keep working.
 func TestRedactURLError_KeepsTimeout(t *testing.T) {

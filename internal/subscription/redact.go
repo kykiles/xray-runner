@@ -1,9 +1,10 @@
 package subscription
 
 import (
-	"errors"
 	"net/url"
 	"strings"
+
+	"xray-runner/internal/neterr"
 )
 
 // RedactURL cuts a subscription URL down to scheme://host/…. The token lives in
@@ -17,14 +18,10 @@ func RedactURL(raw string) string {
 	return u.Scheme + "://" + u.Host + "/…"
 }
 
-// RedactURLError rewrites the URL inside a *url.Error — whose text is the full
-// URL, token included — keeping Op and Err, so errors.Is for a timeout or a
-// cancellation still works. Meant for the error straight from net/http or
-// net/url, before any wrapping; any other error comes back unchanged.
-func RedactURLError(err error) error {
-	var ue *url.Error
-	if !errors.As(err, &ue) {
-		return err
-	}
-	return &url.Error{Op: ue.Op, URL: RedactURL(ue.URL), Err: ue.Err}
-}
+// RedactURLError replaces a network error whose text is the full URL, token
+// included — and, when a redirect target could not be parsed, the target's URL
+// as well — with one naming only the origin, the operation and a safe cause.
+// The original stays reachable through Unwrap, so errors.Is for a timeout or a
+// cancellation still works. Any error that is not a *url.Error comes back
+// unchanged.
+func RedactURLError(err error) error { return neterr.Safe(err) }
