@@ -292,8 +292,17 @@ func TestClaim_RefusesUntrustedRuntimeBase(t *testing.T) {
 				a.cleanup()
 				t.Fatal("claimInstance accepted a base others can change")
 			}
-			if !strings.Contains(err.Error(), loose) {
-				t.Errorf("refusal %q does not name the base %q", err, loose)
+			// The refusal names the base the way createRuntimeDir resolved it, and
+			// on Windows EvalSymlinks expands an 8.3 short path as well as a link:
+			// GitHub's runner hands TMP out as C:\Users\RUNNER~1\…, which the
+			// message then spells C:\Users\runneradmin\…. Resolving here compares
+			// one directory with itself instead of two spellings of it.
+			named := loose
+			if resolved, rerr := filepath.EvalSymlinks(loose); rerr == nil {
+				named = resolved
+			}
+			if !strings.Contains(err.Error(), named) {
+				t.Errorf("refusal %q does not name the base %q", err, named)
 			}
 			if a.runDir != "" {
 				t.Errorf("runtime dir %q made after the refusal", a.runDir)
