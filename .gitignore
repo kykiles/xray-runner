@@ -31,6 +31,7 @@ xray_windows/
 linux_deploy/
 windows_deploy/
 *.zip
+SHA256SUMS
 
 # Go build cache
 go.work
