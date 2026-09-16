@@ -17,37 +17,123 @@ import (
 // the tests of an ordinary run behave the same from an elevated shell.
 var elevated = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
 
-// createRuntimeDir makes this instance's runtime dir (11b). An ordinary run
-// takes the user's temp dir: nobody who can change it has less power than the
-// process. An elevated run cannot — an unelevated process of the same user has
-// the same SID and full control of the profile. Its dir goes to the Windows
-// temp dir, which only SYSTEM and Administrators may rename, under a DACL for
-// those two alone: in the unelevated token Administrators is deny-only.
+// checkRuntimeBase is checkTrustedDirs; a var so the tests of what happens
+// after it do not turn into a check of whatever ACL the machine's temp dir
+// happens to carry. What it does has tests of its own.
+var checkRuntimeBase = checkTrustedDirs
+
+// createRuntimeDir makes this instance's runtime dir (11b). Both runs create it
+// with a DACL of its own — never for a moment under the one the temp dir hands
+// down — and both refuse a base that someone they do not trust could rename out
+// from under the running core. A random name and a Unix mode are neither of
+// those things on Windows: what a file grants is its DACL, and an inheritable
+// entry on the temp dir reaches everything made inside it.
+//
+// The two runs differ in whom they trust. An ordinary run trusts its own user:
+// nobody holding that SID has less power than this process. An elevated run
+// cannot — an unelevated process of the same user has the same SID and full
+// control of the profile — so its dir goes to the Windows temp dir, which only
+// SYSTEM and Administrators may rename, under a DACL for those two alone: in
+// the unelevated token Administrators is deny-only.
 func createRuntimeDir() (string, error) {
-	if !elevated() {
-		return os.MkdirTemp("", "xray-runner-*")
-	}
-	win, err := windows.GetSystemWindowsDirectory()
+	base, acl, err := runtimeBase()
 	if err != nil {
-		return "", fmt.Errorf("каталог для рабочего конфига: %w", err)
-	}
-	base := filepath.Join(win, "Temp")
-	if err := checkTrustedDirs(base); err != nil {
 		return "", err
 	}
-	return createProtectedDir(base)
+	if err := checkRuntimeBase(base, acl.user); err != nil {
+		return "", err
+	}
+	return createProtectedDir(base, acl)
 }
 
-// runtimeDirSDDL: owned by Administrators; full access for SYSTEM and
+// runtimeBase picks the temp dir this run's directory goes in, and the rights
+// it is made with. An elevated run never falls back to the user's temp dir: the
+// point of its own base is that the user cannot reach it.
+func runtimeBase() (string, runtimeACL, error) {
+	if elevated() {
+		win, err := windows.GetSystemWindowsDirectory()
+		if err != nil {
+			return "", runtimeACL{}, fmt.Errorf("каталог для рабочего конфига: %w", err)
+		}
+		acl, err := elevatedRuntimeACL()
+		return filepath.Join(win, "Temp"), acl, err
+	}
+	// The temp dir may be reached through a junction or a symlink. The directory
+	// is made where it really is, so the path that gets checked is that one.
+	base, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		return "", runtimeACL{}, fmt.Errorf("каталог для рабочего конфига: %w", err)
+	}
+	acl, err := userRuntimeACL()
+	return base, acl, err
+}
+
+// runtimeACL is the DACL a runtime dir is created with and then checked
+// against: who must own it, and the only SIDs its entries may name.
+type runtimeACL struct {
+	sddl    string
+	owner   *windows.SID
+	allowed []*windows.SID
+	// user is the SID the base may additionally belong to, or nil when nothing
+	// unelevated is trusted with it.
+	user *windows.SID
+}
+
+// elevatedRuntimeACL: owned by Administrators; full access for SYSTEM and
 // Administrators, inherited by the config inside; nothing inherited from the
 // parent (P).
-const runtimeDirSDDL = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+func elevatedRuntimeACL() (runtimeACL, error) {
+	system, admins, err := systemAndAdmins()
+	if err != nil {
+		return runtimeACL{}, err
+	}
+	return runtimeACL{
+		sddl:    "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+		owner:   admins,
+		allowed: []*windows.SID{system, admins},
+	}, nil
+}
 
-// createProtectedDir creates a new directory in base with runtimeDirSDDL from
-// the start — never for a moment under the parent's ACL — and reads back what
-// the system actually set.
-func createProtectedDir(base string) (string, error) {
-	sd, err := windows.SecurityDescriptorFromString(runtimeDirSDDL)
+// userRuntimeACL: owned by this user; full access for this user, SYSTEM and
+// Administrators — an administrator can already reach anything this process
+// can — and nothing at all for any other unprivileged user, whatever the temp
+// dir above hands down.
+func userRuntimeACL() (runtimeACL, error) {
+	// From the process token: an environment string naming a user is not proof
+	// of one.
+	tu, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return runtimeACL{}, fmt.Errorf("SID текущего пользователя: %w", err)
+	}
+	user := tu.User.Sid
+	system, admins, err := systemAndAdmins()
+	if err != nil {
+		return runtimeACL{}, err
+	}
+	return runtimeACL{
+		sddl:    fmt.Sprintf("O:%[1]sD:P(A;OICI;FA;;;%[1]s)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", user),
+		owner:   user,
+		allowed: []*windows.SID{user, system, admins},
+		user:    user,
+	}, nil
+}
+
+func systemAndAdmins() (system, admins *windows.SID, err error) {
+	if system, err = windows.CreateWellKnownSid(windows.WinLocalSystemSid); err != nil {
+		return nil, nil, err
+	}
+	if admins, err = windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid); err != nil {
+		return nil, nil, err
+	}
+	return system, admins, nil
+}
+
+// createProtectedDir creates a new directory in base with acl from the start —
+// never for a moment under the parent's ACL — and reads back what the system
+// actually set. A directory whose rights are not the ones asked for is removed
+// again, before the config with the server's credentials is written into it.
+func createProtectedDir(base string, acl runtimeACL) (string, error) {
+	sd, err := windows.SecurityDescriptorFromString(acl.sddl)
 	if err != nil {
 		return "", err
 	}
@@ -65,7 +151,7 @@ func createProtectedDir(base string) (string, error) {
 	got, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err == nil {
-		err = checkProtectedSD(got)
+		err = checkProtectedSD(got, acl)
 	}
 	if err != nil {
 		_ = os.Remove(dir)
@@ -74,15 +160,16 @@ func createProtectedDir(base string) (string, error) {
 	return dir, nil
 }
 
-// checkProtectedSD confirms a descriptor is runtimeDirSDDL: owned by
-// Administrators, not inheriting, access for SYSTEM and Administrators only.
-func checkProtectedSD(sd *windows.SECURITY_DESCRIPTOR) error {
+// checkProtectedSD confirms a descriptor is the one acl asked for: that owner,
+// nothing inherited from the parent, and allow entries for those SIDs only. An
+// entry of a kind this does not understand is not taken for a safe one.
+func checkProtectedSD(sd *windows.SECURITY_DESCRIPTOR, acl runtimeACL) error {
 	owner, _, err := sd.Owner()
 	if err != nil {
 		return err
 	}
-	if !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
-		return fmt.Errorf("владелец %s, а не Администраторы", owner)
+	if !acl.owner.Equals(owner) {
+		return fmt.Errorf("владелец %s, а не %s", owner, acl.owner)
 	}
 	control, _, err := sd.Control()
 	if err != nil {
@@ -96,24 +183,41 @@ func checkProtectedSD(sd *windows.SECURITY_DESCRIPTOR) error {
 		return err
 	}
 	for _, e := range aces {
-		if e.typ != windows.ACCESS_ALLOWED_ACE_TYPE ||
-			!(e.sid.IsWellKnown(windows.WinLocalSystemSid) || e.sid.IsWellKnown(windows.WinBuiltinAdministratorsSid)) {
-			return errors.New("в DACL есть записи не для SYSTEM и Администраторов")
+		if e.typ != windows.ACCESS_ALLOWED_ACE_TYPE || !sidIn(e.sid, acl.allowed) {
+			return fmt.Errorf("в DACL есть запись типа %d для %s", e.typ, e.sid)
 		}
 	}
 	return nil
 }
 
-// checkTrustedDirs refuses a base that an unelevated process could rename,
-// replace or re-permission: it and every directory above it must be a plain
-// directory, not a junction or symlink, owned by SYSTEM, Administrators or
-// TrustedInstaller, and grant nobody else the right to delete it, delete its
-// entries, or change its owner or DACL. Others may add entries of their own,
-// as in the Windows temp dir. None of it can then change after the check.
-func checkTrustedDirs(base string) error {
+func sidIn(sid *windows.SID, allowed []*windows.SID) bool {
+	for _, a := range allowed {
+		if a.Equals(sid) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkTrustedDirs refuses a base that a process it does not trust could
+// rename, replace or re-permission: it and every directory above it must be a
+// plain directory, not a junction or symlink, owned by SYSTEM, Administrators,
+// TrustedInstaller or user, and grant nobody else the right to delete it,
+// delete its entries, or change its owner or DACL. Others may add entries of
+// their own, as in the Windows temp dir, and read rights they hold there are
+// not the runtime dir's concern: it is created with a DACL of its own. None of
+// it can then change after the check.
+//
+// user is the SID an ordinary run trusts with its own temp dir. It is nil for
+// an elevated run, which trusts nothing unelevated — that same user included.
+func checkTrustedDirs(base string, user *windows.SID) error {
 	for dir := base; ; dir = filepath.Dir(dir) {
-		if err := checkTrustedDir(dir); err != nil {
-			return fmt.Errorf("каталог для рабочего конфига %s ненадёжен: %s — %w", base, dir, err)
+		if err := checkTrustedDir(dir, user); err != nil {
+			hint := ""
+			if user != nil {
+				hint = "; укажите в TMP каталог, менять который можете только вы и администраторы"
+			}
+			return fmt.Errorf("каталог для рабочего конфига %s ненадёжен: %s — %w%s", base, dir, err, hint)
 		}
 		if dir == filepath.Dir(dir) {
 			return nil
@@ -121,7 +225,7 @@ func checkTrustedDirs(base string) error {
 	}
 }
 
-func checkTrustedDir(dir string) error {
+func checkTrustedDir(dir string, user *windows.SID) error {
 	p, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
 		return err
@@ -138,7 +242,7 @@ func checkTrustedDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	return checkTrustedSD(sd)
+	return checkTrustedSD(sd, user)
 }
 
 // fileDeleteChild is FILE_DELETE_CHILD, which x/sys does not name.
@@ -150,21 +254,22 @@ const untrustedRights = windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER
 
 const trustedInstallerSID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 
-func trustedSID(sid *windows.SID) bool {
+func trustedSID(sid *windows.SID, user *windows.SID) bool {
 	return sid.IsWellKnown(windows.WinLocalSystemSid) ||
 		sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) ||
-		sid.String() == trustedInstallerSID
+		sid.String() == trustedInstallerSID ||
+		(user != nil && user.Equals(sid))
 }
 
 // checkTrustedSD is checkTrustedDirs' rule for one directory's descriptor.
 // Inherit-only entries do not apply to the directory itself and deny entries
 // only take rights away; an entry of any other kind is not guessed at.
-func checkTrustedSD(sd *windows.SECURITY_DESCRIPTOR) error {
+func checkTrustedSD(sd *windows.SECURITY_DESCRIPTOR, user *windows.SID) error {
 	owner, _, err := sd.Owner()
 	if err != nil {
 		return err
 	}
-	if !trustedSID(owner) {
+	if !trustedSID(owner, user) {
 		return fmt.Errorf("владелец %s", owner)
 	}
 	aces, err := daclEntries(sd)
@@ -176,7 +281,7 @@ func checkTrustedSD(sd *windows.SECURITY_DESCRIPTOR) error {
 		case e.flags&windows.INHERIT_ONLY_ACE != 0, e.typ == windows.ACCESS_DENIED_ACE_TYPE:
 		case e.typ != windows.ACCESS_ALLOWED_ACE_TYPE:
 			return fmt.Errorf("запись DACL незнакомого типа %d", e.typ)
-		case !trustedSID(e.sid) && e.mask&untrustedRights != 0:
+		case !trustedSID(e.sid, user) && e.mask&untrustedRights != 0:
 			return fmt.Errorf("%s может удалить, переименовать его или сменить права (маска %#x)", e.sid, e.mask)
 		}
 	}
