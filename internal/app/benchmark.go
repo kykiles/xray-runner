@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -65,13 +66,24 @@ type ProxyBenchmarker struct {
 	runDir string
 }
 
-// probeHosts turns the check URLs into exact-match routing domains, so the
-// probe rule matches those hosts and nothing else.
+// probeHosts turns the check URLs into routing targets for PrependProbeRule,
+// each matching that host and nothing else: an exact-match domain for a name,
+// and a bare IP literal for an address. The two are not interchangeable — a
+// "full:" matcher compares the name a request carries, and a request to an IP
+// URL carries no name, so the probe rule never fired and the check fell through
+// to the profile's own direct rule and timed the plain internet (F04).
 func probeHosts(urls []string) []string {
 	var hosts []string
 	for _, raw := range urls {
 		u, err := url.Parse(raw)
 		if err != nil || u.Hostname() == "" {
+			continue
+		}
+		if addr, err := netip.ParseAddr(u.Hostname()); err == nil {
+			// Canonical form, so the rule spells the address the way the core
+			// does. A zone identifier survives this and is refused downstream
+			// rather than turned into a domain matcher that matches nothing.
+			hosts = append(hosts, addr.String())
 			continue
 		}
 		hosts = append(hosts, "full:"+u.Hostname())

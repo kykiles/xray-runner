@@ -1,6 +1,12 @@
 package xraycfg
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"maps"
+	"net/netip"
+	"strings"
+)
 
 // PrependProbeRule routes the connectivity-probe hosts down the path under test,
 // ahead of every rule the panel brought with it.
@@ -15,29 +21,54 @@ import "encoding/json"
 // balancer is where its traffic actually goes, and without one the first
 // outbound is what unmatched traffic falls through to. Either way the probe
 // follows the same path as the user's own traffic.
+// hosts carries two kinds of entry: a domain as "full:<domain>", and an IP
+// target as a bare literal. The two cannot share one rule — a rule's domain and
+// ip fields are alternatives the request has to satisfy together, and a request
+// carries a name or an address, never both — so an IP target gets a rule of its
+// own aimed at the same place (F04).
 func PrependProbeRule(raw json.RawMessage, hosts []string) (json.RawMessage, error) {
 	if len(hosts) == 0 {
 		return raw, nil
+	}
+	domains, ips, err := splitProbeHosts(hosts)
+	if err != nil {
+		return nil, err
 	}
 	var cfg map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, err
 	}
 
-	rule := map[string]any{"type": "field", "domain": hosts}
+	aim := map[string]any{}
 	switch {
 	case firstTag(cfg["routing"], "balancers") != "":
-		rule["balancerTag"] = firstTag(cfg["routing"], "balancers")
+		aim["balancerTag"] = firstTag(cfg["routing"], "balancers")
 	case firstOutboundTag(cfg["outbounds"]) != "":
-		rule["outboundTag"] = firstOutboundTag(cfg["outbounds"])
+		aim["outboundTag"] = firstOutboundTag(cfg["outbounds"])
 	default:
 		// Nothing to aim at — leave the config as it is rather than write a rule
 		// pointing at a tag that does not exist, which xray refuses to start on.
 		return raw, nil
 	}
-	ruleJSON, err := json.Marshal(rule)
-	if err != nil {
-		return nil, err
+
+	// One rule per kind, and none at all for a kind with nothing in it: a rule
+	// carrying an empty domain or ip list matches everything, which would turn
+	// the probe rule into a catch-all over the profile's own routing.
+	var probeRules []json.RawMessage
+	for _, kind := range []struct {
+		field  string
+		values []string
+	}{{"domain", domains}, {"ip", ips}} {
+		if len(kind.values) == 0 {
+			continue
+		}
+		rule := map[string]any{"type": "field", kind.field: kind.values}
+		maps.Copy(rule, aim)
+		ruleJSON, err := json.Marshal(rule)
+		if err != nil {
+			return nil, err
+		}
+		probeRules = append(probeRules, ruleJSON)
 	}
 
 	routing := map[string]json.RawMessage{}
@@ -52,7 +83,7 @@ func PrependProbeRule(raw json.RawMessage, hosts []string) (json.RawMessage, err
 			return nil, err
 		}
 	}
-	routing["rules"], err = json.Marshal(append([]json.RawMessage{ruleJSON}, rules...))
+	routing["rules"], err = json.Marshal(append(probeRules, rules...))
 	if err != nil {
 		return nil, err
 	}
@@ -60,6 +91,32 @@ func PrependProbeRule(raw json.RawMessage, hosts []string) (json.RawMessage, err
 		return nil, err
 	}
 	return json.Marshal(cfg)
+}
+
+// splitProbeHosts sorts the probe targets into domain matchers and exact IP
+// networks — /32 for IPv4, /128 for IPv6 — so each kind can be given a rule the
+// core will actually match.
+func splitProbeHosts(hosts []string) (domains, ips []string, err error) {
+	for _, h := range hosts {
+		if strings.HasPrefix(h, "full:") {
+			domains = append(domains, h)
+			continue
+		}
+		addr, parseErr := netip.ParseAddr(h)
+		if parseErr != nil {
+			domains = append(domains, h)
+			continue
+		}
+		if addr.Zone() != "" {
+			// A zone names one of this host's interfaces and means nothing to a
+			// routing rule. Dropping it quietly would leave the probe matching
+			// nothing at all, which is the failure this whole rule exists to
+			// prevent, so say so instead.
+			return nil, nil, fmt.Errorf("проверочный адрес %q содержит зону интерфейса (%%%s) — такой адрес нельзя направить правилом маршрутизации, уберите зону из HEALTH_CHECK_URL", h, addr.Zone())
+		}
+		ips = append(ips, netip.PrefixFrom(addr, addr.BitLen()).String())
+	}
+	return domains, ips, nil
 }
 
 // ProbeInboundTag names the loopback inbound a tun session's probes go through.
