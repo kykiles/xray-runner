@@ -927,8 +927,13 @@ func TestEnableTunRouting_FailsWhenAClientRacesThePreflight(t *testing.T) {
 	if got := f.state(); got != want.state() {
 		t.Errorf("rollback left the host changed:\nwant %s\ngot  %s", want.state(), got)
 	}
-	if f.has("route del 203.0.113.7") {
-		t.Errorf("deleted the client's route: %v", f.cmds)
+	// The rollback deletes our own route on that prefix, so naming the prefix is
+	// no longer the question — naming the client's device is. Their entry must
+	// survive, which the state comparison above already proves outright.
+	for _, c := range f.cmds {
+		if strings.Contains(c, " del ") && strings.Contains(c, "wg0") {
+			t.Errorf("deleted the client's route: %q", c)
+		}
 	}
 }
 
@@ -1028,7 +1033,7 @@ func TestDisableTunRouting_LeavesAReplacedEntryAlone(t *testing.T) {
 		ours, theirs fakeRoute
 	}{
 		{"server route",
-			fakeRoute{dst: pfx("45.150.32.235/32"), via: "192.168.31.1", dev: "wlp3s0"},
+			fakeRoute{dst: pfx("45.150.32.235/32"), via: "192.168.31.1", dev: "wlp3s0", metric: tunMetric},
 			fakeRoute{dst: pfx("45.150.32.235/32"), dev: "wg0"}},
 		{"ipv6 half",
 			fakeRoute{v6: true, typ: "7", dst: pfx("::/1"), dev: "lo", metric: 1024},
@@ -1112,5 +1117,113 @@ func TestEnableTunRouting_ResolvesThePhysicalPathAfresh(t *testing.T) {
 	}
 	if !f.has("route add 45.150.32.235/32 via 192.168.31.254 dev eth0") {
 		t.Errorf("the new uplink was not used: %v", f.cmds)
+	}
+}
+
+// ourServerRoute is the server exception this session installed, found by the
+// metric rather than spelled out, so these tests do not fix tunMetric's value.
+func ourServerRoute(t *testing.T, f *fakeIP) (int, fakeRoute) {
+	t.Helper()
+	i := slices.IndexFunc(f.routes, func(r fakeRoute) bool {
+		return !r.v6 && r.dst == pfx("45.150.32.235/32") && r.metric == tunMetric
+	})
+	if i < 0 {
+		t.Fatalf("EnableTunRouting did not add the server exception: %+v", f.routes)
+	}
+	return i, f.routes[i]
+}
+
+// F02: our IPv4 routes carry an explicit metric, so the teardown's delete names
+// exactly the route this process added. A foreign route sharing the prefix,
+// gateway and device but sitting at another metric is not ours — whether its
+// metric is below ours or above it.
+func TestDisableTunRouting_LeavesAForeignMetricAlone(t *testing.T) {
+	for _, theirMetric := range []int{tunMetric / 2, tunMetric * 2} {
+		t.Run(strconv.Itoa(theirMetric), func(t *testing.T) {
+			f := cleanHost()
+			withFakeIP(t, f)
+			if err := EnableTunRouting(tunCfg); err != nil {
+				t.Fatalf("EnableTunRouting: %v", err)
+			}
+			_, ours := ourServerRoute(t, f)
+			theirs := ours
+			theirs.metric = theirMetric
+			f.routes = append(f.routes, theirs)
+
+			if err := DisableTunRouting(); err != nil {
+				t.Fatalf("DisableTunRouting: %v", err)
+			}
+			if !slices.Contains(f.routes, theirs) {
+				t.Errorf("teardown deleted a foreign route at metric %d: %v", theirMetric, f.cmds)
+			}
+			if slices.Contains(f.routes, ours) {
+				t.Errorf("teardown left our own route behind: %v", f.cmds)
+			}
+		})
+	}
+}
+
+// The window between the teardown's snapshot and its delete: another client
+// took our route out and left one of its own on the prefix. A delete naming no
+// metric matched theirs, because the kernel reads a missing metric as a
+// wildcard and not as zero (F02). Naming ours makes the delete fail instead,
+// the entry stays owned, and the next teardown finishes the job.
+func TestDisableTunRouting_DeleteRaceKeepsTheForeignRoute(t *testing.T) {
+	f := cleanHost()
+	withFakeIP(t, f)
+	if err := EnableTunRouting(tunCfg); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	_, ours := ourServerRoute(t, f)
+	theirs := ours
+	theirs.metric = tunMetric / 2
+	f.routes = append(f.routes, theirs)
+	f.before = func(cmd string) {
+		if strings.Contains(cmd, "route del 45.150.32.235/32") {
+			f.routes = slices.DeleteFunc(f.routes, func(r fakeRoute) bool { return r == ours })
+		}
+	}
+
+	if err := DisableTunRouting(); err == nil {
+		t.Fatal("a delete that matched nothing passed for a clean teardown")
+	}
+	if !slices.Contains(f.routes, theirs) {
+		t.Fatalf("teardown deleted the foreign route after ours vanished: %v", f.cmds)
+	}
+
+	// The retry sees the prefix held by someone else and leaves it alone.
+	f.before = nil
+	f.cmds = nil
+	if err := DisableTunRouting(); err != nil {
+		t.Fatalf("second DisableTunRouting: %v", err)
+	}
+	if !slices.Contains(f.routes, theirs) {
+		t.Errorf("the retry deleted the foreign route: %v", f.cmds)
+	}
+}
+
+// Our route was already gone when the teardown read the table, with a foreign
+// one on the prefix: the snapshot shows it is not ours and no delete is sent
+// for it at all.
+func TestDisableTunRouting_ForeignRouteInPlaceOfOursBeforeTheSnapshot(t *testing.T) {
+	f := cleanHost()
+	withFakeIP(t, f)
+	if err := EnableTunRouting(tunCfg); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+	i, ours := ourServerRoute(t, f)
+	theirs := ours
+	theirs.metric = tunMetric + 1
+	f.routes[i] = theirs
+	f.cmds = nil
+
+	if err := DisableTunRouting(); err != nil {
+		t.Fatalf("DisableTunRouting: %v", err)
+	}
+	if !slices.Contains(f.routes, theirs) {
+		t.Errorf("teardown deleted the foreign route: %v", f.cmds)
+	}
+	if f.has("route del 45.150.32.235/32") {
+		t.Errorf("sent a delete for a prefix that was not ours: %v", f.cmds)
 	}
 }

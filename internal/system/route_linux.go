@@ -33,6 +33,15 @@ const directTable = "8888"
 // gateway, which says nothing about how the host reaches the internet.
 const markProbe = "1.1.1.1"
 
+// tunMetric is the metric every IPv4 route of ours carries. An IPv4 route added
+// without one lands at metric 0, and `ip route del` given no metric matches a
+// route of any metric: once another client had replaced ours, that delete took
+// theirs instead (F02). Metric 0 is no fix — for fib_nh_match it is a wildcard,
+// not a value. Spelling one metric out on the add and the delete alike makes
+// the delete name exactly the route this process installed. It is an
+// implementation constant, not a setting, and not the priority of an ip rule.
+const tunMetric = 1024
+
 // blockDefault6 covers the whole IPv6 space in two halves, the same way
 // splitDefault does for IPv4.
 var blockDefault6 = []string{"::/1", "8000::/1"}
@@ -66,7 +75,7 @@ type tunEntry struct {
 	via    string
 	dev    string
 	table  string // empty is main
-	metric int    // zero leaves the kernel's IPv4 default
+	metric int    // named on add and del alike; zero leaves it out of both
 }
 
 // installed lists what EnableTunRouting added, oldest first. An entry joins
@@ -138,7 +147,7 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 		if err != nil {
 			return fmt.Errorf("разобрать маршрут до сервера %s: %w", ip, err)
 		}
-		want = append(want, tunEntry{what: "исключить сервер " + ip + " из туннеля", prefix: prefix, via: via, dev: dev})
+		want = append(want, tunEntry{what: "исключить сервер " + ip + " из туннеля", prefix: prefix, via: via, dev: dev, metric: tunMetric})
 	}
 
 	// The physical path for marked traffic is resolved here, alongside the
@@ -157,7 +166,7 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 	// otherwise direct connections loop during the gap between the two.
 	want = append(want,
 		tunEntry{what: "проложить прямой маршрут мимо туннеля",
-			prefix: netip.PrefixFrom(netip.IPv4Unspecified(), 0), via: directVia, dev: directDev, table: directTable},
+			prefix: netip.PrefixFrom(netip.IPv4Unspecified(), 0), via: directVia, dev: directDev, table: directTable, metric: tunMetric},
 		tunEntry{what: "вывести прямой трафик из туннеля", rule: true})
 
 	// A11: the VPN runs without IPv6, so tun does not route it into the tunnel —
@@ -177,7 +186,7 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 
 	for _, half := range splitDefault {
 		want = append(want, tunEntry{what: "направить трафик в " + cfg.Iface,
-			prefix: netip.MustParsePrefix(half), dev: cfg.Iface})
+			prefix: netip.MustParsePrefix(half), dev: cfg.Iface, metric: tunMetric})
 	}
 
 	// Nothing here may overwrite an entry that is already there (A08), so the
@@ -203,7 +212,60 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 		installed = append(installed, e)
 	}
 
+	// The preflight cannot see a client that takes one of these prefixes while
+	// the adds are running, and an add no longer collides with it: ours carries
+	// tunMetric, so the kernel files both routes side by side and then prefers
+	// the lower metric. Our entry would sit in the table doing nothing while the
+	// screen says the tunnel is up. One reread afterwards turns that into a
+	// refusal — it does not close the window, it stops it passing for success.
+	if err := checkTunRoutingOwned(); err != nil {
+		if undoErr := DisableTunRouting(); undoErr != nil {
+			err = fmt.Errorf("%w\nоткат не завершён: %w", err, undoErr)
+		}
+		return err
+	}
+
 	slog.Info("tun routing enabled", "iface", cfg.Iface, "excluded_servers", len(cfg.ServerIPs))
+	return nil
+}
+
+// checkTunRoutingOwned refuses a set of routes that did not end up owning its
+// prefixes: another client holds one of them alongside ours, or ours is already
+// gone. Both mean the traffic does not go where this call just said it would.
+// Rules are left to the preflight — a foreign rule for the mark is refused
+// there, and ours is named by a priority no add can take over.
+func checkTunRoutingOwned() error {
+	var routes4, routes6 []ipRoute
+	if err := ipJSON(&routes4, "-4", "route", "show", "table", "all"); err != nil {
+		return err
+	}
+	if slices.ContainsFunc(installed, func(e tunEntry) bool { return e.v6 }) {
+		if err := ipJSON(&routes6, "-6", "route", "show", "table", "all"); err != nil {
+			return err
+		}
+	}
+
+	var conflicts []string
+	for _, e := range installed {
+		if e.rule {
+			continue
+		}
+		routes := routes4
+		if e.v6 {
+			routes = routes6
+		}
+		mine, shared, err := e.ownsPrefix(routes)
+		if err != nil {
+			return err
+		}
+		if shared || !mine {
+			conflicts = append(conflicts, e.prefix.String())
+		}
+	}
+	if len(conflicts) > 0 {
+		return fmt.Errorf("пока ставились маршруты, эти записи занял кто-то другой: %s — чужое не перезаписываю, своё снимаю",
+			strings.Join(conflicts, "; "))
+	}
 	return nil
 }
 
@@ -329,6 +391,33 @@ func (e tunEntry) find(routes []ipRoute, rules []ipRule) (present, foreign bool,
 		foreign = true
 	}
 	return false, foreign, nil
+}
+
+// ownsPrefix reports whether this entry is in the table, and whether another
+// client's route holds the same prefix alongside it. find answers a teardown,
+// which only needs to know which of the two it is looking at and stops at the
+// first match; here both matter at once. An add naming an explicit metric no
+// longer collides with a foreign route of another metric — the kernel keeps
+// both and then prefers the lower one, which can be theirs.
+func (e tunEntry) ownsPrefix(routes []ipRoute) (mine, shared bool, err error) {
+	for _, r := range routes {
+		if r.Table != e.table {
+			continue
+		}
+		p, err := routeDst(r.Dst, e.v6)
+		if err != nil {
+			return false, false, err
+		}
+		if p != e.prefix {
+			continue
+		}
+		if r.Gateway == e.via && r.Dev == e.dev && r.Metric == e.metric {
+			mine = true
+			continue
+		}
+		shared = true
+	}
+	return mine, shared, nil
 }
 
 // checkTunRoutingFree refuses to route while any entry of want is already
