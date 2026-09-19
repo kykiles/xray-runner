@@ -384,6 +384,39 @@ func TestFindBinaryOrder(t *testing.T) {
 	}
 }
 
+// The bundles keep the core in bin/, so the folder the user opens holds the app
+// alone; an older install with the core next to the binary still wins.
+func TestFindBinaryInBinDir(t *testing.T) {
+	name := "xray"
+	if runtime.GOOS == "windows" {
+		name = "xray.exe"
+	}
+	appDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(appDir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inBin := filepath.Join(appDir, "bin", name)
+	if err := os.WriteFile(inBin, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origExe := osExecutable
+	defer func() { osExecutable = origExe }()
+	osExecutable = func() (string, error) { return filepath.Join(appDir, "test.exe"), nil }
+	t.Setenv("PATH", "")
+
+	if got, err := FindBinary(); err != nil || got != inBin {
+		t.Fatalf("core in bin/: FindBinary() = %q, %v; want %q", got, err, inBin)
+	}
+
+	beside := filepath.Join(appDir, name)
+	if err := os.WriteFile(beside, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := FindBinary(); err != nil || got != beside {
+		t.Fatalf("core next to the app and in bin/: FindBinary() = %q, %v; want %q", got, err, beside)
+	}
+}
+
 // buildChattyXray builds a mock that floods stdout and stderr, then exits.
 func buildChattyXray(t *testing.T, lines int) string {
 	t.Helper()

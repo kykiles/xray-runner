@@ -28,8 +28,13 @@ cd "$SCRIPT_DIR"
 go build -ldflags "-X main.Version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o "xray-runner${BIN_EXT}" ./cmd/xray-runner
 
 # === Prepare deploy dir ===
+# The core and everything it needs live in bin/, so the folder the user opens
+# holds the app, its settings and the subscription list — nothing else. The app
+# finds the core there itself (xray.FindBinary), and the geo databases, wintun
+# and the updater all follow the core's own directory.
 rm -rf "$DEPLOY_DIR"
-mkdir -p "$DEPLOY_DIR"
+BIN_DIR="$DEPLOY_DIR/bin"
+mkdir -p "$BIN_DIR"
 
 # === Copy runner ===
 cp "xray-runner${BIN_EXT}" "$DEPLOY_DIR/"
@@ -40,7 +45,7 @@ cp "xray-runner${BIN_EXT}" "$DEPLOY_DIR/"
 LOCAL_VERSION="$( ([ -f "$XRAY_BIN" ] && "./$XRAY_BIN" version 2>/dev/null) | awk 'NR==1 {print $2}' || true)"
 if [ "$LOCAL_VERSION" = "$XRAY_VERSION" ]; then
     echo "==> Using local $XRAY_BIN $XRAY_VERSION"
-    cp "$XRAY_BIN" "$DEPLOY_DIR/"
+    cp "$XRAY_BIN" "$BIN_DIR/"
 else
     echo "==> Local $XRAY_BIN is ${LOCAL_VERSION:-absent}, downloading $XRAY_VERSION..."
     TMP_DIR="$(mktemp -d)"
@@ -56,23 +61,24 @@ else
         exit 1
     fi
     unzip -o "$TMP_DIR/$XRAY_ZIP" -d "$TMP_DIR/extract"
-    cp "$TMP_DIR/extract/$XRAY_BIN" "$DEPLOY_DIR/"
+    cp "$TMP_DIR/extract/$XRAY_BIN" "$BIN_DIR/"
     # Extract assets from zip
-    [ -f "$TMP_DIR/extract/geoip.dat" ] && cp "$TMP_DIR/extract/geoip.dat" "$DEPLOY_DIR/"
-    [ -f "$TMP_DIR/extract/geosite.dat" ] && cp "$TMP_DIR/extract/geosite.dat" "$DEPLOY_DIR/"
-    [ "$GOOS" = "windows" ] && [ -f "$TMP_DIR/extract/wintun.dll" ] && cp "$TMP_DIR/extract/wintun.dll" "$DEPLOY_DIR/"
+    [ -f "$TMP_DIR/extract/geoip.dat" ] && cp "$TMP_DIR/extract/geoip.dat" "$BIN_DIR/"
+    [ -f "$TMP_DIR/extract/geosite.dat" ] && cp "$TMP_DIR/extract/geosite.dat" "$BIN_DIR/"
+    [ "$GOOS" = "windows" ] && [ -f "$TMP_DIR/extract/wintun.dll" ] && cp "$TMP_DIR/extract/wintun.dll" "$BIN_DIR/"
 fi
 
 # === Copy assets (from repo if not already from zip) ===
-[ ! -f "$DEPLOY_DIR/geoip.dat" ] && [ -f geoip.dat ] && cp geoip.dat "$DEPLOY_DIR/"
-[ ! -f "$DEPLOY_DIR/geosite.dat" ] && [ -f geosite.dat ] && cp geosite.dat "$DEPLOY_DIR/"
-[ "$GOOS" = "windows" ] && [ ! -f "$DEPLOY_DIR/wintun.dll" ] && [ -f wintun.dll ] && cp wintun.dll "$DEPLOY_DIR/"
+[ ! -f "$BIN_DIR/geoip.dat" ] && [ -f geoip.dat ] && cp geoip.dat "$BIN_DIR/"
+[ ! -f "$BIN_DIR/geosite.dat" ] && [ -f geosite.dat ] && cp geosite.dat "$BIN_DIR/"
+[ "$GOOS" = "windows" ] && [ ! -f "$BIN_DIR/wintun.dll" ] && [ -f wintun.dll ] && cp wintun.dll "$BIN_DIR/"
 # template.json is embedded in the binary; a copy next to the app is optional.
 
-# The docs and licenses travel with the binaries: wintun.dll may only be
-# redistributed together with its license.
-cp README.md LICENSE "$DEPLOY_DIR/"
-[ "$GOOS" = "windows" ] && cp LICENSE-wintun.txt "$DEPLOY_DIR/"
+# The README stays where the user lands; the licenses travel with the binaries
+# they cover — wintun.dll may only be redistributed together with its own.
+cp README.md "$DEPLOY_DIR/"
+cp LICENSE "$BIN_DIR/"
+[ "$GOOS" = "windows" ] && cp LICENSE-wintun.txt "$BIN_DIR/"
 
 # Ship the config from the tracked template, never the working .env — the local
 # .env / subscriptions.txt hold real tokens and must not leak into a bundle.
@@ -80,4 +86,4 @@ cp .env.example "$DEPLOY_DIR/.env"
 : > "$DEPLOY_DIR/subscriptions.txt"
 
 echo "==> Deploy folder: $DEPLOY_DIR"
-ls -la "$DEPLOY_DIR/"
+ls -la "$DEPLOY_DIR/" "$BIN_DIR/"

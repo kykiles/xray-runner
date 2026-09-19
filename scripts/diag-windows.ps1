@@ -117,8 +117,9 @@ Sec 'TUN-адаптер (xray-tun / Wintun)' {
         Get-NetRoute -InterfaceIndex $tun.ifIndex -ErrorAction SilentlyContinue |
             Select-Object DestinationPrefix, NextHop, RouteMetric | Format-Table -AutoSize
     } else { 'TUN-адаптер не найден (приложение не запущено в режиме TUN?)' }
-    'wintun.dll рядом с exe:'
-    Get-Item (Join-Path $root 'wintun.dll') -ErrorAction SilentlyContinue |
+    'wintun.dll рядом с ядром:'
+    @((Join-Path $root 'bin\wintun.dll'), (Join-Path $root 'wintun.dll')) |
+        ForEach-Object { Get-Item $_ -ErrorAction SilentlyContinue } |
         Select-Object FullName, Length, LastWriteTime, @{n = 'Version'; e = { $_.VersionInfo.FileVersion } } | Format-List
 }
 

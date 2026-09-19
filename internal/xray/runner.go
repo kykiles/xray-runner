@@ -36,9 +36,10 @@ func New(binary, configPath string) *Runner {
 	return &Runner{binary: binary, config: configPath}
 }
 
-// FindBinary locates the xray executable next to our own binary or on PATH.
-// H-3: the current working directory is deliberately excluded so a planted
-// ./xray cannot be executed (a real risk under sudo in a writable directory).
+// FindBinary locates the xray executable next to our own binary, in bin/ beside
+// it, or on PATH. H-3: the current working directory is deliberately excluded so
+// a planted ./xray cannot be executed (a real risk under sudo in a writable
+// directory).
 func FindBinary() (string, error) {
 	name := "xray"
 	if runtime.GOOS == "windows" {
@@ -46,9 +47,14 @@ func FindBinary() (string, error) {
 	}
 
 	if exe, err := osExecutable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), name)
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate, nil
+		dir := filepath.Dir(exe)
+		// Next to the binary first: that is where older installs keep the core,
+		// and where a run from a flash drive still finds it. bin/ is where the
+		// bundles put it now, so the folder the user opens holds the app alone.
+		for _, candidate := range []string{filepath.Join(dir, name), filepath.Join(dir, "bin", name)} {
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate, nil
+			}
 		}
 	}
 
@@ -56,7 +62,7 @@ func FindBinary() (string, error) {
 		return p, nil
 	}
 
-	return "", fmt.Errorf("xray не найден: положите %s рядом с исполняемым файлом или в PATH", name)
+	return "", fmt.Errorf("xray не найден: положите %s рядом с исполняемым файлом, в bin/ или в PATH", name)
 }
 
 // Version returns the first line of `xray version`. Failure is non-fatal; the
