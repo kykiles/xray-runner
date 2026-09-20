@@ -56,8 +56,9 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 		}
 	}
 	// A11: before our core listens, a system proxy on a dead local port can only
-	// be a leftover — say so before the session snapshots it as the original.
-	a.warnDeadLoopbackProxy()
+	// be a leftover — ours is cleared and anyone else's is reported, both before
+	// the session snapshots the settings as the original.
+	a.warnDeadLoopbackProxy(ports)
 	// E03: the rules were checked against databases that are not the panel's
 	// current ones — the screen says why.
 	a.noteGeoDatabases()
@@ -92,6 +93,13 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	// teardown runs on every exit path, including a failed bring-up.
 	teardown := func() {
 		sessCancel()
+		// The proxy setting goes back first, before the core is waited on: when
+		// the console window is closed Windows gives the process only a few
+		// seconds, and a setting left naming our dead port takes the internet away
+		// from everything that goes through the system proxy. It depends on
+		// nothing else here, and releaseSession below calls it again for the paths
+		// that get that far.
+		a.restoreSystemProxy()
 		xrayDone.Wait()
 		stopHealth()
 		a.releaseSession()
@@ -1035,12 +1043,7 @@ func (a *App) releaseSession() {
 		}
 		a.killSwitchOn = false
 	}
-	if a.proxyTouched {
-		if err := a.restoreProxy(a.originalProxy); err != nil {
-			slog.Warn("failed to restore proxy", "error", err)
-		}
-		a.proxyTouched = false
-	}
+	a.restoreSystemProxy()
 	if a.splitState() {
 		if err := a.disableSplit(); err != nil {
 			slog.Warn("failed to disable split tunnel", "error", err)
@@ -1056,6 +1059,20 @@ func (a *App) releaseSession() {
 	a.lastCheckOK = false
 	a.healthGen = 0
 	a.statusMu.Unlock()
+}
+
+// restoreSystemProxy puts the system proxy setting back as the session found
+// it. Split out of releaseSession because teardown runs it early, on its own:
+// see the comment there. Doing nothing when there is nothing to undo makes the
+// second call a no-op.
+func (a *App) restoreSystemProxy() {
+	if !a.proxyTouched {
+		return
+	}
+	if err := a.restoreProxy(a.originalProxy); err != nil {
+		slog.Warn("failed to restore proxy", "error", err)
+	}
+	a.proxyTouched = false
 }
 
 // setEndpoint records the selected server so the kill switch can allow xray's

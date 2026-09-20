@@ -191,3 +191,20 @@ func TestReadProxyState_ReadsManualProxy(t *testing.T) {
 		t.Errorf("Server = %q, want 127.0.0.1:10809", s.Server)
 	}
 }
+
+// ClearProxy on the desktop side: the mode goes back to none, which is what a
+// desktop with no proxy has. Nothing else is written — the leftover values the
+// mode no longer points at are GNOME's own to keep.
+func TestClearProxySetsModeNone(t *testing.T) {
+	f := newFakeDesktop()
+	f.replies["gsettings get org.gnome.system.proxy mode"] = "'manual'\n"
+	withFakeDesktop(t, f)
+
+	if err := ClearProxy(); err != nil {
+		t.Fatalf("ClearProxy: %v", err)
+	}
+
+	if !f.wrote("org.gnome.system.proxy mode none") {
+		t.Errorf("mode not set to none, writes: %v", f.writes)
+	}
+}

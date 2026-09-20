@@ -1,16 +1,21 @@
 package app
 
-// A run killed before its teardown — SIGKILL, a power cut — leaves the system
-// proxy pointing at its dead port on this machine. The next run cannot tell that
-// value from a real setting: it snapshots it like any other and puts it back
-// after the session. Without a record of what the killed run replaced, the exact
-// original is gone (A11), so this only says so, loudly, and leaves the setting
-// alone.
+// A run killed before its teardown — SIGKILL, a power cut, a console window
+// closed faster than Windows lets a process clean up — leaves the system proxy
+// pointing at its dead port on this machine. The next run cannot tell that value
+// from a real setting: it snapshots it like any other and puts it back after the
+// session, so one killed run takes the machine's internet away for good.
+//
+// Our own address on a dead port can only be that leftover, and nobody wants it
+// back: it is cleared before the session snapshots it. Any other local proxy may
+// be somebody's real setting whose original we have no record of (A11), so that
+// one is only reported, loudly, and left alone.
 
 import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,17 +25,48 @@ import (
 // deadProxyHelp is where the manual fix is written up.
 const deadProxyHelp = "README, «Частые проблемы» → «Сайты не открываются после аварийного выхода»"
 
-// warnDeadLoopbackProxy notes a system proxy left pointing at a dead port on
+// warnDeadLoopbackProxy handles a system proxy left pointing at a dead port on
 // this machine. Called before the core starts, while nothing of ours listens
-// yet; it only reads the setting, and the session snapshots it as usual.
-func (a *App) warnDeadLoopbackProxy() {
+// yet, so the port being dead is a fact about the setting and not about timing.
+// ports is this session's, and its HTTP port is the address Enable writes.
+func (a *App) warnDeadLoopbackProxy(ports sessionPorts) {
 	addr := deadLoopbackProxy(a.readProxyState(), a.proxyListening)
 	if addr == "" {
 		return
 	}
+	if addr == ourProxyAddr(ports.http) {
+		a.clearDeadProxy(addr)
+		return
+	}
 	slog.Warn("системный прокси указывает на локальный порт, где никто не слушает", "server", addr, "help", deadProxyHelp)
-	note := fmt.Sprintf("Системный прокси указывает на %s, но там никто не слушает — похоже, прошлый запуск завершился аварийно. "+
-		"Программа эту настройку не меняет и после сессии вернёт её как была. Как убрать вручную: %s.", addr, deadProxyHelp)
+	a.noteOnStatus(fmt.Sprintf("Системный прокси указывает на %s, но там никто не слушает — похоже, прошлый запуск завершился аварийно. "+
+		"Это не наш адрес, поэтому программа настройку не меняет и после сессии вернёт её как была. Как убрать вручную: %s.", addr, deadProxyHelp))
+}
+
+// clearDeadProxy takes our own leftover setting off the machine. It runs before
+// the session snapshots the settings, so the snapshot — and with it what the
+// teardown restores — is the machine without a proxy.
+func (a *App) clearDeadProxy(addr string) {
+	if err := a.clearProxy(); err != nil {
+		slog.Error("не удалось снять оставшийся системный прокси", "server", addr, "error", err)
+		a.noteOnStatus(fmt.Sprintf("Системный прокси указывает на наш адрес %s, где никто не слушает — он остался от запуска, "+
+			"завершившегося аварийно, и снять его не удалось: %v. Как убрать вручную: %s.", addr, err, deadProxyHelp))
+		return
+	}
+	slog.Warn("снят системный прокси, оставшийся от аварийно завершённого запуска", "server", addr)
+	a.noteOnStatus(fmt.Sprintf("Системный прокси был включён на нашем адресе %s, где никто не слушает: он остался от запуска, "+
+		"завершившегося аварийно, и снят — без этого интернет не работал бы и после выхода из программы.", addr))
+}
+
+// ourProxyAddr is the address Enable puts into the system settings for this
+// session's HTTP port.
+func ourProxyAddr(httpPort int) string {
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort))
+}
+
+// noteOnStatus queues a line for the status screen. Nothing is drawn yet when
+// these run, so the note waits in pendingNote instead of being published.
+func (a *App) noteOnStatus(note string) {
 	if a.pendingNote != "" {
 		note = a.pendingNote + " " + note
 	}

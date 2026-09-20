@@ -211,3 +211,26 @@ func TestRestoreFallbackKeepsForeignProxyServer(t *testing.T) {
 		t.Errorf("ProxyEnable = %d, want 1: a foreign enabled proxy was switched off", got)
 	}
 }
+
+// ClearProxy is what the app calls on a setting left over from a run that died
+// before its teardown: the switch goes off, and our server and overrides go
+// away entirely, which is how a machine that never had a proxy looks.
+func TestClearProxyLeavesNothingOfOurs(t *testing.T) {
+	f := useFakeRegistry(t, &fakeRegistry{
+		ints: map[string]uint64{"ProxyEnable": 1},
+		strs: map[string]string{"ProxyServer": "127.0.0.1:10809", "ProxyOverride": "<-loopback>"},
+	})
+
+	if err := ClearProxy(); err != nil {
+		t.Fatalf("ClearProxy: %v", err)
+	}
+
+	if got := f.ints["ProxyEnable"]; got != 0 {
+		t.Errorf("ProxyEnable = %d, want 0", got)
+	}
+	for _, name := range []string{"ProxyServer", "ProxyOverride"} {
+		if v, ok := f.strs[name]; ok {
+			t.Errorf("%s = %q, want the value gone", name, v)
+		}
+	}
+}

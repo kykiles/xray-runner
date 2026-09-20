@@ -80,3 +80,23 @@ func TestReleaseSessionUndoesNothingWhenNothingEnabled(t *testing.T) {
 			spy.killSwitchOff, spy.proxyRestored)
 	}
 }
+
+// Teardown restores the proxy first, before it waits for the core, and
+// releaseSession runs the same step again afterwards. The second call must find
+// nothing to do: the settings are already the user's, and writing them twice
+// would restore them over a proxy the next session has meanwhile enabled.
+func TestRestoreSystemProxyRunsOnce(t *testing.T) {
+	var spy teardownSpy
+	a := newTeardownApp(t, &spy)
+	a.proxyTouched = true
+
+	a.restoreSystemProxy()
+	a.releaseSession()
+
+	if spy.proxyRestored != 1 {
+		t.Errorf("proxy restored %d times, want 1", spy.proxyRestored)
+	}
+	if a.proxyTouched {
+		t.Error("proxyTouched still set after teardown")
+	}
+}

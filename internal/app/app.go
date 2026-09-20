@@ -95,6 +95,9 @@ type App struct {
 	// desktop's settings nor the network.
 	readProxyState func() system.ProxyState
 	proxyListening func(addr string) bool
+	// clearProxy takes a leftover proxy setting of ours off the machine
+	// (clearDeadProxy); a field for the same reason as restoreProxy.
+	clearProxy func() error
 	// enableKillSwitch / enableTunRouting / disableTunRouting are the tun
 	// bring-up's system changes, fields for the same reason.
 	enableKillSwitch  func(system.KillSwitchConfig) error
@@ -153,6 +156,7 @@ func New(cfg *config.Config, opts Options) *App {
 		readProxyState:    system.ReadProxyState,
 		proxyListening:    listeningAt,
 		restoreProxy:      proxy.Restore,
+		clearProxy:        system.ClearProxy,
 		enableKillSwitch:  system.EnableKillSwitch,
 		enableTunRouting:  system.EnableTunRouting,
 		disableTunRouting: system.DisableTunRouting,

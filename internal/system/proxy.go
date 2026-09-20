@@ -23,3 +23,13 @@ func (pm *ProxyManager) Restore(s ProxyState) error {
 	}
 	return nil
 }
+
+// ClearProxy switches the system proxy off and takes the values Enable writes
+// out. It is not a restore: it undoes a setting that is ours — what a run that
+// died before its teardown left pointing at a port nothing listens on. The
+// switch is written as off rather than deleted, which is how a machine with no
+// proxy looks; the server and the overrides go, because on a clean machine they
+// do not exist.
+func ClearProxy() error {
+	return WriteProxyState(ProxyState{Read: true, EnabledSet: true})
+}

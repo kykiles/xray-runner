@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -44,9 +45,10 @@ func TestDeadLoopbackProxy(t *testing.T) {
 	}
 }
 
-// The warning is a note and a log line, never a change: the setting stays as
-// found, so the session's snapshot is still the exact one, and a run without a
-// terminal gets the warning in its log without waiting on anyone (A11).
+// A dead local proxy that is not ours is a note and a log line, never a change:
+// its original is nobody's to reconstruct, so the setting stays as found, the
+// session's snapshot is still the exact one, and a run without a terminal gets
+// the warning in its log without waiting on anyone (A11).
 func TestWarnDeadLoopbackProxy(t *testing.T) {
 	for _, headless := range []bool{false, true} {
 		t.Run(fmt.Sprintf("headless=%v", headless), func(t *testing.T) {
@@ -55,11 +57,15 @@ func TestWarnDeadLoopbackProxy(t *testing.T) {
 			reads := 0
 			a.readProxyState = func() system.ProxyState {
 				reads++
-				return system.ProxyState{Enabled: true, Server: "127.0.0.1:10809"}
+				return system.ProxyState{Enabled: true, Server: "127.0.0.1:3128"}
 			}
 			a.proxyListening = func(string) bool { return false }
 			a.restoreProxy = func(system.ProxyState) error {
 				t.Error("the proxy setting was written")
+				return nil
+			}
+			a.clearProxy = func() error {
+				t.Error("a foreign proxy setting was cleared")
 				return nil
 			}
 			a.pendingNote = "Прошлый режим TUN недоступен."
@@ -71,7 +77,7 @@ func TestWarnDeadLoopbackProxy(t *testing.T) {
 
 			done := make(chan struct{})
 			go func() {
-				a.warnDeadLoopbackProxy()
+				a.warnDeadLoopbackProxy(sessionPorts{socks: 10808, http: 10809})
 				close(done)
 			}()
 			select {
@@ -83,15 +89,104 @@ func TestWarnDeadLoopbackProxy(t *testing.T) {
 			if reads != 1 {
 				t.Errorf("proxy setting read %d times, want once", reads)
 			}
-			for _, want := range []string{"Прошлый режим TUN недоступен.", "127.0.0.1:10809", "README"} {
+			for _, want := range []string{"Прошлый режим TUN недоступен.", "127.0.0.1:3128", "README"} {
 				if !strings.Contains(a.pendingNote, want) {
 					t.Errorf("note %q lacks %q", a.pendingNote, want)
 				}
 			}
-			if !strings.Contains(logs.String(), "127.0.0.1:10809") {
+			if !strings.Contains(logs.String(), "127.0.0.1:3128") {
 				t.Errorf("log lacks the address:\n%s", logs.String())
 			}
 		})
+	}
+}
+
+// The proxy left on our own port is our own leftover, and restoring it after the
+// session would keep the machine without internet for good: it is cleared before
+// the session takes its snapshot, and the user is told why.
+func TestClearsOurOwnDeadProxy(t *testing.T) {
+	a := New(&config.Config{}, Options{})
+	a.readProxyState = func() system.ProxyState {
+		return system.ProxyState{Enabled: true, Server: "127.0.0.1:10809"}
+	}
+	a.proxyListening = func(string) bool { return false }
+	cleared := 0
+	a.clearProxy = func() error {
+		cleared++
+		return nil
+	}
+
+	a.warnDeadLoopbackProxy(sessionPorts{socks: 10808, http: 10809})
+
+	if cleared != 1 {
+		t.Fatalf("clearProxy called %d times, want once", cleared)
+	}
+	for _, want := range []string{"127.0.0.1:10809", "снят"} {
+		if !strings.Contains(a.pendingNote, want) {
+			t.Errorf("note %q lacks %q", a.pendingNote, want)
+		}
+	}
+}
+
+// Our address with something listening on it is another program's proxy that
+// happens to share the port, not our leftover — and a session about to start
+// must not have its own port cleared out from under it either.
+func TestKeepsOurAddressWhenItAnswers(t *testing.T) {
+	a := New(&config.Config{}, Options{})
+	a.readProxyState = func() system.ProxyState {
+		return system.ProxyState{Enabled: true, Server: "127.0.0.1:10809"}
+	}
+	a.proxyListening = func(string) bool { return true }
+	a.clearProxy = func() error {
+		t.Error("a live proxy was cleared")
+		return nil
+	}
+
+	a.warnDeadLoopbackProxy(sessionPorts{socks: 10808, http: 10809})
+
+	if a.pendingNote != "" {
+		t.Errorf("note %q, want none", a.pendingNote)
+	}
+}
+
+// A session on another port does not recognise a leftover from a session that
+// used a different one: it is reported, not cleared, because the address is no
+// longer provably ours.
+func TestForeignPortIsOnlyReported(t *testing.T) {
+	a := New(&config.Config{}, Options{})
+	a.readProxyState = func() system.ProxyState {
+		return system.ProxyState{Enabled: true, Server: "127.0.0.1:10809"}
+	}
+	a.proxyListening = func(string) bool { return false }
+	a.clearProxy = func() error {
+		t.Error("a setting that is not ours was cleared")
+		return nil
+	}
+
+	a.warnDeadLoopbackProxy(sessionPorts{socks: 20808, http: 20809})
+
+	if !strings.Contains(a.pendingNote, "127.0.0.1:10809") {
+		t.Errorf("note %q lacks the address", a.pendingNote)
+	}
+}
+
+// Clearing it can fail (group policy, a locked hive). The session still starts,
+// and the user is told what to fix by hand instead of silently losing the
+// internet after the next exit.
+func TestClearFailureIsReported(t *testing.T) {
+	a := New(&config.Config{}, Options{})
+	a.readProxyState = func() system.ProxyState {
+		return system.ProxyState{Enabled: true, Server: "127.0.0.1:10809"}
+	}
+	a.proxyListening = func(string) bool { return false }
+	a.clearProxy = func() error { return errors.New("отказано в доступе") }
+
+	a.warnDeadLoopbackProxy(sessionPorts{socks: 10808, http: 10809})
+
+	for _, want := range []string{"127.0.0.1:10809", "отказано в доступе", "README"} {
+		if !strings.Contains(a.pendingNote, want) {
+			t.Errorf("note %q lacks %q", a.pendingNote, want)
+		}
 	}
 }
 
