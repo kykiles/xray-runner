@@ -79,3 +79,6 @@ geo/
 
 # Local issue tracker (specs and tickets for the agent skills)
 .scratch/
+
+# Knowledge graph built by graphify (graph.json ~3 MB, rebuilt from source in seconds)
+graphify-out/
