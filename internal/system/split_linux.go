@@ -124,6 +124,10 @@ func currentCgroup(pid string) string {
 	if err != nil {
 		return ""
 	}
+	return cgroupLine(data)
+}
+
+func cgroupLine(data []byte) string {
 	for line := range strings.SplitSeq(string(data), "\n") {
 		if path, ok := strings.CutPrefix(line, "0::"); ok {
 			return strings.TrimSpace(path)
@@ -183,11 +187,16 @@ func ListProcesses() ([]Process, error) {
 
 // ownedBy reports whether user uid runs the process, by its real and
 // effective ids both: a setuid program the user started is not the user's.
-func ownedBy(pid string, uid int) bool {
-	data, err := os.ReadFile(filepath.Join(procRoot, pid, "status"))
-	if err != nil {
-		return false
-	}
+// The process is its /proc directory, opened beforehand: the files read
+// through it are those of the process that had the pid then, and fail once
+// it is gone, so a pid handed on to another process meanwhile does not answer
+// for it.
+func ownedBy(dir *os.Root, uid int) bool {
+	data, err := dir.ReadFile("status")
+	return err == nil && statusOwnedBy(data, uid)
+}
+
+func statusOwnedBy(data []byte, uid int) bool {
 	for line := range strings.SplitSeq(string(data), "\n") {
 		if v, ok := strings.CutPrefix(line, "Uid:"); ok {
 			f := strings.Fields(v)
@@ -431,22 +440,51 @@ func moveIntoSplit(names []string, uid int) (SplitScan, error) {
 		if _, err := strconv.Atoi(e.Name()); err != nil {
 			continue
 		}
-		if uid >= 0 && !ownedBy(e.Name(), uid) {
-			continue
+		// For one user the process is pinned by its /proc directory before
+		// its owner is read: the pid is all cgroup.procs takes, and it may
+		// pass to another user's process between the check and the write.
+		var pin *os.Root
+		if uid >= 0 {
+			if pin, err = os.OpenRoot(filepath.Join(procRoot, e.Name())); err != nil {
+				continue
+			}
+			if !ownedBy(pin, uid) {
+				_ = pin.Close()
+				continue
+			}
 		}
 		name, ok := listedName(procName(e.Name()), want)
 		if !ok {
+			closePin(pin)
 			continue
 		}
 		// Remember where the process lived before teardown puts it back: under
 		// systemd every process sits in a slice that carries its resource limits,
 		// and dropping it into the root cgroup would quietly lose them.
 		home := currentCgroup(e.Name())
+		if pin != nil {
+			home = ""
+			if data, err := pin.ReadFile("cgroup"); err == nil {
+				home = cgroupLine(data)
+			}
+		}
 		// A process that exited between the scan and the write, or a thread the
 		// kernel refuses to move, must not abort the rest of the list.
-		if err := writePID(procs, e.Name()); err != nil {
+		if err := movePID(procs, e.Name()); err != nil {
 			slog.Debug("split: pid not moved", "pid", e.Name(), "name", name, "error", err)
+			closePin(pin)
 			continue
+		}
+		if pin != nil {
+			// Still there and still the user's after the write: the pid named
+			// this very process all along. Otherwise it went setuid meanwhile,
+			// or its pid went to someone else's process — which goes back.
+			status, err := pin.ReadFile("status")
+			_ = pin.Close()
+			if alive := err == nil; !alive || !statusOwnedBy(status, uid) {
+				evictSplit(e.Name(), home, alive)
+				continue
+			}
 		}
 		// A rescan re-reads processes it moved itself, whose "home" now *is* the
 		// split cgroup: recording that would send them nowhere on teardown.
@@ -496,6 +534,47 @@ func moveIntoSplit(names []string, uid int) (SplitScan, error) {
 	}
 	sort.Strings(out)
 	return SplitScan{Matched: out, Unclosed: slices.Sorted(maps.Keys(unclosed)), Moved: handed}, nil
+}
+
+func closePin(pin *os.Root) {
+	if pin != nil {
+		_ = pin.Close()
+	}
+}
+
+// movePID is writePID for moving into the split; a variable so tests can
+// change a process between the check and the move.
+var movePID = writePID
+
+// evictSplit takes a process moved in by mistake back out. With the pinned
+// process alive, it is the one that went setuid, and home is where it came
+// from. Gone, it may have handed its pid to a process that got moved in its
+// place: where that one lived is not known, and the root cgroup is the place
+// no user controls.
+func evictSplit(pid, home string, alive bool) {
+	if !alive {
+		if currentCgroup(pid) != splitRel() {
+			return
+		}
+		home = ""
+	}
+	dest := restoreDest(home)
+	if err := writePID(dest, pid); err != nil {
+		slog.Warn("split: foreign process not moved out", "pid", pid, "dest", dest, "error", err)
+		return
+	}
+	slog.Warn("split: foreign process moved out", "pid", pid, "dest", dest)
+}
+
+// restoreDest is the cgroup.procs a process goes back to: its home's, or the
+// root cgroup's when the home is unknown or gone (a closed systemd scope).
+func restoreDest(home string) string {
+	if home != "" {
+		if target := filepath.Join(cgroupRoot, home, "cgroup.procs"); fileExists(target) {
+			return target
+		}
+	}
+	return filepath.Join(cgroupRoot, "cgroup.procs")
 }
 
 // killLeaked closes the TCP connections the given processes had open before they
@@ -713,12 +792,7 @@ func DisableSplit() error {
 			if pid == "" {
 				continue
 			}
-			dest := filepath.Join(cgroupRoot, "cgroup.procs")
-			if home := splitHome[pid]; home != "" {
-				if target := filepath.Join(cgroupRoot, home, "cgroup.procs"); fileExists(target) {
-					dest = target
-				}
-			}
+			dest := restoreDest(splitHome[pid])
 			if err := writePID(dest, pid); err != nil {
 				slog.Debug("split: pid not restored", "pid", pid, "dest", dest, "error", err)
 			}
