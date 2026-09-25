@@ -5,6 +5,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 )
@@ -96,5 +97,32 @@ func TestChownDirToSudoUser_RefusesNonDir(t *testing.T) {
 	}
 	if err := chownDirToSudoUser(file, os.Geteuid(), os.Getegid()); err == nil {
 		t.Error("chownDirToSudoUser accepted a non-directory")
+	}
+}
+
+// Under sudo every directory ownDir creates goes back to the user, not only
+// the last one: a missing ~/.config used to stay root's. What was there
+// already keeps its owner.
+func TestOwnDir_HandsBackEveryCreatedDir(t *testing.T) {
+	gid := 4242
+	if os.Geteuid() != 0 {
+		gid = otherGID(t)
+	}
+	home := t.TempDir()
+	before := dirGID(t, home)
+	t.Setenv("SUDO_UID", strconv.Itoa(os.Geteuid()))
+	t.Setenv("SUDO_GID", strconv.Itoa(gid))
+
+	dir := filepath.Join(home, ".config", "xray-runner")
+	if err := ownDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{filepath.Join(home, ".config"), dir} {
+		if got := dirGID(t, d); got != gid {
+			t.Errorf("%s: group %d, want %d", d, got, gid)
+		}
+	}
+	if got := dirGID(t, home); got != before {
+		t.Errorf("the existing home changed group: %d, was %d", got, before)
 	}
 }

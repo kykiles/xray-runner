@@ -111,18 +111,37 @@ func CacheSubdir(elem ...string) (string, error) {
 
 // ownDir makes dir (0700) and, under sudo, hands it back to the invoking user:
 // made by root, it would keep the next run without sudo from reading what is
-// inside. Best-effort, as everywhere else — except that a symlink at the final
-// component is not followed but refused: the handback would otherwise give the
+// inside. Every directory it has to create on the way goes back too: a missing
+// ~/.config made by root would otherwise stay root's, and the user's own
+// programs could not write their settings there. Directories that were there
+// already keep their owner. Best-effort, as everywhere else — except that a
+// symlink is not followed but refused: the handback would otherwise give the
 // user whatever the link pointed at, a path to root. A tampered dir is dropped
 // rather than written to.
 func ownDir(dir string) error {
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
+	uid, gid, ok := sudoOwner()
+	if !ok {
+		return os.MkdirAll(dir, 0700)
 	}
-	if uid, gid, ok := sudoOwner(); ok {
-		return chownDirToSudoUser(dir, uid, gid)
+	var missing []string
+	for p := filepath.Clean(dir); ; p = filepath.Dir(p) {
+		if _, err := os.Lstat(p); err == nil {
+			break
+		}
+		missing = append(missing, p)
+		if filepath.Dir(p) == p {
+			break
+		}
 	}
-	return nil
+	for i := len(missing) - 1; i >= 0; i-- {
+		if err := os.Mkdir(missing[i], 0700); err != nil && !os.IsExist(err) {
+			return err
+		}
+		if err := chownDirToSudoUser(missing[i], uid, gid); err != nil {
+			return err
+		}
+	}
+	return chownDirToSudoUser(dir, uid, gid)
 }
 
 // LocalDir is where what belongs to this one machine is kept: the HWID — one
