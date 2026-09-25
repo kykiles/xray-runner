@@ -153,3 +153,72 @@ func TestConnsOf(t *testing.T) {
 		t.Fatalf("conns %v", conns)
 	}
 }
+
+// A process that stops being the user's between the scan and the move — it
+// went setuid, or its pid went to another user's process — is taken back out:
+// to where it came from when it is the same process, to the root cgroup when
+// its pid now names another one, whose home is not known.
+func TestMoveIntoSplitReturnsForeignProcess(t *testing.T) {
+	for _, reused := range []bool{false, true} {
+		t.Run(map[bool]string{false: "setuid", true: "reused"}[reused], func(t *testing.T) {
+			withFakes(t, map[string]string{"42": "code"})
+			writeStatus(t, "42", "1000\t1000\t1000\t1000")
+			home := filepath.Join(cgroupRoot, "user.slice", "app-code.scope")
+			if err := os.MkdirAll(home, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, "cgroup.procs"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			old := movePID
+			t.Cleanup(func() { movePID = old })
+			movePID = func(path, pid string) error {
+				dir := filepath.Join(procRoot, pid)
+				if reused {
+					// The process exits and its pid goes to another one: a
+					// new /proc directory, which the pinned one is not.
+					if err := os.RemoveAll(dir); err != nil {
+						return err
+					}
+					if err := os.MkdirAll(dir, 0o755); err != nil {
+						return err
+					}
+				}
+				writeStatus(t, pid, "1001\t1001\t1001\t1001")
+				if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte("0::"+splitRel()+"\n"), 0o644); err != nil {
+					return err
+				}
+				return old(path, pid)
+			}
+
+			scan, err := EnableSplitFor([]string{"code"}, 10810, 10853, 1000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(scan.Matched) != 0 || len(scan.Moved) != 0 || splitHome["42"] != "" {
+				t.Fatalf("scan %+v, home %q", scan, splitHome["42"])
+			}
+			dest := filepath.Join(home, "cgroup.procs")
+			if reused {
+				dest = filepath.Join(cgroupRoot, "cgroup.procs")
+			}
+			back, err := os.ReadFile(dest)
+			if err != nil || strings.TrimSpace(string(back)) != "42" {
+				t.Fatalf("%s: %q, %v; want 42 back", dest, back, err)
+			}
+		})
+	}
+}
+
+// A process the user still owns after the move stays moved.
+func TestMoveIntoSplitKeepsOwnProcess(t *testing.T) {
+	withFakes(t, map[string]string{"42": "code"})
+	writeStatus(t, "42", "1000\t1000\t1000\t1000")
+	scan, err := EnableSplitFor([]string{"code"}, 10810, 10853, 1000)
+	if err != nil || len(scan.Matched) != 1 || splitHome["42"] != "/user.slice/app-code.scope" {
+		t.Fatalf("scan %+v, %v, home %q", scan, err, splitHome["42"])
+	}
+	if back, _ := os.ReadFile(filepath.Join(cgroupRoot, "cgroup.procs")); len(back) != 0 {
+		t.Fatalf("root cgroup got %q", back)
+	}
+}

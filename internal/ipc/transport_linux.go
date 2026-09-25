@@ -106,17 +106,25 @@ func Listen() (Listener, error) {
 	if g, err := user.LookupGroup(Group); err == nil {
 		gid, _ = strconv.Atoi(g.Gid)
 	}
-	if l, err := activated(); err != nil || l != nil {
-		if err != nil {
-			return nil, err
-		}
-		return &unixListener{l: l, gid: gid}, nil
-	}
-	if err := RuntimeDir(); err != nil {
+	l, err := activated()
+	if err != nil {
 		return nil, err
 	}
+	// Under systemd too: DirectoryMode only holds for a directory the socket
+	// unit creates, and a run under sudo earlier in the boot may have left it
+	// 0700. The unit lets the service write there, and the directory is
+	// root's, so the service needs no CAP_FOWNER to change its mode.
+	if err := RuntimeDir(); err != nil {
+		if l != nil {
+			_ = l.Close()
+		}
+		return nil, err
+	}
+	if l != nil {
+		return &unixListener{l: l, gid: gid}, nil
+	}
 	_ = os.Remove(socketPath)
-	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	l, err = net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil {
 		return nil, err
 	}
@@ -133,8 +141,9 @@ func Listen() (Listener, error) {
 	return &unixListener{l: l, gid: gid}, nil
 }
 
-// runtimeDir holds the socket, and root's journal records (package system).
-const runtimeDir = "/run/xray-runner"
+// runtimeDir holds the socket, and root's journal records (package system);
+// a variable so tests can have it elsewhere.
+var runtimeDir = "/run/xray-runner"
 
 // RuntimeDir makes the socket's directory passable for the group: the journal
 // creates it 0700 when it gets there first, and a member of the group could
@@ -155,6 +164,10 @@ func listenAt(path string, gid int) (*unixListener, error) {
 	return &unixListener{l: l, gid: gid}, nil
 }
 
+// listenFDsStart is the first descriptor systemd passes (SD_LISTEN_FDS_START),
+// a variable so tests can pass one of their own.
+var listenFDsStart = 3
+
 // activated is the socket systemd passed in (sd_listen_fds), nil without one.
 func activated() (*net.UnixListener, error) {
 	if os.Getenv("LISTEN_PID") != strconv.Itoa(os.Getpid()) {
@@ -167,9 +180,9 @@ func activated() (*net.UnixListener, error) {
 	_ = os.Unsetenv("LISTEN_PID")
 	_ = os.Unsetenv("LISTEN_FDS")
 	_ = os.Unsetenv("LISTEN_FDNAMES")
-	const first = 3 // SD_LISTEN_FDS_START
+	first := listenFDsStart
 	syscall.CloseOnExec(first)
-	f := os.NewFile(first, "systemd-socket")
+	f := os.NewFile(uintptr(first), "systemd-socket")
 	l, err := net.FileListener(f)
 	_ = f.Close()
 	if err != nil {

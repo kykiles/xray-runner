@@ -133,6 +133,12 @@ func install() error {
 	if err := run("systemctl", "daemon-reload"); err != nil {
 		return err
 	}
+	// A run under sudo earlier in this boot may have made the socket's
+	// directory 0700, and systemd keeps the mode of one that exists: the
+	// group could not reach the socket until a reboot.
+	if err := ipc.RuntimeDir(); err != nil {
+		return err
+	}
 	if err := run("systemctl", "enable", "--now", socketUnit); err != nil {
 		return err
 	}
