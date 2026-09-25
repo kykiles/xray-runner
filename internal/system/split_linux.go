@@ -213,6 +213,9 @@ func EnableSplit(names []string, tcpPort, dnsPort int) (SplitScan, error) {
 	if err := nftCmd.lookPath("nft"); err != nil {
 		return SplitScan{}, fmt.Errorf("nftables не найден: %w", err)
 	}
+	// Written down before the cgroup and the ruleset exist: processes of a run
+	// killed with them in place keep redirecting into a dead port (H06).
+	note(func(j *journal) { j.Split = true })
 	if err := os.MkdirAll(splitCgroup, 0750); err != nil {
 		return SplitScan{}, fmt.Errorf("создать cgroup %s: %w", splitCgroup, err)
 	}
@@ -376,6 +379,11 @@ func moveIntoSplit(names []string) (SplitScan, error) {
 		found[name] = true
 		seen[e.Name()] = name
 	}
+	if len(moved) > 0 {
+		// Where they came from, so a teardown after a crash can put them back.
+		home := maps.Clone(splitHome)
+		note(func(j *journal) { j.SplitHome = home })
+	}
 	maps.Copy(splitUnclosed, killLeaked(moved))
 	unclosed := map[string]bool{}
 	for pid := range splitUnclosed {
@@ -509,6 +517,7 @@ func DisableSplit() error {
 	_, _ = nftCmd.run("nft", "delete", "table", "ip6", splitTable)
 
 	if _, err := os.Stat(splitCgroup); err != nil {
+		note(func(j *journal) { j.Split, j.SplitHome = false, nil })
 		return nil
 	}
 	// The cgroup has to be emptied before it can be removed: rmdir refuses a
@@ -539,5 +548,6 @@ func DisableSplit() error {
 	if err := os.RemoveAll(splitCgroup); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("удалить cgroup %s: %w", splitCgroup, err)
 	}
+	note(func(j *journal) { j.Split, j.SplitHome = false, nil })
 	return nil
 }

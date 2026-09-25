@@ -50,6 +50,11 @@ func EnableKillSwitch(cfg KillSwitchConfig) error {
 	// rules or OUTPUT jumps.
 	_ = DisableKillSwitch()
 
+	// Written down before the first rule: a run killed with the switch half
+	// built would otherwise leave the network cut until a reboot (H06). The
+	// teardown needs nothing but the chain's name.
+	note(func(j *journal) { j.KillSwitch = true })
+
 	for _, bin := range firewallBins {
 		if err := applyKillSwitch(bin, cfg); err != nil {
 			// The caller treats a failed enable as "no kill switch" and never
@@ -172,5 +177,9 @@ func DisableKillSwitch() error {
 			errs = append(errs, fmt.Errorf("%s: цепочка %s осталась после снятия kill switch", bin, killSwitchChain))
 		}
 	}
-	return errors.Join(errs...)
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	note(func(j *journal) { j.KillSwitch = false })
+	return nil
 }

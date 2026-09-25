@@ -56,6 +56,7 @@ func TestWindowsEndToEnd(t *testing.T) {
 	t.Run("proxy", e.testProxy)
 	t.Run("tun", e.testTun)
 	t.Run("killed app", e.testKilledApp)
+	t.Run("killed tun app", e.testKilledTunApp)
 }
 
 // env is what every subtest shares: the built app with the core beside it and
@@ -161,6 +162,54 @@ func (e *env) testKilledApp(t *testing.T) {
 	if final := readProxyReg(t); final.Enable != 0 || final.Server == ourProxy {
 		t.Errorf("system proxy after the run that followed the kill: %+v, want it off and not on %s", final, ourProxy)
 	}
+}
+
+// testKilledTunApp: an app killed with the tunnel up loses its adapter and the
+// routes on it, but its server exception stays on the path it pinned — and the
+// next TUN session refused to start over a route it could not tell from
+// somebody else's. The journal names it, the next run takes it down before its
+// own session, and a clean exit leaves no journal behind (H06).
+func (e *env) testKilledTunApp(t *testing.T) {
+	exception := serverAddr + "/32"
+	r := e.startApp(t, "tun-killed", "tun")
+	r.waitLog(t, "msg=connected", 120*time.Second)
+	core := r.corePID(t)
+	r.kill(t)
+	waitExit(t, core, 15*time.Second, "the core outlived an app killed outright")
+
+	if routeAliases(t, exception) == "" {
+		t.Logf("after the kill no route for %s is left; expected the server exception behind", exception)
+	}
+	if !journalExists(t) {
+		t.Errorf("the killed run left nothing written down")
+	}
+
+	r = e.startApp(t, "tun-after-kill", "tun")
+	r.waitLog(t, "msg=connected", 120*time.Second)
+	r.waitLog(t, "сняты остатки аварийно завершённого запуска", 5*time.Second)
+	if code := r.stop(t); code != 0 {
+		t.Errorf("exit code %d, want 0", code)
+	}
+	if got := routeAliases(t, exception); got != "" {
+		t.Errorf("route %s still there after the session, on %q", exception, got)
+	}
+	if journalExists(t) {
+		t.Errorf("a clean exit left the journal key behind")
+	}
+}
+
+// journalExists reports whether the app's journal key is in the registry.
+func journalExists(t *testing.T) bool {
+	t.Helper()
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\xray-runner`, registry.QUERY_VALUE)
+	if errors.Is(err, registry.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("open the journal key: %v", err)
+	}
+	_ = k.Close()
+	return true
 }
 
 // --- the app -----------------------------------------------------------------

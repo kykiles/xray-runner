@@ -197,11 +197,14 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 	}
 
 	// add fails on an entry a client slipped in after the check instead of
-	// replacing it, and an entry is owned only once its add went through.
+	// replacing it, and an entry is owned only once its add went through. The
+	// journal hears of it before the add: a run killed right after the add
+	// still has the entry written down (H06).
 	for _, e := range want {
 		if e.rule {
 			e.pref = pref
 		}
+		journalRoutes(append(slices.Clip(installed), e))
 		if out, err := ipCmd.run("ip", e.args("add")...); err != nil {
 			err = fmt.Errorf("%s: %w\n%s", e.what, err, out)
 			if undoErr := DisableTunRouting(); undoErr != nil {
@@ -325,6 +328,7 @@ func DisableTunRouting() error {
 	}
 	slices.Reverse(kept)
 	installed = kept
+	journalRoutes(installed)
 	if len(errs) > 0 {
 		return fmt.Errorf("маршруты TUN сняты не полностью: %w", errors.Join(errs...))
 	}

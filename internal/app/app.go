@@ -94,6 +94,10 @@ type App struct {
 	// clearProxy takes a leftover proxy setting of ours off the machine
 	// (clearDeadProxy); a field for the same reason as restoreProxy.
 	clearProxy func() error
+	// recoverJournal takes down the routes, kill switch and split a run that
+	// died without its teardown left behind (recoverLeftovers); a field for the
+	// same reason.
+	recoverJournal func() (string, error)
 	// enableKillSwitch / enableTunRouting / disableTunRouting are the tun
 	// bring-up's system changes, fields for the same reason.
 	enableKillSwitch  func(system.KillSwitchConfig) error
@@ -153,6 +157,7 @@ func New(cfg *config.Config, opts Options) *App {
 		proxyListening:    listeningAt,
 		restoreProxy:      proxy.Restore,
 		clearProxy:        system.ClearProxy,
+		recoverJournal:    system.RecoverJournal,
 		enableKillSwitch:  system.EnableKillSwitch,
 		enableTunRouting:  system.EnableTunRouting,
 		disableTunRouting: system.DisableTunRouting,
@@ -205,6 +210,7 @@ func (a *App) Run(ctx context.Context) error {
 	if err := a.acquireLock(); err != nil {
 		return err
 	}
+	a.recoverLeftovers()
 
 	// U-2: scripted selection runs exactly one session and never shows a menu.
 	if a.opts.Server != "" || a.opts.UseLast || a.opts.NonInteractive {

@@ -235,8 +235,11 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 	}
 
 	// An add fails on a route a client slipped in after the check instead of
-	// replacing it, and a route is owned only once its add went through.
+	// replacing it, and a route is owned only once its add went through. The
+	// journal hears of it before the add: a run killed right after the add
+	// still has the route written down (H06).
 	for _, e := range want {
+		journalRoutes(append(slices.Clip(installed), e))
 		if out, err := e.add(); err != nil {
 			err = fmt.Errorf("%s: %w\n%s", e.what, err, out)
 			if undoErr := DisableTunRouting(); undoErr != nil {
@@ -398,6 +401,7 @@ func DisableTunRouting() error {
 		}
 	}
 	installed = nil
+	journalRoutes(nil)
 
 	slog.Info("tun routing disabled")
 	return nil
@@ -431,5 +435,6 @@ func keepUnremoved(present []tunEntry, cause error) error {
 	}
 	slices.Reverse(kept)
 	installed = kept
+	journalRoutes(installed)
 	return fmt.Errorf("маршруты TUN сняты не полностью: %w", cause)
 }
