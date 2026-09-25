@@ -40,6 +40,11 @@ import (
 )
 
 func main() {
+	// A core told where its geo databases are must be started with them.
+	if want := os.Getenv("MOCK_XRAY_ASSET"); want != "" && os.Getenv("XRAY_LOCATION_ASSET") != want {
+		os.Stderr.WriteString("XRAY_LOCATION_ASSET=" + os.Getenv("XRAY_LOCATION_ASSET") + ", want " + want)
+		os.Exit(7)
+	}
 	for _, a := range os.Args[1:] {
 		if a == "-test" {
 			return

@@ -12,7 +12,8 @@ import (
 
 // The unit gives the service the network and nothing that amounts to root:
 // no CAP_SYS_ADMIN, CAP_DAC_OVERRIDE or CAP_SYS_PTRACE, and a read-only file
-// system but for the socket's directory and the cgroup tree.
+// system but for the socket's directory, the cgroup tree and a state
+// directory of root's alone.
 func TestServiceUnitRights(t *testing.T) {
 	var bounding string
 	for _, line := range strings.Split(serviceUnitText, "\n") {
@@ -24,7 +25,8 @@ func TestServiceUnitRights(t *testing.T) {
 		t.Fatalf("bounding set %q", bounding)
 	}
 	for _, want := range []string{"ProtectSystem=strict", "ProtectHome=yes", "NoNewPrivileges=yes",
-		"ExecStart=" + InstallDir + "/xray-runner service run", "DeviceAllow=/dev/net/tun rw"} {
+		"ExecStart=" + InstallDir + "/xray-runner service run", "DeviceAllow=/dev/net/tun rw",
+		"StateDirectory=xray-runner", "StateDirectoryMode=0700"} {
 		if !strings.Contains(serviceUnitText, want+"\n") {
 			t.Errorf("unit lacks %q", want)
 		}

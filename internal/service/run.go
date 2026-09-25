@@ -96,20 +96,19 @@ func setUp(version string) (*Service, ipc.Listener, error) {
 		Binary:       binary,
 		CoreVersion:  strings.TrimSpace(firstLine(coreVer)),
 		Version:      version,
+		GeoDir:       geoStoreDir(),
 	})
 	slog.SetDefault(slog.New(&teeHandler{Handler: slog.Default().Handler(), fwd: s.forwardLog}))
 	return s, l, nil
 }
 
-// geoNote follows a refusal over geo lists the service's databases lack. The
-// service has only the databases copied in at install: the ones a subscription
-// brings sit in the user's cache, out of its reach, and those updated by `u`
-// beside the program reach it with the next install (H10).
-const geoNote = "TUN через службу проверяет правила по гео-базам из папки службы. " +
-	"Гео-базы, которые скачаны для подписки, службе недоступны, а обновлённые клавишей u " +
-	"попадают к ней только после повторного `xray-runner service install`. " +
-	"Если нужных списков нет и после этого, подключитесь в режиме PROXY " +
-	"или запустите программу с правами администратора (root) и XRAY_RUNNER_NO_SERVICE=1"
+// geoNote follows a refusal over geo lists the service's own databases lack.
+// A session runs on them only when its interface handed over none of its own
+// (geoStore): an interface older than the service, databases it cannot read,
+// or a service that could not keep them.
+const geoNote = "Служба проверила правила по гео-базам из своей папки: гео-базы программы до неё не дошли " +
+	"(программа старше службы, её базы не читаются или служба не смогла их сохранить — подробности в логе службы). " +
+	"Обновите программу и службу вместе: xray-runner service install"
 
 // ownCore is the core beside the service's binary. Nothing else is run with
 // the service's rights: a core off PATH is whatever put it there.

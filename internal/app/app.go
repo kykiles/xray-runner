@@ -57,6 +57,7 @@ type App struct {
 	coreVer       string // xray version string, empty when it could not be read
 	pendingNote   string // shown on the next status screen (e.g. a mode fallback)
 	geoNote       string // why the geo databases in use are not the panel's current ones
+	geoDir        string // where the geo databases in use are: beside the core, or the panel's in the cache
 	noTTY         bool   // stdin is not a terminal (systemd, pipe): no screen to draw on
 	nav           nav    // menu position, kept across sessions
 	serverHost    string
@@ -202,6 +203,7 @@ func (a *App) Run(ctx context.Context) error {
 	// The geo databases sit next to the core, and the panel's routing may name
 	// lists they do not carry — see xraycfg.SetGeoAssets.
 	xraycfg.SetGeoAssets(filepath.Dir(binary), "")
+	a.geoDir = filepath.Dir(binary)
 
 	// X-4: log the xray version; incompatibility is diagnosed here, not via retries.
 	v, err := xray.Version(binary)

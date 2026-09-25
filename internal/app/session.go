@@ -481,11 +481,22 @@ func (a *App) buildModeConfig(t *target) (json.RawMessage, sessionPorts, error) 
 // its own, and the rules come from the profile or the template plus the split
 // and probe ones added on top.
 func finalizeConfig(raw json.RawMessage, allowInsecure bool) (json.RawMessage, error) {
+	return finalizeConfigIn(raw, allowInsecure, "")
+}
+
+// finalizeConfigIn is finalizeConfig with the geo lists checked against the
+// databases in geoDir — the ones a service session's interface handed over —
+// or, when it is empty, the ones in use (xraycfg.SetGeoAssets).
+func finalizeConfigIn(raw json.RawMessage, allowInsecure bool, geoDir string) (json.RawMessage, error) {
 	raw, err := xraycfg.ApplySecurityPolicy(raw, allowInsecure)
 	if err != nil {
 		return nil, fmt.Errorf("политика TLS (ALLOW_INSECURE): %w", err)
 	}
-	if err := xraycfg.CheckGeoLists(raw); err != nil {
+	check := xraycfg.CheckGeoLists
+	if geoDir != "" {
+		check = func(raw json.RawMessage) error { return xraycfg.CheckGeoListsIn(raw, geoDir, "") }
+	}
+	if err := check(raw); err != nil {
 		return nil, err
 	}
 	return raw, nil

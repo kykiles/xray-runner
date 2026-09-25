@@ -35,12 +35,36 @@ type Runner struct {
 	// os/exec closes the pipes inside Wait, so Wait must not run until the
 	// goroutines have finished reading (M-3).
 	pipes sync.WaitGroup
+	// assetDir, when set, is where the core reads geoip.dat and geosite.dat
+	// (XRAY_LOCATION_ASSET) instead of wherever this process's own
+	// environment points it.
+	assetDir string
 }
 
 var osExecutable = os.Executable
 
 func New(binary string, config []byte) *Runner {
 	return &Runner{binary: binary, config: config}
+}
+
+// SetAssetDir makes every core this runner starts or tests read its geo
+// databases from dir. A service session runs on the databases its interface
+// handed over; the service's own environment stays as it is for the next one.
+func (r *Runner) SetAssetDir(dir string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.assetDir = dir
+}
+
+// env is the core's environment: this process's, with the asset directory on
+// top when one is set; nil, meaning this process's own, when none is.
+func (r *Runner) env() []string {
+	if r.assetDir == "" {
+		return nil
+	}
+	// os/exec takes the last of two equal keys, so this one wins over an
+	// XRAY_LOCATION_ASSET inherited from the process.
+	return append(os.Environ(), "XRAY_LOCATION_ASSET="+r.assetDir)
 }
 
 // stdinConfig is how the core is told to read its config from stdin.
@@ -151,6 +175,7 @@ func (r *Runner) Start(ctx context.Context) error {
 
 	r.cmd = exec.CommandContext(ctx, r.binary, "run", "-c", stdinConfig) //nolint:gosec // G204: argument vector, no shell: the core on our own config
 	r.cmd.Stdin = bytes.NewReader(r.config)
+	r.cmd.Env = r.env()
 	prepareChild(r.cmd)
 
 	stdout, err := r.cmd.StdoutPipe()
@@ -242,6 +267,9 @@ func (r *Runner) takeRestart() bool {
 func (r *Runner) TestConfig(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, r.binary, "run", "-test", "-c", stdinConfig) //nolint:gosec // G204: argument vector, no shell: the core on our own config
 	cmd.Stdin = bytes.NewReader(r.config)
+	r.mu.Lock()
+	cmd.Env = r.env()
+	r.mu.Unlock()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("config test failed: %w\n%s", err, lastLines(out, 10))

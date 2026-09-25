@@ -55,6 +55,11 @@ func install() error {
 	if err := makeLogDir(LogDir()); err != nil {
 		return err
 	}
+	// The geo databases users hand the service get the log's folder too:
+	// they show which panel each one uses, and Program Files lets users read.
+	if err := makeLogDir(geoStoreDir()); err != nil {
+		return fmt.Errorf("папка гео-баз службы: %w", err)
+	}
 	if err := ipc.CreateUsersGroup(); err != nil {
 		return err
 	}

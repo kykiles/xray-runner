@@ -8,10 +8,12 @@
 // from the service to the interface on their own.
 //
 // The service takes structured data only: the pieces of a core config the
-// interface may choose (outbounds, routing, dns — see xraycfg.ClientParts) and
-// a handful of switches. Anything that names a file or a program — log paths,
-// the api, the core itself — is the service's own, so no request can have it
-// write or run something with its rights.
+// interface may choose (outbounds, routing, dns — see xraycfg.ClientParts), a
+// handful of switches, and the geo databases the rules name, by content
+// (geo_put), which the service checks and keeps under names of its own.
+// Anything that names a file or a program — log paths, the api, the core
+// itself — is the service's own, so no request can have it write or run
+// something with its rights.
 package ipc
 
 import (
@@ -33,8 +35,8 @@ const Version = 1
 // few dozen servers is some hundred kilobytes; anything near this is not one.
 const MaxMessage = 4 << 20
 
-// Message types. The first seven are requests; reply answers one of them, and
-// event is the service speaking on its own.
+// Message types. All but the last two are requests; reply answers one of
+// them, and event is the service speaking on its own.
 const (
 	TypeHello        = "hello"
 	TypeStartTun     = "start_tun"
@@ -44,6 +46,8 @@ const (
 	TypeRefreshSplit = "refresh_split"
 	TypeDisableSplit = "disable_split"
 	TypeCloseConns   = "close_conns"
+	TypeGeoHave      = "geo_have"
+	TypeGeoPut       = "geo_put"
 	TypeReply        = "reply"
 	TypeEvent        = "event"
 )
@@ -75,6 +79,10 @@ type HelloReply struct {
 	// Resumed is set when the session named in Hello.Resume is this
 	// connection's again.
 	Resumed bool `json:"resumed,omitempty"`
+	// Geo is set by a service that takes the interface's geo databases
+	// (geo_have, geo_put, StartTun.Geo). One without it — older, or unable to
+	// keep them — runs a session on the databases it was installed with.
+	Geo bool `json:"geo,omitempty"`
 }
 
 // StartTun asks for a tun session: the core run by the service in TUN mode,
@@ -95,7 +103,46 @@ type StartTun struct {
 	CheckURLs []string `json:"check_urls"`
 	// Title names the session in the service's log and status.
 	Title string `json:"title,omitempty"`
+	// Geo names the geo databases the session runs on, handed over before
+	// with geo_put; nil for the service's own.
+	Geo *GeoRef `json:"geo,omitempty"`
 }
+
+// GeoRef names a pair of geo databases by their content: the SHA-256 of
+// geoip.dat and of geosite.dat, in lowercase hex.
+type GeoRef struct {
+	IP   string `json:"ip"`
+	Site string `json:"site"`
+}
+
+// GeoHave asks which of these databases, by SHA-256, the service lacks.
+type GeoHave struct {
+	SHA256 []string `json:"sha256"`
+}
+
+// GeoHaveReply lists the ones to send.
+type GeoHaveReply struct {
+	Missing []string `json:"missing,omitempty"`
+}
+
+// GeoPut carries one piece of a geo database: pieces of at most GeoChunk
+// bytes, in order from offset 0, until Size is reached. The service keeps the
+// database once all of it has come and matches SHA256; a piece at offset 0
+// starts over.
+type GeoPut struct {
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+	Offset int64  `json:"offset"`
+	Data   []byte `json:"data"`
+}
+
+// GeoChunk is the most a GeoPut carries: base64 in JSON makes it a third
+// larger, well within MaxMessage.
+const GeoChunk = 1 << 20
+
+// MaxGeoFile bounds one geo database the service takes; the ones in use are
+// tens of megabytes.
+const MaxGeoFile = 128 << 20
 
 // StartReply hands back the token that resumes the session over another
 // connection.

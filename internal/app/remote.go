@@ -292,6 +292,13 @@ func (a *App) runRemoteSession(ctx context.Context, t *target, split bool) (tui.
 	}
 
 	connect := func() error {
+		// The service runs the core on the databases the config was checked
+		// against here, not on the ones it was installed with.
+		geo, err := a.shareGeo(sessCtx, a.service())
+		if err != nil {
+			return err
+		}
+		req.Geo = geo
 		var rep ipc.StartReply
 		if err := a.service().Call(sessCtx, ipc.TypeStartTun, req, &rep); err != nil {
 			return err

@@ -44,7 +44,7 @@ func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
 			slog.Warn("не удалось указать xray каталог гео-баз", "dir", dir, "error", err)
 		}
 		xraycfg.SetGeoAssets(dir, note)
-		a.geoNote = note
+		a.geoNote, a.geoDir = note, dir
 		slog.Info("geo databases in use", "dir", dir)
 	}()
 

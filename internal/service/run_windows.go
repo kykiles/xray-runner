@@ -72,6 +72,10 @@ func (h *handler) Execute(_ []string, req <-chan svc.ChangeRequest, st chan<- sv
 // the user's choosing.
 func LogDir() string { return filepath.Join(InstallDir(), "log") }
 
+// geoStoreDir is where the service keeps the geo databases interfaces hand
+// it: in its folder under Program Files, which no user writes.
+func geoStoreDir() string { return filepath.Join(InstallDir(), "geo") }
+
 // logDirSDDL keeps the service's log to SYSTEM and the administrators, who
 // own it: the core's output is there, and nothing is inherited from Program
 // Files, which lets users read.

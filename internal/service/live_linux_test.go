@@ -199,6 +199,9 @@ func startService(t *testing.T, dir, sock string) *liveService {
 	// shell sets it and execs.
 	s.cmd = exec.Command("/bin/sh", "-c", `LISTEN_PID=$$ LISTEN_FDS=1 exec "$0" service run`, filepath.Join(dir, "xray-runner"))
 	s.cmd.ExtraFiles = []*os.File{f}
+	// The state directory systemd would give it: the geo databases it takes
+	// stay in the test's.
+	s.cmd.Env = append(os.Environ(), "STATE_DIRECTORY="+t.TempDir())
 	s.cmd.Stdout, s.cmd.Stderr = out, out
 	must(t, s.cmd.Start())
 	_ = f.Close()

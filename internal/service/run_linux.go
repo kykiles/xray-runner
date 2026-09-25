@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,6 +22,17 @@ func runPlatform(version string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return runService(ctx, version)
+}
+
+// geoStoreDir is where the service keeps the geo databases interfaces hand
+// it: under the state directory systemd made for it, or StateDir when it runs
+// without one.
+func geoStoreDir() string {
+	dir := os.Getenv("STATE_DIRECTORY")
+	if dir == "" {
+		dir = StateDir
+	}
+	return filepath.Join(dir, "geo")
 }
 
 // listenerUIDs reads the owners of the sockets bound to port on 127.0.0.1 or

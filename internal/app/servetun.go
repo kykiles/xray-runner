@@ -30,6 +30,10 @@ type ServiceTun struct {
 	Title     string
 	// Binary is the service's own core.
 	Binary string
+	// GeoDir holds the geo databases the interface handed over, which the
+	// config is checked against and the core reads; empty for the ones beside
+	// Binary.
+	GeoDir string
 }
 
 // prepareServiceApp lets tests put fakes in place of the machine.
@@ -79,7 +83,7 @@ func serveTun(ctx context.Context, spec ServiceTun, ready func(error), status fu
 	if err != nil {
 		return fmt.Errorf("конфигурация от интерфейса отклонена: %w", err)
 	}
-	if raw, err = finalizeConfig(raw, spec.AllowInsecure); err != nil {
+	if raw, err = finalizeConfigIn(raw, spec.AllowInsecure, spec.GeoDir); err != nil {
 		return err
 	}
 	bind, err := a.directBind()
@@ -122,6 +126,9 @@ func serveTun(ctx context.Context, spec ServiceTun, ready func(error), status fu
 
 	slog.Info("──── служба: подключение: "+spec.Title+" ────", "binary", a.binary, "split", spec.Split, "kill_switch", spec.KillSwitch)
 	a.runner = xray.New(a.binary, raw)
+	if spec.GeoDir != "" {
+		a.runner.SetAssetDir(spec.GeoDir)
+	}
 
 	sessCtx, sessCancel := context.WithCancel(ctx)
 	defer sessCancel()

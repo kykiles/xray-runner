@@ -48,6 +48,9 @@ type Deps struct {
 	Version      string
 	// Grace is how long a session outlives the connection that held it.
 	Grace time.Duration
+	// GeoDir is where the service keeps the geo databases interfaces hand
+	// it (geoStore); empty to take none.
+	GeoDir string
 }
 
 // DefaultGrace is Deps.Grace for the real service.
@@ -56,6 +59,9 @@ const DefaultGrace = 10 * time.Second
 // Service serves connections one listener hands it.
 type Service struct {
 	d Deps
+	// geo keeps the interfaces' geo databases; nil when the service takes
+	// none.
+	geo *geoStore
 
 	// op is held across what a session does to the machine and the checks
 	// it rests on — the split's rules, its teardown — so two of them never
@@ -123,7 +129,18 @@ func New(d Deps) *Service {
 	if d.Grace <= 0 {
 		d.Grace = DefaultGrace
 	}
-	return &Service{d: d, conns: map[*ipc.Conn]bool{}}
+	s := &Service{d: d, conns: map[*ipc.Conn]bool{}}
+	if d.GeoDir != "" {
+		g, err := newGeoStore(d.GeoDir)
+		if err != nil {
+			// Sessions still run, on the databases the service was installed
+			// with; the hello tells interfaces not to send theirs.
+			slog.Warn("служба: папка для гео-баз программы недоступна, работаю на своих", "dir", d.GeoDir, "error", err)
+		} else {
+			s.geo = g
+		}
+	}
+	return s
 }
 
 // Serve accepts connections until ctx ends, then takes the session down and
@@ -202,7 +219,7 @@ func (s *Service) handle(c *ipc.Conn) {
 		c.Reply(m.ID, nil, &ipc.VersionError{Got: h.Version})
 		return
 	}
-	reply := ipc.HelloReply{Version: ipc.Version, ServiceVersion: s.d.Version, CoreVersion: s.d.CoreVersion}
+	reply := ipc.HelloReply{Version: ipc.Version, ServiceVersion: s.d.Version, CoreVersion: s.d.CoreVersion, Geo: s.geo != nil}
 	if h.Resume != "" {
 		reply.Resumed = s.resume(c, h.Resume)
 	}
@@ -210,6 +227,9 @@ func (s *Service) handle(c *ipc.Conn) {
 	slog.Info("служба: подключился интерфейс", "user", c.Peer.Name, "resumed", reply.Resumed)
 
 	defer s.detach(c)
+	// A database left half sent goes with the connection.
+	var up *geoUpload
+	defer func() { s.geo.abort(up) }()
 	for {
 		m, err := c.Read()
 		if err != nil {
@@ -232,6 +252,12 @@ func (s *Service) handle(c *ipc.Conn) {
 		case ipc.TypeCloseConns:
 			reply, err := s.closeConns(c, m)
 			c.Reply(m.ID, reply, err)
+		case ipc.TypeGeoHave:
+			reply, err := s.geoHave(m)
+			c.Reply(m.ID, reply, err)
+		case ipc.TypeGeoPut:
+			up, err = s.geoPut(up, m)
+			c.Reply(m.ID, nil, err)
 		default:
 			c.Reply(m.ID, nil, fmt.Errorf("неизвестный запрос %q", m.Type))
 		}
@@ -349,19 +375,27 @@ func (s *Service) startTun(c *ipc.Conn, m ipc.Message) {
 		c.Reply(m.ID, nil, err)
 		return
 	}
-	slog.InfoContext(sessionLog, "служба: TUN-сессия", "user", c.Peer.Name, "title", spec.Title)
+	slog.InfoContext(sessionLog, "служба: TUN-сессия", "user", c.Peer.Name, "title", spec.Title, "geo", req.Geo != nil)
 	ready := make(chan error, 1)
 	go s.pump(sess, c, m.ID, ready)
 	go func() {
 		defer close(sess.done)
-		err := s.d.Tun(ctx, spec, func(err error) {
+		signal := func(err error) {
 			select {
 			case ready <- err:
 			default:
 			}
-		}, func(u tui.StatusUpdate) {
-			queueLatest(sess.events, statusEvent(u))
-		})
+		}
+		// The session holds the service now, the only one there is: its geo
+		// databases are made the pair its core reads, and any other goes.
+		err := s.useGeo(&spec, req.Geo)
+		if err != nil {
+			signal(err)
+		} else {
+			err = s.d.Tun(ctx, spec, signal, func(u tui.StatusUpdate) {
+				queueLatest(sess.events, statusEvent(u))
+			})
+		}
 		cancel()
 		s.mu.Lock()
 		if s.sess == sess {
@@ -460,6 +494,14 @@ func (s *Service) tunSpec(req ipc.StartTun) (app.ServiceTun, error) {
 	if err != nil {
 		return app.ServiceTun{}, err
 	}
+	if req.Geo != nil {
+		if s.geo == nil {
+			return app.ServiceTun{}, errGeoRefused
+		}
+		if !validSHA(req.Geo.IP) || !validSHA(req.Geo.Site) {
+			return app.ServiceTun{}, errors.New("хеш гео-базы не годится")
+		}
+	}
 	return app.ServiceTun{
 		Parts:         req.Parts,
 		LogLevel:      req.LogLevel,
@@ -470,6 +512,54 @@ func (s *Service) tunSpec(req ipc.StartTun) (app.ServiceTun, error) {
 		Title:         cleanTitle(req.Title),
 		Binary:        s.d.Binary,
 	}, nil
+}
+
+// useGeo points spec at the pair of geo databases the session runs on, or at
+// the service's own when geo is nil.
+func (s *Service) useGeo(spec *app.ServiceTun, geo *ipc.GeoRef) error {
+	if s.geo == nil {
+		return nil // tunSpec refused a pair already
+	}
+	dir, err := s.geo.use(geo)
+	if err != nil {
+		return err
+	}
+	spec.GeoDir = dir
+	return nil
+}
+
+// errGeoRefused answers a geo request to a service that takes no databases.
+var errGeoRefused = errors.New("служба не принимает гео-базы программы")
+
+// geoHave says which of the databases an interface is about to run on the
+// service lacks.
+func (s *Service) geoHave(m ipc.Message) (*ipc.GeoHaveReply, error) {
+	if s.geo == nil {
+		return nil, errGeoRefused
+	}
+	var req ipc.GeoHave
+	if err := json.Unmarshal(m.Body, &req); err != nil {
+		return nil, fmt.Errorf("запрос не разобран: %w", err)
+	}
+	missing, err := s.geo.missing(req.SHA256)
+	if err != nil {
+		return nil, err
+	}
+	return &ipc.GeoHaveReply{Missing: missing}, nil
+}
+
+// geoPut takes a piece of a database; up is the connection's upload in
+// progress, and what is in progress after it is returned.
+func (s *Service) geoPut(up *geoUpload, m ipc.Message) (*geoUpload, error) {
+	if s.geo == nil {
+		return nil, errGeoRefused
+	}
+	var req ipc.GeoPut
+	if err := json.Unmarshal(m.Body, &req); err != nil {
+		s.geo.abort(up)
+		return nil, fmt.Errorf("запрос не разобран: %w", err)
+	}
+	return s.geo.put(up, req)
 }
 
 func validLogLevel(l string) bool {

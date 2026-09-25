@@ -17,6 +17,10 @@ import (
 // InstallDir is where the service's program and core live: root's to write.
 const InstallDir = "/usr/local/lib/xray-runner"
 
+// StateDir is the service's state directory (StateDirectory= in the unit),
+// root's alone: it keeps the geo databases interfaces hand it there.
+const StateDir = "/var/lib/xray-runner"
+
 const (
 	unitDir     = "/etc/systemd/system"
 	serviceUnit = "xray-runner.service"
@@ -57,8 +61,9 @@ var socketUnitText = joinLines(
 //     the split cannot read another user's /proc/<pid>/exe and fd links: the
 //     name comes from comm, and the user's own interface lists the
 //     connections to close (close_conns);
-//   - the file system is read-only but for the socket's directory and the
-//     cgroup tree, homes are out of sight, /tmp is private;
+//   - the file system is read-only but for the socket's directory, the
+//     cgroup tree and the state directory, where the geo databases
+//     interfaces hand over are kept; homes are out of sight, /tmp is private;
 //   - no new privileges, native system calls only, no address families but
 //     the network's and netlink.
 var serviceUnitText = joinLines(
@@ -78,6 +83,8 @@ var serviceUnitText = joinLines(
 	"NoNewPrivileges=yes",
 	"ProtectSystem=strict",
 	"ReadWritePaths=-/run/xray-runner /sys/fs/cgroup",
+	"StateDirectory="+filepath.Base(StateDir),
+	"StateDirectoryMode=0700",
 	"ProtectHome=yes",
 	"PrivateTmp=yes",
 	"ProtectKernelModules=yes",
@@ -185,8 +192,10 @@ func uninstall() error {
 		}
 	}
 	_ = run("systemctl", "daemon-reload")
-	if err := os.RemoveAll(InstallDir); err != nil {
-		errs = append(errs, err)
+	for _, dir := range []string{InstallDir, StateDir} {
+		if err := os.RemoveAll(dir); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if _, err := user.LookupGroup(ipc.Group); err == nil {
 		if err := run("groupdel", ipc.Group); err != nil {

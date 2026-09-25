@@ -3,6 +3,9 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +23,12 @@ func TestServeTun(t *testing.T) {
 	binary := buildGenerationXray(t)
 	t.Setenv("MOCK_XRAY_STARTS", t.TempDir()+"/starts")
 	t.Setenv("MOCK_XRAY_CRASHES", "0")
+	// The databases the interface handed over: the config test and every
+	// core run on them, not on the service's own.
+	geoDir := t.TempDir()
+	writeGeoDat(t, filepath.Join(geoDir, "geoip.dat"), "private")
+	writeGeoDat(t, filepath.Join(geoDir, "geosite.dat"), "ru-blocked")
+	t.Setenv("MOCK_XRAY_ASSET", geoDir)
 
 	var mu sync.Mutex
 	var ks system.KillSwitchConfig
@@ -61,6 +70,7 @@ func TestServeTun(t *testing.T) {
 		CheckURLs:  []string{"http://127.0.0.1:1/"},
 		Title:      "srv",
 		Binary:     binary,
+		GeoDir:     geoDir,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan error, 1)
@@ -127,5 +137,45 @@ func TestServeTunRefusesBadParts(t *testing.T) {
 	}, func(e error) { readyErr = e }, func(tui.StatusUpdate) {})
 	if err == nil || readyErr == nil {
 		t.Fatal("bad parts accepted")
+	}
+}
+
+// writeGeoDat writes a geo database carrying the named lists.
+func writeGeoDat(t *testing.T, path string, names ...string) {
+	t.Helper()
+	var out []byte
+	for _, n := range names {
+		entry := append([]byte{0x0A, byte(len(n))}, n...)
+		out = append(out, 0x0A, byte(len(entry)))
+		out = append(out, entry...)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A service session's config is checked against the databases its interface
+// handed over: a list only they carry passes where the service's own would
+// refuse it, and one they lack is refused with their folder named.
+func TestFinalizeConfigInChecksTheGivenGeo(t *testing.T) {
+	own := t.TempDir()
+	writeGeoDat(t, filepath.Join(own, "geoip.dat"), "private")
+	writeGeoDat(t, filepath.Join(own, "geosite.dat"), "google")
+	xraycfg.SetGeoAssets(own, "")
+	t.Cleanup(func() { xraycfg.SetGeoAssets("", "") })
+	given := t.TempDir()
+	writeGeoDat(t, filepath.Join(given, "geoip.dat"), "private")
+	writeGeoDat(t, filepath.Join(given, "geosite.dat"), "ru-blocked")
+
+	cfg := json.RawMessage(`{"routing":{"rules":[{"domain":["geosite:ru-blocked"],"outboundTag":"proxy"}]}}`)
+	if _, err := finalizeConfig(cfg, false); err == nil {
+		t.Fatal("the service's own databases carry ru-blocked: the test checks nothing")
+	}
+	if _, err := finalizeConfigIn(cfg, false, given); err != nil {
+		t.Errorf("finalizeConfigIn = %v, want nil", err)
+	}
+	cfg = json.RawMessage(`{"routing":{"rules":[{"domain":["geosite:google"],"outboundTag":"proxy"}]}}`)
+	if _, err := finalizeConfigIn(cfg, false, given); err == nil || !strings.Contains(err.Error(), given) {
+		t.Errorf("finalizeConfigIn = %v, want google refused in %s", err, given)
 	}
 }

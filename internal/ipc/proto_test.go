@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -120,4 +122,16 @@ func TestClientCallFailsWhenClosed(t *testing.T) {
 		t.Fatalf("err = %v, want ErrClosed", err)
 	}
 	<-c.Done()
+}
+
+// A full piece of a geo database, base64 and all, is one message.
+func TestGeoChunkFitsAMessage(t *testing.T) {
+	body, err := json.Marshal(GeoPut{SHA256: strings.Repeat("a", 64), Size: MaxGeoFile, Offset: MaxGeoFile - GeoChunk, Data: make([]byte, GeoChunk)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := WriteMessage(&buf, Message{ID: 1 << 40, Type: TypeGeoPut, Body: body}); err != nil {
+		t.Fatalf("a full piece does not go out: %v", err)
+	}
 }

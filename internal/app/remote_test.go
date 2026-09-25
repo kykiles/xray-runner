@@ -35,6 +35,10 @@ type fakeService struct {
 	splitToken string
 	splitErr   error
 	lost       sync.Once
+	// geo
+	geoMissing []string
+	geoErr     error
+	geoPuts    []ipc.GeoPut
 }
 
 func newFakeService() *fakeService {
@@ -80,6 +84,22 @@ func (f *fakeService) Call(ctx context.Context, typ string, req, reply any) erro
 		open := f.open
 		f.mu.Unlock()
 		*reply.(*ipc.CloseConnsReply) = ipc.CloseConnsReply{Open: open}
+	case ipc.TypeGeoHave:
+		f.mu.Lock()
+		missing, err := f.geoMissing, f.geoErr
+		f.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		*reply.(*ipc.GeoHaveReply) = ipc.GeoHaveReply{Missing: missing}
+	case ipc.TypeGeoPut:
+		// The sender reuses its buffer, as a real call, which marshals at
+		// once, may.
+		p := req.(ipc.GeoPut)
+		p.Data = slices.Clone(p.Data)
+		f.mu.Lock()
+		f.geoPuts = append(f.geoPuts, p)
+		f.mu.Unlock()
 	}
 	return nil
 }

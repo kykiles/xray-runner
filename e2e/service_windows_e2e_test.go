@@ -57,6 +57,10 @@ func (e *env) testService(t *testing.T) {
 	if _, err := os.Stat(serviceLog); err != nil {
 		t.Errorf("the service writes no log: %v", err)
 	}
+	// So are the geo databases the service takes from users.
+	if owner, protected := securityOf(t, filepath.Join(installDir, "geo")); !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || !protected {
+		t.Errorf("geo folder: owner %s, DACL protected %v; want the administrators and protected", owner, protected)
+	}
 	// Who may use the service is the group's to say, and the install put
 	// someone in it.
 	if members, err := localGroup(usersGroup); err != nil {

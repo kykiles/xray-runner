@@ -42,22 +42,26 @@ func SetGeoAssets(dir, why string) {
 		geoAssets.lists = nil
 		return
 	}
-	geoAssets.lists = sync.OnceValue(func() map[string]bool {
-		known := map[string]bool{}
-		for _, f := range []string{"geosite.dat", "geoip.dat"} {
-			names, err := geoListNames(filepath.Join(dir, f))
-			if err != nil {
-				// Unreadable databases mean "check nothing": a core found on PATH
-				// keeps its databases elsewhere, and xray judges the config itself.
-				slog.Warn("geo database unreadable, geo lists in routing not checked", "file", f, "error", err)
-				return nil
-			}
-			for _, n := range names {
-				known[strings.ToUpper(f[:len(f)-4])+":"+n] = true
-			}
+	geoAssets.lists = sync.OnceValue(func() map[string]bool { return readGeoLists(dir) })
+}
+
+// readGeoLists reads the list names both databases in dir carry, keyed as
+// "GEOSITE:CN" / "GEOIP:RU"; nil when either cannot be read.
+func readGeoLists(dir string) map[string]bool {
+	known := map[string]bool{}
+	for _, f := range []string{"geosite.dat", "geoip.dat"} {
+		names, err := GeoListNames(filepath.Join(dir, f))
+		if err != nil {
+			// Unreadable databases mean "check nothing": a core found on PATH
+			// keeps its databases elsewhere, and xray judges the config itself.
+			slog.Warn("geo database unreadable, geo lists in routing not checked", "file", f, "error", err)
+			return nil
 		}
-		return known
-	})
+		for _, n := range names {
+			known[strings.ToUpper(f[:len(f)-4])+":"+n] = true
+		}
+	}
+	return known
 }
 
 // knownGeoLists returns the list names both .dat files carry, keyed as
@@ -73,23 +77,48 @@ func knownGeoLists() (map[string]bool, string, string) {
 	return f(), dir, why
 }
 
-// geoListNames reads the list names from a .dat file. Both databases are a
+// GeoListNames reads the list names from a .dat file. Both databases are a
 // protobuf message with a single repeated field, and every element starts with
 // its name — enough structure to walk without linking xray's protos.
-func geoListNames(path string) ([]string, error) {
+func GeoListNames(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var names []string
+	names, _ := walkGeoLists(data)
+	return names, nil
+}
+
+// CheckGeoDatabase refuses a file that is not a geo database from end to end:
+// a run of named lists, one at least. What the service takes from an
+// interface is held to it before a core with the service's rights reads it.
+func CheckGeoDatabase(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	names, whole := walkGeoLists(data)
+	if !whole {
+		return errors.New("файл не разбирается как гео-база")
+	}
+	if len(names) == 0 {
+		return errors.New("в гео-базе нет ни одного списка")
+	}
+	return nil
+}
+
+// walkGeoLists reads the list names out of a database; whole is false when
+// something in it is not a named list, which the names read skip.
+func walkGeoLists(data []byte) (names []string, whole bool) {
+	whole = true
 	for i := 0; i < len(data); {
 		key, n := varint(data, i)
 		if n < 0 || key>>3 != 1 || key&7 != 2 {
-			break
+			return names, false
 		}
 		size, n := varint(data, n)
 		if n < 0 || size > uint64(len(data)-n) {
-			break
+			return names, false
 		}
 		entry := data[n : n+int(size)]
 		i = n + int(size)
@@ -97,15 +126,17 @@ func geoListNames(path string) ([]string, error) {
 		// Inside an entry the name is field 1, again length-delimited.
 		key, m := varint(entry, 0)
 		if m < 0 || key>>3 != 1 || key&7 != 2 {
+			whole = false
 			continue
 		}
 		size, m = varint(entry, m)
 		if m < 0 || size > uint64(len(entry)-m) {
+			whole = false
 			continue
 		}
 		names = append(names, strings.ToUpper(string(entry[m:m+int(size)])))
 	}
-	return names, nil
+	return names, whole
 }
 
 // varint decodes one protobuf varint, returning the value and the offset just
@@ -130,6 +161,17 @@ func varint(b []byte, i int) (uint64, int) {
 // has the last word then, as it has on everything else.
 func CheckGeoLists(raw json.RawMessage) error {
 	known, dir, why := knownGeoLists()
+	return checkGeoLists(raw, known, dir, why)
+}
+
+// CheckGeoListsIn is CheckGeoLists against the databases in dir rather than
+// the ones SetGeoAssets named: a service session runs on the databases its
+// interface handed over, not on the service's own.
+func CheckGeoListsIn(raw json.RawMessage, dir, why string) error {
+	return checkGeoLists(raw, readGeoLists(dir), dir, why)
+}
+
+func checkGeoLists(raw json.RawMessage, known map[string]bool, dir, why string) error {
 	if len(known) == 0 {
 		return nil
 	}

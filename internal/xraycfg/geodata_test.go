@@ -208,3 +208,56 @@ func TestMergeProfileKeepsRoutingAndDNS(t *testing.T) {
 		t.Errorf("CheckGeoLists(merged) = %v, want the missing lists named", err)
 	}
 }
+
+// A service session checks against the databases its interface handed over,
+// not the ones in use: a list only they carry passes, and a list they lack is
+// named with their folder.
+func TestCheckGeoListsIn(t *testing.T) {
+	setGeo(t)
+	dir := t.TempDir()
+	writeDat(t, filepath.Join(dir, "geosite.dat"), "ru-blocked")
+	writeDat(t, filepath.Join(dir, "geoip.dat"), "ru")
+	cfg := json.RawMessage(`{"routing":{"rules":[{"domain":["geosite:ru-blocked"],"outboundTag":"proxy"},{"ip":["geoip:ru"],"outboundTag":"direct"}]}}`)
+	if err := CheckGeoLists(cfg); err == nil {
+		t.Fatal("the databases in use carry ru-blocked: the test checks nothing")
+	}
+	if err := CheckGeoListsIn(cfg, dir, ""); err != nil {
+		t.Errorf("CheckGeoListsIn = %v, want nil", err)
+	}
+	missing := json.RawMessage(`{"routing":{"rules":[{"domain":["geosite:torrent"],"outboundTag":"block"}]}}`)
+	err := CheckGeoListsIn(missing, dir, "")
+	if err == nil || !strings.Contains(err.Error(), "torrent") || !strings.Contains(err.Error(), dir) {
+		t.Errorf("CheckGeoListsIn = %v, want torrent named with %s", err, dir)
+	}
+}
+
+// What the service is handed is a geo database from end to end, or refused.
+func TestCheckGeoDatabase(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.dat")
+	writeDat(t, good, "ru-blocked", "torrent")
+	if err := CheckGeoDatabase(good); err != nil {
+		t.Errorf("a database refused: %v", err)
+	}
+	data, err := os.ReadFile(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string][]byte{
+		"empty":     nil,
+		"text":      []byte("#!/bin/sh\nexit 0\n"),
+		"truncated": data[:len(data)-3],
+		"trailing":  append(append([]byte{}, data...), 0xFF),
+		"nameless":  {0x0A, 0x02, 0x10, 0x01},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, name)
+			if err := os.WriteFile(path, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckGeoDatabase(path); err == nil {
+				t.Error("not a database, and taken")
+			}
+		})
+	}
+}
