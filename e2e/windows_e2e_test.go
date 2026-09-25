@@ -538,10 +538,11 @@ func physicalAlias(t *testing.T) string {
 }
 
 // routeAliases lists the adapters holding a route with exactly this prefix,
-// empty when there is none.
+// empty when there is none. Get-NetRoute finding nothing fails the script even
+// when told to continue silently, hence the explicit exit.
 func routeAliases(t *testing.T, prefix string) string {
 	t.Helper()
-	return ps(t, fmt.Sprintf(`Get-NetRoute -DestinationPrefix '%s' -PolicyStore ActiveStore -ErrorAction SilentlyContinue | ForEach-Object { $_.InterfaceAlias }`, prefix))
+	return ps(t, fmt.Sprintf(`Get-NetRoute -DestinationPrefix '%s' -PolicyStore ActiveStore -ErrorAction SilentlyContinue | ForEach-Object { $_.InterfaceAlias }; exit 0`, prefix))
 }
 
 // waitExit fails unless the process is gone within timeout.
