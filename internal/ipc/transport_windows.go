@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,7 +29,9 @@ var pipeName = PipeName
 // (FILE_CREATE_PIPE_INSTANCE, the FILE_APPEND_DATA bit left out of 0x12019b):
 // with that right a user could stand up a second server under the service's
 // name and take the next client. Network logons are not interactive, and the
-// pipe refuses remote clients besides.
+// pipe refuses remote clients besides. Whether an interactive user may use the
+// service is for authorize to say (UsersGroup); the pipe lets them in so they
+// hear why not.
 const pipeSDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12019b;;;IU)"
 
 // clientAccess is what the client asks for: read and write the data, read the
@@ -99,30 +102,47 @@ func impersonateNamedPipeClient(h windows.Handle) error {
 }
 
 // pipeListener is the service's pipe. One instance always waits for the next
-// client, so the name never goes free for someone else to take.
+// client, so the name never goes free for someone else to take. Clients are
+// connected on a goroutine of its own and checked each on another: a slow
+// check — an account name from the domain controller — holds up no one else.
 type pipeListener struct {
 	mu      sync.Mutex
 	pending windows.Handle
 	closed  bool
 	sa      *windows.SecurityAttributes
+
+	conns chan *Conn
+	done  chan struct{} // closed with the listener
+	err   error         // why the loop stopped, before done closes
 }
 
 // Listen creates the service's pipe. It fails when the name is already taken:
-// the first instance insists on being first.
+// the first instance insists on being first. The error says who holds it.
 func Listen() (Listener, error) {
 	sd, err := windows.SecurityDescriptorFromString(pipeSDDL)
 	if err != nil {
 		return nil, err
 	}
-	l := &pipeListener{sa: &windows.SecurityAttributes{
-		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
-		SecurityDescriptor: sd,
-	}}
+	l := &pipeListener{
+		sa: &windows.SecurityAttributes{
+			Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+			SecurityDescriptor: sd,
+		},
+		conns: make(chan *Conn),
+		done:  make(chan struct{}),
+	}
 	h, err := l.instance(true)
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) || errors.Is(err, windows.ERROR_PIPE_BUSY) {
+		// Clients refuse a pipe of someone else's, so the service is out of
+		// reach until whoever holds the name lets it go.
+		return nil, fmt.Errorf("канал %s уже занят (%s); служба не примет подключений, пока его не освободят: %w",
+			pipeName, pipeHolder(), err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("канал %s: %w", pipeName, err)
 	}
 	l.pending = h
+	go l.loop()
 	return l, nil
 }
 
@@ -140,11 +160,25 @@ func (l *pipeListener) instance(first bool) (windows.Handle, error) {
 }
 
 func (l *pipeListener) Accept() (*Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.done:
+		if l.err != nil {
+			return nil, l.err
+		}
+		return nil, ErrListenerClosed
+	}
+}
+
+// loop connects clients until the listener closes or the next instance
+// cannot be made.
+func (l *pipeListener) loop() {
 	for {
 		l.mu.Lock()
 		if l.closed {
 			l.mu.Unlock()
-			return nil, ErrListenerClosed
+			return
 		}
 		h := l.pending
 		l.mu.Unlock()
@@ -154,7 +188,7 @@ func (l *pipeListener) Accept() (*Conn, error) {
 			closed := l.closed
 			l.mu.Unlock()
 			if closed {
-				return nil, ErrListenerClosed
+				return
 			}
 			// A client that came and went before the connect finished leaves
 			// the instance broken: replace it.
@@ -164,25 +198,43 @@ func (l *pipeListener) Accept() (*Conn, error) {
 
 		next, err := l.instance(false)
 		l.mu.Lock()
-		if err != nil || l.closed {
+		if l.closed {
+			// Close took h down with it: h is still the pending instance.
 			l.mu.Unlock()
-			_ = windows.CloseHandle(h)
 			if err == nil {
 				_ = windows.CloseHandle(next)
-				return nil, ErrListenerClosed
 			}
-			return nil, err
+			return
+		}
+		if err != nil {
+			l.err = err
+			l.closed = true
+			close(l.done)
+			l.mu.Unlock()
+			_ = windows.CloseHandle(h)
+			return
 		}
 		l.pending = next
 		l.mu.Unlock()
 
-		f := newPipeConn(h)
-		peer, why := authorize(h)
-		if why != "" {
-			Refuse(f, why)
-			continue
-		}
-		return NewConn(f, peer), nil
+		go l.admit(h)
+	}
+}
+
+// admit checks the client on instance h and hands it to Accept, or turns it
+// away.
+func (l *pipeListener) admit(h windows.Handle) {
+	f := newPipeConn(h)
+	peer, why := authorize(h)
+	if why != "" {
+		Refuse(f, why)
+		return
+	}
+	c := NewConn(f, peer)
+	select {
+	case l.conns <- c:
+	case <-l.done:
+		c.Close()
 	}
 }
 
@@ -230,20 +282,92 @@ func authorize(h windows.Handle) (Peer, string) {
 		return Peer{}, "токен клиента не прочитан: " + err.Error()
 	}
 	sid := tu.User.Sid
-	peer := Peer{Key: sid.String(), UID: -1, Name: sid.String()}
-	if account, domain, _, err := sid.LookupAccount(""); err == nil {
-		peer.Name = domain + `\` + account
+	peer := Peer{Key: sid.String(), UID: -1, Name: accountName(sid)}
+	if admitted(tok, sid) {
+		return peer, ""
 	}
-	for _, wk := range []windows.WELL_KNOWN_SID_TYPE{windows.WinLocalSystemSid, windows.WinBuiltinAdministratorsSid, windows.WinInteractiveSid} {
+	return peer, fmt.Sprintf("службой пользуются администраторы и члены группы «%s»; "+
+		"администратор добавит вас командой: net localgroup \"%s\" \"%s\" /add", usersGroup, usersGroup, peer.Name)
+}
+
+// admitted reports whether the client with token tok, user by SID, may use
+// the service: SYSTEM, an elevated administrator, or a member of
+// UsersGroup — through its token or, added since it logged in, the group's
+// own list. Being logged in at the console is not enough: TUN and the kill
+// switch are the whole machine's, and so is the core's log.
+func admitted(tok windows.Token, user *windows.SID) bool {
+	for _, wk := range []windows.WELL_KNOWN_SID_TYPE{windows.WinLocalSystemSid, windows.WinBuiltinAdministratorsSid} {
 		want, err := windows.CreateWellKnownSid(wk)
 		if err != nil {
 			continue
 		}
 		if ok, err := tok.IsMember(want); err == nil && ok {
-			return peer, ""
+			return true
 		}
 	}
-	return peer, "службой пользуются только пользователи, вошедшие в систему на этом компьютере"
+	group := usersGroupSID()
+	if group == nil {
+		return false
+	}
+	if ok, err := tok.IsMember(group); err == nil && ok {
+		return true
+	}
+	return directMember(user)
+}
+
+// accountName is DOMAIN\name for the log, the SID itself when it does not
+// resolve.
+func accountName(sid *windows.SID) string {
+	account, domain, _, err := sid.LookupAccount("")
+	if err != nil {
+		return sid.String()
+	}
+	return domain + `\` + account
+}
+
+// pipeHolder says who holds the pipe's name: the owner and, if the system
+// tells, the process that serves it. The pipe is opened as the client opens
+// it, for identification only: whoever holds it cannot act as the service.
+func pipeHolder() string {
+	name, err := windows.UTF16PtrFromString(pipeName)
+	if err != nil {
+		return err.Error()
+	}
+	h, err := windows.CreateFile(name, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES, 0, nil, windows.OPEN_EXISTING,
+		windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION, 0)
+	if err != nil {
+		return "кто его держит, не узнать: " + err.Error()
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+	var parts []string
+	if sd, err := windows.GetSecurityInfo(h, windows.SE_KERNEL_OBJECT, windows.OWNER_SECURITY_INFORMATION); err == nil {
+		if owner, _, err := sd.Owner(); err == nil {
+			parts = append(parts, "владелец "+accountName(owner))
+		}
+	}
+	var pid uint32
+	if err := windows.GetNamedPipeServerProcessId(h, &pid); err == nil {
+		parts = append(parts, fmt.Sprintf("процесс %d %s", pid, processImage(pid)))
+	}
+	if len(parts) == 0 {
+		return "кто его держит, не узнать"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// processImage is the executable of process pid, "" if it cannot be read.
+func processImage(pid uint32) string {
+	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = windows.CloseHandle(p) }()
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(p, 0, &buf[0], &n); err != nil {
+		return ""
+	}
+	return windows.UTF16ToString(buf[:n])
 }
 
 func (l *pipeListener) Close() error {
@@ -253,6 +377,7 @@ func (l *pipeListener) Close() error {
 		return nil
 	}
 	l.closed = true
+	close(l.done)
 	_ = windows.CancelIoEx(l.pending, nil)
 	return windows.CloseHandle(l.pending)
 }

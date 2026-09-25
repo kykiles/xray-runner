@@ -8,10 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
+
+	"xray-runner/internal/ipc"
 )
 
 // InstallDir is where the service's program and core live: under Program
@@ -49,6 +52,13 @@ func install() error {
 		return err
 	}
 	exe := filepath.Join(dir, programFile())
+	if err := makeLogDir(LogDir()); err != nil {
+		return err
+	}
+	if err := ipc.CreateUsersGroup(); err != nil {
+		return err
+	}
+	grant := addInstallingUser()
 
 	s, err := m.OpenService(Name)
 	if err == nil {
@@ -83,6 +93,7 @@ func install() error {
 		return fmt.Errorf("служба установлена, но не запустилась: %w", err)
 	}
 	fmt.Printf("Служба установлена в %s и запущена. TUN теперь работает без запуска от имени администратора.\n", dir)
+	fmt.Println(grant)
 	return confirm()
 }
 
@@ -124,6 +135,10 @@ func uninstall() error {
 			return err
 		}
 	}
+	if err := ipc.DeleteUsersGroup(); err != nil {
+		return err
+	}
+	// The log goes with the folder.
 	if err := os.RemoveAll(InstallDir()); err != nil {
 		return err
 	}
@@ -147,4 +162,72 @@ func installed() {
 	defer func() { _ = s.Close() }()
 	cfg, _ := s.Config()
 	fmt.Printf("Служба установлена: %s\n", cfg.BinaryPathName)
+}
+
+// addInstallingUser puts the user the install is for in ipc.UsersGroup and
+// says what it did. That is the user logged in to this session, who may have
+// elevated with another account's password — not that account, which is
+// an administrator and needs no group. Without a session user (a remote shell,
+// a SYSTEM prompt) it is this process's own user, unless that is SYSTEM.
+func addInstallingUser() string {
+	howTo := fmt.Sprintf("Другого пользователя добавит администратор: net localgroup \"%s\" <имя> /add", ipc.UsersGroup)
+	sid, name, err := sessionUser()
+	if err != nil {
+		tu, terr := windows.GetCurrentProcessToken().GetTokenUser()
+		if terr != nil || tu.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+			return fmt.Sprintf("Службой пользуются администраторы и члены группы «%s»; кто устанавливает, не определено (%v).\n%s",
+				ipc.UsersGroup, err, howTo)
+		}
+		sid, name = tu.User.Sid, tu.User.Sid.String()
+		if account, domain, _, err := sid.LookupAccount(""); err == nil {
+			name = domain + `\` + account
+		}
+	}
+	if err := ipc.AddToUsersGroup(sid); err != nil {
+		return fmt.Sprintf("%v.\n%s", err, howTo)
+	}
+	return fmt.Sprintf("Службой пользуются администраторы и члены группы «%s»; %s добавлен в неё, входить заново не нужно.\n%s",
+		ipc.UsersGroup, name, howTo)
+}
+
+var (
+	wtsapi32                        = windows.NewLazySystemDLL("wtsapi32.dll")
+	procWTSQuerySessionInformationW = wtsapi32.NewProc("WTSQuerySessionInformationW")
+)
+
+// sessionUser is the user logged in to this process's session.
+func sessionUser() (*windows.SID, string, error) {
+	const (
+		currentSession = 0xFFFFFFFF // WTS_CURRENT_SESSION
+		wtsUserName    = 5
+		wtsDomainName  = 7
+	)
+	query := func(class uintptr) (string, error) {
+		var buf *uint16
+		var n uint32
+		r, _, err := procWTSQuerySessionInformationW.Call(0, currentSession, class,
+			uintptr(unsafe.Pointer(&buf)), uintptr(unsafe.Pointer(&n))) //nolint:gosec // G103: pointer arguments, converted in the call so they stay put
+		if r == 0 {
+			return "", err
+		}
+		defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(buf))) //nolint:gosec // G103: the buffer the query allocated
+		return windows.UTF16PtrToString(buf), nil
+	}
+	user, err := query(wtsUserName)
+	if err != nil {
+		return nil, "", err
+	}
+	if user == "" {
+		return nil, "", errors.New("в этом сеансе никто не вошёл")
+	}
+	domain, err := query(wtsDomainName)
+	if err != nil {
+		return nil, "", err
+	}
+	name := domain + `\` + user
+	sid, _, _, err := windows.LookupSID("", name)
+	if err != nil {
+		return nil, "", err
+	}
+	return sid, name, nil
 }
