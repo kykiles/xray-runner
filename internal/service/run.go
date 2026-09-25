@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -191,13 +190,20 @@ func (h *teeHandler) WithGroup(name string) slog.Handler {
 	return &teeHandler{Handler: h.Handler.WithGroup(name), fwd: h.fwd}
 }
 
+// unreachable says why the service did not answer. ipc.Connect wraps the
+// reason under ipc.ErrUnavailable with two %w, which errors.Unwrap does not
+// see through; the prefix is the only thing to drop.
+func unreachable(err error) string {
+	return strings.TrimPrefix(err.Error(), ipc.ErrUnavailable.Error()+": ")
+}
+
 // printStatus is `service status`: what is installed, and whether the
 // service answers.
 func printStatus() error {
 	installed()
 	c, err := ipc.Connect(context.Background(), "")
 	if err != nil {
-		fmt.Println("Служба не отвечает:", errors.Unwrap(err))
+		fmt.Println("Служба не отвечает:", unreachable(err))
 		return nil
 	}
 	defer func() { _ = c.Close() }()
