@@ -404,3 +404,7 @@ func wfpAddFilter(engine windows.Handle, sublayer windows.GUID, name *uint16, ru
 	runtime.KeepAlive(addrs)
 	return wfpErr(fmt.Sprintf("FwpmFilterAdd0 %s", rule.name), r)
 }
+
+// recoverKillSwitch has nothing to take down after a crash: the filters went
+// with the process that set them.
+func recoverKillSwitch() error { return DisableKillSwitch() }

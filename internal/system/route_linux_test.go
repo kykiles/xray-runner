@@ -14,15 +14,20 @@ import (
 	"testing"
 )
 
-// fakeIP models the `ip` binary over an in-memory host, so the routing logic
-// is verified without root or touching the host's routing table. `route get`
+// fakeIP models the kernel's routing state over an in-memory host, so the
+// routing logic is verified without root or touching the host's routing table.
+// It stands in for netOps, and speaks ip underneath: an entry reaches it as the
+// ip command that would add or delete it, and a query answers in `ip -j`
+// output, decoded the way the host's state used to be read — so the host is
+// described once, in the form that is easy to write down. netlink_linux.go
+// maps the kernel onto the same ipRoute and ipRule, and the live test in a
+// network namespace checks that it does. `route get`
 // answers with a canned line, and the `-j` queries print the host state the
 // way iproute2 6.19 does. add and del change that state by the kernel's rules
 // as observed in a network namespace: add refuses a taken family/table/prefix/
 // metric; del removes the lowest-metric entry matching every selector given
 // and, like the kernel's IPv6 delete, ignores the route type.
 type fakeIP struct {
-	missing     bool
 	routeGetOut string            // fallback answer for `ip route get`
 	routeGets   map[string]string // per-destination answers
 	routeGetErr error
@@ -82,11 +87,88 @@ const cleanAddrs = `[{"ifindex":7,"ifname":"xray-tun","addr_info":[` +
 	`{"family":"inet","local":"10.0.0.1","prefixlen":24,"scope":"global"},` +
 	`{"family":"inet6","local":"fdfe:dcba:9876::1","prefixlen":126,"scope":"global"}]}]`
 
-func (f *fakeIP) lookPath(bin string) error {
-	if f.missing {
-		return errors.New("not found")
+func (f *fakeIP) routeGet(dst netip.Addr) (via, dev string, err error) {
+	out, err := f.run("ip", "route", "get", dst.String())
+	if err != nil {
+		return "", "", err
+	}
+	return parseRouteGet(string(out))
+}
+
+func (f *fakeIP) listRoutes(v6 bool) ([]ipRoute, error) {
+	family := "-4"
+	if v6 {
+		family = "-6"
+	}
+	var out []ipRoute
+	return out, f.decode(&out, "-j -N "+family+" route show table all")
+}
+
+func (f *fakeIP) listRules() ([]ipRule, error) {
+	var out []ipRule
+	return out, f.decode(&out, "-j -N -4 rule show")
+}
+
+func (f *fakeIP) linkAddrs(dev string) ([]netip.Addr, error) {
+	var links []struct {
+		AddrInfo []struct {
+			Local string `json:"local"`
+		} `json:"addr_info"`
+	}
+	if err := f.decode(&links, "-j -N addr show dev "+dev); err != nil {
+		return nil, err
+	}
+	var out []netip.Addr
+	for _, l := range links {
+		for _, a := range l.AddrInfo {
+			addr, err := netip.ParseAddr(a.Local)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, addr)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeIP) add(e tunEntry) error { return f.change(e.args("add")) }
+func (f *fakeIP) del(e tunEntry) error { return f.change(e.args("del")) }
+
+func (f *fakeIP) change(args []string) error {
+	if out, err := f.run("ip", args...); err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func (f *fakeIP) decode(v any, q string) error {
+	out, err := f.query(q)
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, out)
+	}
+	return json.Unmarshal(out, v)
+}
+
+// parseRouteGet extracts the gateway and device from `ip route get` output,
+// e.g. "45.150.32.235 via 192.168.31.1 dev wlp3s0 src 192.168.31.94 uid 0". A
+// destination on the local link has no "via" and returns an empty gateway.
+func parseRouteGet(out string) (via, dev string, err error) {
+	fields := strings.Fields(out)
+	for i, f := range fields {
+		if i+1 >= len(fields) {
+			break
+		}
+		switch f {
+		case "via":
+			via = fields[i+1]
+		case "dev":
+			dev = fields[i+1]
+		}
+	}
+	if dev == "" {
+		return "", "", fmt.Errorf("no device in route output: %q", out)
+	}
+	return via, dev, nil
 }
 
 func (f *fakeIP) run(bin string, args ...string) ([]byte, error) {
@@ -368,9 +450,9 @@ func (f *fakeIP) has(substr string) bool {
 // routes never reach the next one's teardown.
 func withFakeIP(t *testing.T, f *fakeIP) {
 	t.Helper()
-	origCmd, origInstalled := ipCmd, installed
-	ipCmd, installed = f, nil
-	t.Cleanup(func() { ipCmd, installed = origCmd, origInstalled })
+	origOps, origInstalled := ipOps, installed
+	ipOps, installed = f, nil
+	t.Cleanup(func() { ipOps, installed = origOps, origInstalled })
 }
 
 // wanRouteGet is what `ip route get <server>` prints for a server reachable

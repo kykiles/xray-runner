@@ -6,180 +6,140 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"strconv"
+	"net/netip"
 	"strings"
 
 	"xray-runner/internal/xraycfg"
 )
 
-const killSwitchChain = "XRAY_KILL"
-
-// firewallBins covers both IPv4 and IPv6. Leaving ip6tables unmanaged would
-// let traffic leak over IPv6 while the kill switch is active.
-var firewallBins = []string{"iptables", "ip6tables"}
-
-// fwCmd is overridable in tests.
-var fwCmd commander = execCommander{}
-
-// ipt runs one iptables/ip6tables command. -w waits for the xtables lock: the
-// legacy backend otherwise fails at once while docker, firewalld or fail2ban
-// hold it, and a kill switch that half went in, or would not come out, is
-// worse than one that waited a moment (G08).
-func ipt(bin string, args ...string) ([]byte, error) {
-	return fwCmd.run(bin, append([]string{"-w"}, args...)...)
-}
+// killSwitchChain is the kill switch's chain in our nftables table (nft_linux.go).
+const killSwitchChain = "killswitch"
 
 func EnableKillSwitch(cfg KillSwitchConfig) error {
-	slog.Info("enabling kill switch via iptables/ip6tables", "endpoints", len(cfg.Endpoints))
-
-	// Both families or none (A02): without ip6tables every IPv6 packet goes past
-	// the switch, without either nothing is blocked at all — and the session
-	// would report it on. Checked before anything is touched.
-	var missing []string
-	for _, bin := range firewallBins {
-		if err := fwCmd.lookPath(bin); err != nil {
-			missing = append(missing, bin)
-		}
+	slog.Info("enabling kill switch via nftables", "endpoints", len(cfg.Endpoints))
+	chain, err := killSwitchRuleset(cfg)
+	if err != nil {
+		return err
 	}
-	if len(missing) > 0 {
-		return fmt.Errorf("не найден %s — kill switch требует iptables и ip6tables", strings.Join(missing, ", "))
-	}
-
-	// Start from a clean slate so repeated runs don't accumulate duplicate
-	// rules or OUTPUT jumps.
-	_ = DisableKillSwitch()
-
-	// Written down before the first rule: a run killed with the switch half
-	// built would otherwise leave the network cut until a reboot (H06). The
-	// teardown needs nothing but the chain's name.
+	// Written down before the batch: a run killed with the switch in place would
+	// otherwise leave the network cut until a reboot (H06). The teardown needs
+	// nothing but the table's name.
 	note(func(j *journal) { j.KillSwitch = true })
-
-	for _, bin := range firewallBins {
-		if err := applyKillSwitch(bin, cfg); err != nil {
-			// The caller treats a failed enable as "no kill switch" and never
-			// tears it down, so a stack that did go in must come out here.
-			if derr := DisableKillSwitch(); derr != nil {
-				err = errors.Join(err, derr)
-			}
-			return err
-		}
+	// One batch replaces any chain an earlier call left, so repeated runs never
+	// stack a second set, and a batch the kernel refuses changes nothing: there
+	// is no half-built switch to roll back.
+	if err := nftReplace([]string{killSwitchChain}, []nftChain{chain}); err != nil {
+		note(func(j *journal) { j.KillSwitch = false })
+		return fmt.Errorf("kill switch не включился: %w", err)
 	}
-
 	return nil
 }
 
-func applyKillSwitch(bin string, cfg KillSwitchConfig) error {
-	if out, err := ipt(bin, "-N", killSwitchChain); err != nil {
-		if !strings.Contains(string(out), "already exists") {
-			return fmt.Errorf("%s create chain: %w\n%s", bin, err, out)
-		}
-	}
-
-	// Nothing is accepted by conntrack state (A09): an ESTABLISHED accept let
-	// every connection opened before the switch keep flowing past it on the
-	// physical path. What must pass does so by its own rule below.
-	rules := [][]string{
-		{"-A", killSwitchChain, "-o", "lo", "-j", "ACCEPT"},
-		{"-A", killSwitchChain, "-o", "xray-tun", "-j", "ACCEPT"},
+// killSwitchRuleset is the kill switch: one filter chain on output that drops
+// everything but what the rules before the drop let through. One inet chain
+// covers IPv4 and IPv6 alike (A02), and it works the same whether the kernel
+// has IPv6 or not.
+//
+// Its own chain at the filter priority is evaluated whatever other chains —
+// ufw's, docker's, firewalld's — do with the packet, and an accept elsewhere
+// does not carry past our drop: the jump at the front of OUTPUT the iptables
+// version needed for that is not needed here.
+//
+// Nothing is accepted by conntrack state (A09): an established accept let every
+// connection opened before the switch keep flowing past it on the physical
+// path. What must pass does so by its own rule below.
+func killSwitchRuleset(cfg KillSwitchConfig) (nftChain, error) {
+	rules := []nftRule{
+		{oif: "lo", verdict: nftAccept},
+		{oif: "xray-tun", verdict: nftAccept},
 		// Traffic the panel routes `direct` carries this mark and leaves through
-		// the physical interface, so the -o xray-tun rule above never covers it.
-		// Without an explicit ACCEPT every direct destination hits the final DROP
-		// and goes dark. This opens nothing when xray is down: the mark exists
-		// only on sockets xray's freedom outbounds create.
-		{"-A", killSwitchChain, "-m", "mark", "--mark", strconv.Itoa(xraycfg.DirectFwMark), "-j", "ACCEPT"},
+		// the physical interface, so the xray-tun rule above never covers it.
+		// This opens nothing when xray is down: the mark exists only on sockets
+		// xray's freedom outbounds create.
+		{mark: xraycfg.DirectFwMark, verdict: nftAccept},
 	}
-
-	// Allow xray's own traffic to the VPN servers — every packet of it, with no
-	// conntrack accept to lean on — otherwise the uplink, every reconnect and
-	// hysteria2's UDP flows are dropped and the tunnel can never recover. Only
-	// add the rule to the matching IP stack: an IPv4 -d on ip6tables would fail.
+	// xray's own traffic to the VPN servers — every packet of it — or the uplink,
+	// every reconnect and hysteria2's UDP flows are dropped and the tunnel can
+	// never recover.
 	for _, e := range cfg.Endpoints {
-		if rule := serverAcceptRule(bin, e); rule != nil {
-			rules = append(rules, rule)
+		ip, err := netip.ParseAddr(e.IP)
+		if err != nil || ip.Zone() != "" || e.Port <= 0 || e.Port > 65535 {
+			return nftChain{}, fmt.Errorf("kill switch: неверный адрес сервера %s:%d", e.IP, e.Port)
 		}
+		ip = ip.Unmap()
+		r := nftRule{nfproto: 4, daddr: netip.PrefixFrom(ip, ip.BitLen()), l4proto: protoTCP, dport: uint16(e.Port), verdict: nftAccept}
+		if ip.Is6() {
+			r.nfproto = 6
+		}
+		if e.UDP {
+			r.l4proto = protoUDP
+		}
+		rules = append(rules, r)
 	}
-
-	// Allow DNS so name resolution keeps working while the switch is active
-	// (e.g. resolving the server on reconnect). In TUN mode DNS normally goes
-	// through the tunnel; this is a safety net for the physical path.
-	// The jump goes in at the front, not appended: ufw and friends install their
-	// own OUTPUT jumps, and an ACCEPT inside one of them ends traversal of
-	// OUTPUT before a jump sitting further down is ever reached — the kill
-	// switch would report success and block nothing. It is added last, once the
-	// chain above is fully populated, so OUTPUT never points at a half-built
-	// chain.
+	// DNS, so name resolution keeps working while the switch is up (resolving
+	// the server on reconnect). In TUN mode DNS normally goes through the
+	// tunnel; this is a safety net for the physical path. DHCPv6 and neighbour
+	// discovery keep the uplink's IPv6 alive; DHCP for IPv4 and ARP go through
+	// packet sockets netfilter does not see.
 	rules = append(rules,
-		[]string{"-A", killSwitchChain, "-p", "udp", "--dport", "53", "-j", "ACCEPT"},
-		[]string{"-A", killSwitchChain, "-p", "tcp", "--dport", "53", "-j", "ACCEPT"},
-		[]string{"-A", killSwitchChain, "-j", "DROP"},
-		[]string{"-I", "OUTPUT", "1", "-j", killSwitchChain},
+		nftRule{l4proto: protoUDP, dport: 53, verdict: nftAccept},
+		nftRule{l4proto: protoTCP, dport: 53, verdict: nftAccept},
+		nftRule{nfproto: 6, l4proto: protoUDP, dport: 547, verdict: nftAccept},
 	)
-
-	for _, rule := range rules {
-		if out, err := ipt(bin, rule...); err != nil {
-			return fmt.Errorf("%s %s: %w\n%s", bin, rule, err, out)
-		}
+	for typ := uint8(133); typ <= 137; typ++ {
+		rules = append(rules, nftRule{nfproto: 6, l4proto: protoICMPv6, icmpType: typ, hasICMPType: true, verdict: nftAccept})
 	}
-
-	return nil
+	rules = append(rules, nftRule{verdict: nftDrop})
+	return nftChain{name: killSwitchChain, priority: 0, rules: rules}, nil
 }
 
-// serverAcceptRule builds the ACCEPT rule for one VPN server endpoint, or nil
-// if there's no server address or its IP family doesn't match this binary.
-func serverAcceptRule(bin string, e Endpoint) []string {
-	if e.IP == "" {
-		return nil
-	}
-	ip := net.ParseIP(e.IP)
-	if ip == nil {
-		return nil
-	}
-	isV6 := ip.To4() == nil
-	if isV6 && bin != "ip6tables" {
-		return nil
-	}
-	if !isV6 && bin != "iptables" {
-		return nil
-	}
-	proto := "tcp"
-	if e.UDP {
-		proto = "udp"
-	}
-	return []string{"-A", killSwitchChain, "-d", e.IP, "-p", proto, "--dport", strconv.Itoa(e.Port), "-j", "ACCEPT"}
-}
-
-// DisableKillSwitch takes the chain and every OUTPUT jump to it out of both
-// stacks, and fails when the chain is still there afterwards. It used to
-// report success whatever happened, so a kill switch that would not come out
-// left the machine without a network and the session none the wiser (G08).
-// Nothing there to begin with is success.
+// DisableKillSwitch takes the chain out, and the table with it when the split
+// has nothing in it either, and fails when the chain is still there afterwards
+// (G08). Nothing there to begin with is success.
 func DisableKillSwitch() error {
-	slog.Info("disabling kill switch iptables/ip6tables rules")
-
-	var errs []error
-	for _, bin := range firewallBins {
-		if err := fwCmd.lookPath(bin); err != nil {
-			continue
-		}
-		// Remove every OUTPUT jump: older buggy runs could have appended the
-		// jump multiple times, so loop until the delete fails.
-		for {
-			if _, err := ipt(bin, "-D", "OUTPUT", "-j", killSwitchChain); err != nil {
-				break
-			}
-		}
-		_, _ = ipt(bin, "-F", killSwitchChain)
-		_, _ = ipt(bin, "-X", killSwitchChain)
-		// The deletes above fail both when there is nothing to delete and when
-		// something went wrong; only the chain's absence tells the two apart.
-		if _, err := ipt(bin, "-S", killSwitchChain); err == nil {
-			errs = append(errs, fmt.Errorf("%s: цепочка %s осталась после снятия kill switch", bin, killSwitchChain))
-		}
-	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
+	slog.Info("disabling kill switch nftables chain")
+	if err := nftRemove([]string{killSwitchChain}); err != nil {
+		return fmt.Errorf("kill switch не снят: %w", err)
 	}
 	note(func(j *journal) { j.KillSwitch = false })
 	return nil
+}
+
+// recoverKillSwitch is the teardown for a record of a run that died: the table
+// goes whole, and so does the iptables chain a version before H09 used, should
+// the record be one of its. Only the recovery looks for that chain: a session
+// of this version never makes one.
+func recoverKillSwitch() error {
+	err := DisableKillSwitch()
+	return errors.Join(err, dropLegacyKillSwitch())
+}
+
+// legacyChain is the chain the kill switch lived in before H09.
+const legacyChain = "XRAY_KILL"
+
+// legacyCmd is overridable in tests.
+var legacyCmd commander = execCommander{}
+
+// dropLegacyKillSwitch takes the old chain out of iptables and ip6tables where
+// it is still there. A host without the binaries has none to take out.
+func dropLegacyKillSwitch() error {
+	var errs []error
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		if legacyCmd.lookPath(bin) != nil {
+			continue
+		}
+		if _, err := legacyCmd.run(bin, "-w", "-S", legacyChain); err != nil {
+			continue // no such chain
+		}
+		for {
+			if _, err := legacyCmd.run(bin, "-w", "-D", "OUTPUT", "-j", legacyChain); err != nil {
+				break
+			}
+		}
+		_, _ = legacyCmd.run(bin, "-w", "-F", legacyChain)
+		if out, err := legacyCmd.run(bin, "-w", "-X", legacyChain); err != nil {
+			errs = append(errs, fmt.Errorf("%s: цепочка %s прежней версии не удалена: %w: %s", bin, legacyChain, err, strings.TrimSpace(string(out))))
+		}
+	}
+	return errors.Join(errs...)
 }

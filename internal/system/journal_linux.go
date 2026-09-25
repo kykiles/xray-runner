@@ -210,5 +210,5 @@ func recoverSplit(home map[string]string) error {
 		}
 	}
 	splitMu.Unlock()
-	return DisableSplit()
+	return errors.Join(DisableSplit(), dropLegacySplit())
 }

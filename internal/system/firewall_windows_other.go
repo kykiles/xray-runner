@@ -12,3 +12,7 @@ func EnableKillSwitch(KillSwitchConfig) error {
 
 // DisableKillSwitch has nothing to take down.
 func DisableKillSwitch() error { return nil }
+
+// recoverKillSwitch has nothing to take down after a crash: the filters went
+// with the process that set them.
+func recoverKillSwitch() error { return DisableKillSwitch() }

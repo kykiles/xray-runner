@@ -3,7 +3,6 @@
 package system
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -59,8 +58,27 @@ func HasIPv6Stack() bool {
 	return err == nil
 }
 
-// ipCmd is overridable in tests.
-var ipCmd commander = execCommander{}
+// netOps is the host's routing state, read and changed the way EnableTunRouting
+// and its teardown need it. The real one speaks rtnetlink (netlink_linux.go):
+// nothing is parsed out of `ip`, which the program no longer runs (H09).
+type netOps interface {
+	// routeGet is the path the kernel would take to dst: the gateway, empty on
+	// the local link, and the device.
+	routeGet(dst netip.Addr) (via, dev string, err error)
+	// listRoutes lists one family's routes in every table, as ip would print them.
+	listRoutes(v6 bool) ([]ipRoute, error)
+	// listRules lists the IPv4 policy rules.
+	listRules() ([]ipRule, error)
+	// linkAddrs lists the addresses on a device.
+	linkAddrs(dev string) ([]netip.Addr, error)
+	// add installs the entry and fails when the kernel already has one in its
+	// place; del removes exactly it.
+	add(e tunEntry) error
+	del(e tunEntry) error
+}
+
+// ipOps is overridable in tests.
+var ipOps netOps = netlinkOps{}
 
 // tunEntry is one route or rule EnableTunRouting added, spelled the way the
 // teardown has to name it: its delete removes this entry and never a foreign
@@ -91,37 +109,11 @@ func DirectBind() (xraycfg.DirectBind, error) {
 	return xraycfg.DirectBind{Mark: xraycfg.DirectFwMark}, nil
 }
 
-// parseRouteGet extracts the gateway and device from `ip route get` output,
-// e.g. "45.150.32.235 via 192.168.31.1 dev wlp3s0 src 192.168.31.94 uid 0".
-// A destination on the local link has no "via" and returns an empty gateway.
-func parseRouteGet(out string) (via, dev string, err error) {
-	fields := strings.Fields(out)
-	for i, f := range fields {
-		if i+1 >= len(fields) {
-			break
-		}
-		switch f {
-		case "via":
-			via = fields[i+1]
-		case "dev":
-			dev = fields[i+1]
-		}
-	}
-	if dev == "" {
-		return "", "", fmt.Errorf("no device in route output: %q", out)
-	}
-	return via, dev, nil
-}
-
 // EnableTunRouting points the system's default traffic at the TUN device and
 // pins the VPN server to the physical path. It only adds: an entry already in
 // place is refused before the first change, and a failure takes back exactly
 // what this call added.
 func EnableTunRouting(cfg TunRouteConfig) error {
-	if err := ipCmd.lookPath("ip"); err != nil {
-		return fmt.Errorf("iproute2 не найден: %w", err)
-	}
-
 	if len(cfg.ServerIPs) == 0 {
 		return fmt.Errorf("не задан адрес VPN-сервера для исключения из туннеля")
 	}
@@ -141,27 +133,19 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 		if err != nil {
 			return err
 		}
-		out, err := ipCmd.run("ip", "route", "get", ip)
+		via, dev, err := ipOps.routeGet(prefix.Addr())
 		if err != nil {
-			return fmt.Errorf("определить маршрут до сервера %s: %w: %w\n%s", ip, ErrNoRoute, err, out)
-		}
-		via, dev, err := parseRouteGet(string(out))
-		if err != nil {
-			return fmt.Errorf("разобрать маршрут до сервера %s: %w", ip, err)
+			return fmt.Errorf("определить маршрут до сервера %s: %w: %w", ip, ErrNoRoute, err)
 		}
 		want = append(want, tunEntry{what: "исключить сервер " + ip + " из туннеля", prefix: prefix, via: via, dev: dev, metric: tunMetric})
 	}
 
 	// The physical path for marked traffic is resolved here, alongside the
 	// server exceptions, for the same reason: after the split default is in
-	// place `ip route get` answers with the tun device.
-	out, err := ipCmd.run("ip", "route", "get", markProbe)
+	// place the kernel answers with the tun device.
+	directVia, directDev, err := ipOps.routeGet(netip.MustParseAddr(markProbe))
 	if err != nil {
-		return fmt.Errorf("определить физический маршрут по умолчанию: %w: %w\n%s", ErrNoRoute, err, out)
-	}
-	directVia, directDev, err := parseRouteGet(string(out))
-	if err != nil {
-		return fmt.Errorf("разобрать физический маршрут по умолчанию: %w", err)
+		return fmt.Errorf("определить физический маршрут по умолчанию: %w: %w", ErrNoRoute, err)
 	}
 
 	// Marked traffic gets its escape hatch before the split default exists,
@@ -207,8 +191,8 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 			e.pref = pref
 		}
 		journalRoutes(append(slices.Clip(installed), e))
-		if out, err := ipCmd.run("ip", e.args("add")...); err != nil {
-			err = fmt.Errorf("%s: %w\n%s", e.what, err, out)
+		if err := ipOps.add(e); err != nil {
+			err = fmt.Errorf("%s: %w", e.what, err)
 			if undoErr := DisableTunRouting(); undoErr != nil {
 				err = fmt.Errorf("%w\nоткат не завершён: %w", err, undoErr)
 			}
@@ -240,12 +224,13 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 // Rules are left to the preflight — a foreign rule for the mark is refused
 // there, and ours is named by a priority no add can take over.
 func checkTunRoutingOwned() error {
-	var routes4, routes6 []ipRoute
-	if err := ipJSON(&routes4, "-4", "route", "show", "table", "all"); err != nil {
+	routes4, err := ipOps.listRoutes(false)
+	if err != nil {
 		return err
 	}
+	var routes6 []ipRoute
 	if slices.ContainsFunc(installed, func(e tunEntry) bool { return e.v6 }) {
-		if err := ipJSON(&routes6, "-6", "route", "show", "table", "all"); err != nil {
+		if routes6, err = ipOps.listRoutes(true); err != nil {
 			return err
 		}
 	}
@@ -283,22 +268,19 @@ func DisableTunRouting() error {
 	if len(installed) == 0 {
 		return nil
 	}
-	if err := ipCmd.lookPath("ip"); err != nil {
-		return fmt.Errorf("iproute2 не найден — маршруты TUN не сняты: %w", err)
-	}
-
-	var routes4, routes6 []ipRoute
-	var rules []ipRule
-	if err := ipJSON(&routes4, "-4", "route", "show", "table", "all"); err != nil {
+	routes4, err := ipOps.listRoutes(false)
+	if err != nil {
 		return fmt.Errorf("маршруты TUN не сняты: %w", err)
 	}
+	var routes6 []ipRoute
+	var rules []ipRule
 	if slices.ContainsFunc(installed, func(e tunEntry) bool { return e.v6 }) {
-		if err := ipJSON(&routes6, "-6", "route", "show", "table", "all"); err != nil {
+		if routes6, err = ipOps.listRoutes(true); err != nil {
 			return fmt.Errorf("маршруты TUN не сняты: %w", err)
 		}
 	}
 	if slices.ContainsFunc(installed, func(e tunEntry) bool { return e.rule }) {
-		if err := ipJSON(&rules, "-4", "rule", "show"); err != nil {
+		if rules, err = ipOps.listRules(); err != nil {
 			return fmt.Errorf("маршруты TUN не сняты: %w", err)
 		}
 	}
@@ -317,14 +299,13 @@ func DisableTunRouting() error {
 			continue
 		}
 		if foreign {
-			slog.Warn("tun route replaced by another client, left in place", "route", strings.Join(e.args("add"), " "))
+			slog.Warn("tun route replaced by another client, left in place", "route", e.String())
 		}
 		if !present {
 			continue
 		}
-		args := e.args("del")
-		if out, err := ipCmd.run("ip", args...); err != nil {
-			errs = append(errs, fmt.Errorf("ip %s: %w\n%s", strings.Join(args, " "), err, out))
+		if err := ipOps.del(e); err != nil {
+			errs = append(errs, fmt.Errorf("снять %s: %w", e, err))
 			kept = append(kept, e)
 		}
 	}
@@ -339,7 +320,12 @@ func DisableTunRouting() error {
 	return nil
 }
 
-// args spells the entry for ip: add installs it, del removes exactly it.
+// String names the entry the way ip would spell its add.
+func (e tunEntry) String() string { return strings.Join(e.args("add"), " ") }
+
+// args spells the entry for ip: add installs it, del removes exactly it. The
+// program no longer runs ip; this is how an entry reads in a log line and an
+// error, and how the tests' model of the kernel takes it.
 func (e tunEntry) args(verb string) []string {
 	if e.rule {
 		return []string{"rule", verb, "pref", strconv.Itoa(e.pref),
@@ -439,17 +425,11 @@ func (e tunEntry) ownsPrefix(routes []ipRoute) (mine, shared bool, err error) {
 func checkTunRoutingFree(cfg TunRouteConfig, want []tunEntry) (int, error) {
 	// xray assigns the address before it brings the interface up, so a tun
 	// without it is not the one this core created.
-	var links []ipLink
-	if err := ipJSON(&links, "addr", "show", "dev", cfg.Iface); err != nil {
-		return 0, err
+	addrs, err := ipOps.linkAddrs(cfg.Iface)
+	if err != nil {
+		return 0, fmt.Errorf("прочитать адреса %s: %w", cfg.Iface, err)
 	}
-	var hasAddr bool
-	for _, l := range links {
-		for _, a := range l.AddrInfo {
-			hasAddr = hasAddr || a.Family == "inet" && a.Local == cfg.Addr
-		}
-	}
-	if !hasAddr {
+	if !slices.ContainsFunc(addrs, func(a netip.Addr) bool { return a.String() == cfg.Addr }) {
 		return 0, fmt.Errorf("у %s нет адреса %s — это не интерфейс, который поднимает ядро", cfg.Iface, cfg.Addr)
 	}
 
@@ -460,26 +440,26 @@ func checkTunRoutingFree(cfg TunRouteConfig, want []tunEntry) (int, error) {
 			own[e.prefix] = true
 		}
 	}
-	families := []string{"-4"}
+	families := []bool{false}
 	if slices.ContainsFunc(want, func(e tunEntry) bool { return e.v6 }) {
-		families = append(families, "-6")
+		families = append(families, true)
 	}
 
 	var conflicts []string
-	for _, family := range families {
-		var routes []ipRoute
-		if err := ipJSON(&routes, family, "route", "show", "table", "all"); err != nil {
+	for _, v6 := range families {
+		routes, err := ipOps.listRoutes(v6)
+		if err != nil {
 			return 0, err
 		}
 		for _, r := range routes {
-			if family == "-4" && r.Table == directTable {
+			if !v6 && r.Table == directTable {
 				conflicts = append(conflicts, "таблица "+directTable+": "+r.describe(r.Dst))
 				continue
 			}
 			if r.Table != "" {
 				continue
 			}
-			p, err := routeDst(r.Dst, family == "-6")
+			p, err := routeDst(r.Dst, v6)
 			if err != nil {
 				return 0, err
 			}
@@ -489,8 +469,8 @@ func checkTunRoutingFree(cfg TunRouteConfig, want []tunEntry) (int, error) {
 		}
 	}
 
-	var rules []ipRule
-	if err := ipJSON(&rules, "-4", "rule", "show"); err != nil {
+	rules, err := ipOps.listRules()
+	if err != nil {
 		return 0, err
 	}
 	for _, r := range rules {
@@ -521,31 +501,10 @@ func checkTunRoutingFree(cfg TunRouteConfig, want []tunEntry) (int, error) {
 	return pref, nil
 }
 
-// ipJSON runs a read-only `ip -j -N` query and decodes its output. -N keeps
-// table numbers numeric: a name given to 8888 in rt_tables would hide it.
-func ipJSON(v any, args ...string) error {
-	query := strings.Join(args, " ")
-	out, err := ipCmd.run("ip", append([]string{"-j", "-N"}, args...)...)
-	if err != nil {
-		return fmt.Errorf("прочитать состояние сети (ip %s): %w\n%s", query, err, out)
-	}
-	if err := json.Unmarshal(out, v); err != nil {
-		return fmt.Errorf("разобрать вывод ip %s: %w", query, err)
-	}
-	return nil
-}
-
-// ipLink is one entry of `ip -j addr show`, reduced to its addresses.
-type ipLink struct {
-	AddrInfo []struct {
-		Family string `json:"family"`
-		Local  string `json:"local"`
-	} `json:"addr_info"`
-}
-
-// ipRoute is one entry of `ip -j -N route show`, reduced to what the routing
-// code reads. A main-table route carries no "table" key, and an IPv4 route
-// with metric zero no "metric".
+// ipRoute is one route, reduced to what the routing code reads and spelled the
+// way `ip -j -N route show` spells it: no table for main, a number for any
+// other; "default" or a prefix for the destination, a host route without its
+// length; the type as the kernel's number, absent for unicast.
 type ipRoute struct {
 	Dst     string `json:"dst"`
 	Gateway string `json:"gateway"`
@@ -603,7 +562,8 @@ func routeDst(dst string, v6 bool) (netip.Prefix, error) {
 	return p, nil
 }
 
-// ipRule is one entry of `ip -j -N rule show`; fwmark and fwmask print in hex.
+// ipRule is one policy rule, spelled as `ip -j -N rule show` spells it: fwmark
+// and fwmask in hex, the mask left out when it is all ones.
 type ipRule struct {
 	Priority int    `json:"priority"`
 	FwMark   string `json:"fwmark"`

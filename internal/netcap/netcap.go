@@ -1,7 +1,10 @@
 // Package netcap covers running the network side of a TUN session without
 // root: the binary is given CAP_NET_ADMIN with setcap, and passes it on to the
 // programs it starts to change the network — the core, which creates the tun
-// device and marks its sockets, and ip, iptables and nft (H07).
+// device and marks its sockets, and the few system tools still run: ss for the
+// split, iptables for the cleanup of a pre-H09 kill switch (H07). Routes and
+// netfilter the program changes itself, over netlink, with its own capability
+// (H09).
 //
 // A capability from a file does not survive an exec on its own: it goes to a
 // child only as an ambient capability, raised on the way. And the programs

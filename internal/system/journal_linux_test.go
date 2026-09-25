@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -109,8 +108,7 @@ func TestDisableTunRouting_KeepsWhatItFailedToRemoveWrittenDown(t *testing.T) {
 // A killed run with the kill switch on leaves the machine without a network
 // until a reboot. The next run takes the chain down.
 func TestRecoverJournal_TakesDownACrashedRunsKillSwitch(t *testing.T) {
-	fw := newFakeIPTables("iptables", "ip6tables")
-	withFakeFirewall(t, fw)
+	fw := withFakeNft(t)
 	s := withJournal(t)
 
 	if err := EnableKillSwitch(ipv4Cfg); err != nil {
@@ -125,10 +123,8 @@ func TestRecoverJournal_TakesDownACrashedRunsKillSwitch(t *testing.T) {
 	if !strings.Contains(note, "kill switch") {
 		t.Errorf("note %q does not name the kill switch", note)
 	}
-	for bin, c := range fw.chains {
-		if c.exists {
-			t.Errorf("%s: the chain is still there after the recovery", bin)
-		}
+	if fw.table != nil {
+		t.Errorf("the table is still there after the recovery: %v", fw.table)
 	}
 	if len(s.m) != 0 {
 		t.Errorf("records left: %v", s.m)
@@ -138,14 +134,13 @@ func TestRecoverJournal_TakesDownACrashedRunsKillSwitch(t *testing.T) {
 // A kill switch that will not come down stays written down, under this run
 // now, and the screen hears of it.
 func TestRecoverJournal_KeepsAKillSwitchItCouldNotRemove(t *testing.T) {
-	fw := newFakeIPTables("iptables", "ip6tables")
-	withFakeFirewall(t, fw)
+	fw := withFakeNft(t)
 	s := withJournal(t)
 	if err := EnableKillSwitch(ipv4Cfg); err != nil {
 		t.Fatalf("EnableKillSwitch: %v", err)
 	}
 	crash(t, s)
-	fw.failArgs = map[string]string{"iptables": "-X"}
+	fw.stuck = true
 
 	if _, err := RecoverJournal(); err == nil {
 		t.Fatal("a kill switch left in place went unreported")
@@ -161,7 +156,8 @@ func TestRecoverJournal_KeepsAKillSwitchItCouldNotRemove(t *testing.T) {
 // The processes a killed run moved into the split cgroup keep redirecting into
 // its dead port. The next run puts them back where they came from.
 func TestRecoverJournal_PutsSplitProcessesBack(t *testing.T) {
-	stub := withFakes(t, map[string]string{"42": "code"})
+	withFakes(t, map[string]string{"42": "code"})
+	fw := nftOps.(*fakeNft)
 	s := withJournal(t)
 	home := filepath.Join(cgroupRoot, "user.slice", "app-code.scope")
 	if err := os.MkdirAll(home, 0o755); err != nil {
@@ -176,7 +172,6 @@ func TestRecoverJournal_PutsSplitProcessesBack(t *testing.T) {
 	}
 	crash(t, s)
 	clear(splitHome)
-	stub.calls = nil
 
 	note, err := RecoverJournal()
 	if err != nil {
@@ -191,10 +186,8 @@ func TestRecoverJournal_PutsSplitProcessesBack(t *testing.T) {
 	if _, err := os.Stat(splitCgroup); !os.IsNotExist(err) {
 		t.Error("split cgroup not removed")
 	}
-	if !slices.ContainsFunc(stub.calls, func(c []string) bool {
-		return strings.Join(c, " ") == "nft delete table ip "+splitTable
-	}) {
-		t.Errorf("the ruleset was not taken down: %v", stub.calls)
+	if fw.table != nil {
+		t.Errorf("the ruleset was not taken down: %v", fw.table)
 	}
 	if len(s.m) != 0 {
 		t.Errorf("records left: %v", s.m)

@@ -17,31 +17,37 @@ import (
 	"sync"
 )
 
-// Split tunnelling: the selected processes are moved into a cgroup v2, and an
-// nft nat/output chain redirects that cgroup's traffic into xray's dokodemo-door
-// listeners. Everything outside the cgroup — SSH, the rest of the system — keeps
+// Split tunnelling: the selected processes are moved into a cgroup v2, and a
+// nat/output chain in our nftables table (nft_linux.go) redirects that
+// cgroup's traffic into xray's dokodemo-door listeners. Everything outside the cgroup — SSH, the rest of the system — keeps
 // its normal path, which is the whole point of the mode.
 //
 // The cgroup match is what makes this work on already-running processes: a PID
 // can be moved into a cgroup at any time, unlike an environment variable.
 
-const splitTable = "xray_split"
+// The split's chains in our table.
+const (
+	splitNatChain   = "split_nat"
+	splitBlockChain = "split_block"
+)
+
+var splitChains = []string{splitNatChain, splitBlockChain}
 
 // SplitOverTUN says how per-process routing is built here: on Linux it is the
 // cgroup + nft redirect below, riding on proxy mode rather than on the tunnel.
 const SplitOverTUN = false
 
-// Overridable in tests: the real paths need root and a live nft.
+// Overridable in tests: the real paths need root, and ss a live host.
 var (
 	procRoot              = "/proc"
 	cgroupRoot            = "/sys/fs/cgroup"
 	splitCgroup           = splitCgroupPath()
-	nftCmd      commander = execCommander{}
+	ssCmd       commander = execCommander{}
 )
 
 // splitCgroupPath picks where the cgroup lives. Root owns the hierarchy root and
 // creates the directory there; an unprivileged run — the binary carrying
-// CAP_NET_ADMIN via setcap, which grants nft but no file ownership — can only
+// CAP_NET_ADMIN via setcap, which grants netfilter but no file ownership — can only
 // write inside the cgroup systemd delegated to the user session.
 func splitCgroupPath() string {
 	if os.Getuid() == 0 {
@@ -82,10 +88,18 @@ func splitRel() string {
 // Destinations that must never be redirected. Loopback and LAN traffic belongs
 // to the host — a dev server on 127.0.0.1 or a printer on 192.168.x.x has no
 // business crossing the tunnel, and sending it there breaks it outright.
-var splitDirectNets = "{ 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 }"
+var splitDirectNets = prefixes("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255/32")
 
 // The v6 counterpart: loopback, link-local, unique-local and multicast.
-var splitDirectNets6 = "{ ::1/128, fe80::/10, fc00::/7, ff00::/8 }"
+var splitDirectNets6 = prefixes("::1/128", "fe80::/10", "fc00::/7", "ff00::/8")
+
+func prefixes(s ...string) []netip.Prefix {
+	out := make([]netip.Prefix, len(s))
+	for i, p := range s {
+		out[i] = netip.MustParsePrefix(p)
+	}
+	return out
+}
 
 // splitHome remembers each moved PID's original cgroup so teardown can put it
 // back, mirroring how route_linux.go remembers what it added. The mutex is for
@@ -210,9 +224,6 @@ func EnableSplit(names []string, tcpPort, dnsPort int) (SplitScan, error) {
 		_ = DisableSplit()
 		return SplitScan{}, nil
 	}
-	if err := nftCmd.lookPath("nft"); err != nil {
-		return SplitScan{}, fmt.Errorf("nftables не найден: %w", err)
-	}
 	// Written down before the cgroup and the ruleset exist: processes of a run
 	// killed with them in place keep redirecting into a dead port (H06).
 	note(func(j *journal) { j.Split = true })
@@ -237,54 +248,60 @@ func EnableSplit(names []string, tcpPort, dnsPort int) (SplitScan, error) {
 	return scan, nil
 }
 
-// installSplitRules writes the nat/output chain. The table is torn down first so
-// a leftover ruleset from a crashed run cannot stack duplicate rules.
+// installSplitRules puts the split's two chains in our table, replacing any a
+// crashed run left, in one batch.
 func installSplitRules(tcpPort, dnsPort int) error {
-	_, _ = nftCmd.run("nft", "delete", "table", "ip", splitTable)
-	_, _ = nftCmd.run("nft", "delete", "table", "ip6", splitTable)
-
-	// The socket expression is the cgroup v2 match; meta cgroup is the v1
-	// net_cls classid and does not see this hierarchy. nft resolves the string
-	// as a path under /sys/fs/cgroup when it loads the rule, so it names the
-	// cgroup from the hierarchy root, not by its last component: for the
-	// delegated one, "xray-split" alone is a cgroup that does not exist (G05).
-	match := []string{"socket", "cgroupv2", "level", strconv.Itoa(splitLevel()), `"` + strings.TrimPrefix(splitRel(), "/") + `"`}
-	rule := func(family, chain string, tail ...string) []string {
-		return append(append([]string{"add", "rule", family, splitTable, chain}, match...), tail...)
+	if err := nftReplace(splitChains, splitRuleset(tcpPort, dnsPort)); err != nil {
+		return fmt.Errorf("правила раздельной маршрутизации: %w", err)
 	}
+	return nil
+}
 
-	cmds := [][]string{
-		{"add", "table", "ip", splitTable},
-		{"add", "chain", "ip", splitTable, "output", "{ type nat hook output priority -100; policy accept; }"},
-		// DNS goes first, before the bypass: the host's resolver usually *is* a
-		// bypassed address (127.0.0.53 for systemd-resolved, the router on a LAN
-		// address), so a later rule would never see the query.
-		rule("ip", "output", "udp", "dport", "53", "redirect", "to", ":"+strconv.Itoa(dnsPort)),
-		rule("ip", "output", "ip", "daddr", splitDirectNets, "return"),
-		rule("ip", "output", "meta", "l4proto", "tcp", "redirect", "to", ":"+strconv.Itoa(tcpPort)),
+// splitRuleset is the split: a nat chain that redirects the cgroup's traffic
+// into xray, and a filter chain that stops what the redirect cannot carry.
+func splitRuleset(tcpPort, dnsPort int) []nftChain {
+	// The socket expression is the cgroup v2 match; meta cgroup is the v1
+	// net_cls classid and does not see this hierarchy. The cgroup is named from
+	// the hierarchy root, not by its last component: for the delegated one,
+	// "xray-split" alone is a cgroup that does not exist (G05).
+	cg, level := strings.TrimPrefix(splitRel(), "/"), splitLevel()
+	v4 := func(r nftRule) nftRule { r.cgroup, r.level, r.nfproto = cg, level, 4; return r }
+	v6 := func(r nftRule) nftRule { r.cgroup, r.level, r.nfproto = cg, level, 6; return r }
 
-		// Only TCP is redirected above, so every other UDP flow — QUIC, a voice
-		// call, WebRTC — would walk straight past the tunnel and out of the real
-		// interface with the real address. That is a leak, not a missing feature,
-		// so it is rejected: QUIC falls back to TCP 443, and the rest fails
-		// loudly instead of quietly going direct.
-		//
-		// A filter chain, not the nat one: nat only sees the first packet of a
-		// flow, so a drop there is a side effect of conntrack rather than a rule
-		// that plainly holds. Reject over drop for the same reason of clarity —
-		// the fallback is immediate instead of waiting out a timeout.
-		//
-		// The bypass comes first here too: by this hook the redirected DNS is
-		// already addressed to 127.0.0.1, and LAN/multicast UDP (mDNS, DHCP,
-		// a printer) belongs to the host exactly as it does in the nat chain.
-		//
-		// ponytail: UDP наружу закрыт целиком; звонки в Telegram перестанут
-		// работать, пока процесс в списке. Полноценный UDP через туннель — это
-		// TPROXY-инбаунд вместо NAT REDIRECT.
-		{"add", "chain", "ip", splitTable, "block", "{ type filter hook output priority 0; policy accept; }"},
-		rule("ip", "block", "ip", "daddr", splitDirectNets, "return"),
-		rule("ip", "block", "meta", "l4proto", "udp", "reject", "with", "icmp", "type", "port-unreachable"),
+	// DNS goes first, before the bypass: the host's resolver usually *is* a
+	// bypassed address (127.0.0.53 for systemd-resolved, the router on a LAN
+	// address), so a later rule would never see the query. IPv4 only: the
+	// dokodemo listeners are, and IPv6 is refused below.
+	nat := []nftRule{v4(nftRule{l4proto: protoUDP, dport: 53, verdict: nftRedirect, port: uint16(dnsPort)})}
+	for _, p := range splitDirectNets {
+		nat = append(nat, v4(nftRule{daddr: p, verdict: nftReturn}))
+	}
+	nat = append(nat, v4(nftRule{l4proto: protoTCP, verdict: nftRedirect, port: uint16(tcpPort)}))
 
+	// Only TCP is redirected above, so every other UDP flow — QUIC, a voice
+	// call, WebRTC — would walk straight past the tunnel and out of the real
+	// interface with the real address. That is a leak, not a missing feature,
+	// so it is rejected: QUIC falls back to TCP 443, and the rest fails loudly
+	// instead of quietly going direct.
+	//
+	// A filter chain, not the nat one: nat only sees the first packet of a
+	// flow, so a drop there is a side effect of conntrack rather than a rule
+	// that plainly holds. Reject over drop for the same reason of clarity — the
+	// fallback is immediate instead of waiting out a timeout.
+	//
+	// The bypass comes first here too: by this hook the redirected DNS is
+	// already addressed to 127.0.0.1, and LAN/multicast UDP (mDNS, DHCP, a
+	// printer) belongs to the host exactly as it does in the nat chain.
+	//
+	// ponytail: UDP наружу закрыт целиком; звонки в Telegram перестанут
+	// работать, пока процесс в списке. Полноценный UDP через туннель — это
+	// TPROXY-инбаунд вместо NAT REDIRECT.
+	var block []nftRule
+	for _, p := range splitDirectNets {
+		block = append(block, v4(nftRule{daddr: p, verdict: nftReturn}))
+	}
+	block = append(block,
+		v4(nftRule{l4proto: protoUDP, verdict: nftRejectICMP, code: 3}), // port-unreachable
 		// Страховка от утечки: сюда доходит только TCP, которого nat почему-то не
 		// развернул (у развёрнутого daddr уже 127.0.0.1, и его забрал bypass
 		// выше). Сброс с RST заставляет приложение переподключиться, а не идти
@@ -294,25 +311,22 @@ func installSplitRules(tcpPort, dnsPort int) error {
 		// "socket cgroupv2" читает cgroup из sk_cgrp_data, который ядро
 		// проставляет при создании сокета и не обновляет при миграции процесса.
 		// Их закрывает killLeaked.
-		rule("ip", "block", "meta", "l4proto", "tcp", "reject", "with", "tcp", "reset"),
+		v4(nftRule{l4proto: protoTCP, verdict: nftRejectTCP}),
+	)
+	// IPv6 is not redirected at all: the dokodemo listener is v4-only. Left
+	// alone, an app on a network with IPv6 simply prefers the AAAA record and
+	// every byte leaves untunnelled — the worst leak of the mode, because
+	// nothing in the UI hints at it. Rejecting it turns Happy Eyeballs around
+	// in milliseconds onto the v4 path, which is redirected.
+	for _, p := range splitDirectNets6 {
+		block = append(block, v6(nftRule{daddr: p, verdict: nftReturn}))
+	}
+	block = append(block, v6(nftRule{verdict: nftRejectICMP, code: 1})) // admin-prohibited
 
-		// IPv6 is not redirected at all: the nat chain above is the ip family and
-		// the dokodemo listener is v4-only. Left alone, an app on a network with
-		// IPv6 simply prefers the AAAA record and every byte leaves untunnelled —
-		// the worst leak of the mode, because nothing in the UI hints at it.
-		// Rejecting it turns Happy Eyeballs around in milliseconds onto the v4
-		// path, which is redirected.
-		{"add", "table", "ip6", splitTable},
-		{"add", "chain", "ip6", splitTable, "block", "{ type filter hook output priority 0; policy accept; }"},
-		rule("ip6", "block", "ip6", "daddr", splitDirectNets6, "return"),
-		rule("ip6", "block", "reject", "with", "icmpv6", "type", "admin-prohibited"),
+	return []nftChain{
+		{name: splitNatChain, nat: true, priority: -100, rules: nat},
+		{name: splitBlockChain, priority: 0, rules: block},
 	}
-	for _, args := range cmds {
-		if out, err := nftCmd.run("nft", args...); err != nil {
-			return fmt.Errorf("nft %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-		}
-	}
-	return nil
 }
 
 // RefreshSplit re-scans for processes from the list that are not in the cgroup
@@ -426,7 +440,7 @@ func killLeaked(pids map[string]bool) map[string]bool {
 	unclosed := map[string]bool{}
 	// ss prints the process next to each socket, which saves mapping inode
 	// numbers out of /proc/<pid>/fd ourselves.
-	out, err := nftCmd.run("ss", "-tnHp", "state", "established")
+	out, err := ssCmd.run("ss", "-tnHp", "state", "established")
 	if err != nil {
 		// Without the list nothing was closed, and nothing says there was
 		// nothing to close.
@@ -450,7 +464,7 @@ func killLeaked(pids map[string]bool) map[string]bool {
 		// CAP_NET_ADMIN, no CONFIG_INET_DIAG_DESTROY) and prints nothing then —
 		// nor when the connection ended by itself meanwhile, which is no leak.
 		// Whether the connection is still up afterwards is the answer.
-		res, err := nftCmd.run("ss", "-K", "state", "established", "src", local, "dst", peer)
+		res, err := ssCmd.run("ss", "-K", "state", "established", "src", local, "dst", peer)
 		if !stillOpen(local, peer) {
 			slog.Debug("split: closed pre-existing connection", "src", local, "dst", peer)
 			continue
@@ -467,7 +481,7 @@ func killLeaked(pids map[string]bool) map[string]bool {
 // stillOpen reports whether ss still lists the connection local → peer. A
 // listing that fails counts as open: nothing shows the connection is gone.
 func stillOpen(local, peer string) bool {
-	out, err := nftCmd.run("ss", "-tnH", "state", "established", "src", local, "dst", peer)
+	out, err := ssCmd.run("ss", "-tnH", "state", "established", "src", local, "dst", peer)
 	if err != nil {
 		return true
 	}
@@ -512,9 +526,12 @@ func DisableSplit() error {
 	splitMu.Lock()
 	defer splitMu.Unlock()
 
-	// A missing table is the expected case on a clean run, not an error.
-	_, _ = nftCmd.run("nft", "delete", "table", "ip", splitTable)
-	_, _ = nftCmd.run("nft", "delete", "table", "ip6", splitTable)
+	// Nothing there is the expected case on a clean run, not an error. What
+	// would not come out is logged and the cgroup is emptied regardless: a
+	// ruleset matching an empty cgroup redirects nothing.
+	if err := nftRemove(splitChains); err != nil {
+		slog.Warn("split: nftables chains not removed", "error", err)
+	}
 
 	if _, err := os.Stat(splitCgroup); err != nil {
 		note(func(j *journal) { j.Split, j.SplitHome = false, nil })

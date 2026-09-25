@@ -49,6 +49,14 @@ jobs:
           check-latest: true
       - run: go vet ./...
       - run: go test -v -race ./...
+      # The netlink routes and the nftables table against the real kernel, in a
+      # network namespace of their own so the runner's network is not touched
+      # (internal/system/netns_linux_test.go). Built as the runner's user, run
+      # as root.
+      - name: Live netlink and nftables (netns)
+        run: |
+          go test -c -o systest ./internal/system/
+          sudo env XRAY_RUNNER_NETNS=1 unshare -n ./systest -test.run Live -test.v
 
   build:
     name: Build

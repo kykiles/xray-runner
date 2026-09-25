@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -48,7 +49,7 @@ func fakeProc(t *testing.T, procs map[string]string) string {
 	return root
 }
 
-// stubNft records every nft invocation instead of touching the kernel.
+// stubNft records every ss invocation instead of touching the host's sockets.
 type stubNft struct {
 	calls   [][]string
 	failOn  string
@@ -102,12 +103,13 @@ func withFakes(t *testing.T, procs map[string]string) *stubNft {
 		t.Fatal(err)
 	}
 
-	oldProc, oldRoot, oldSplit, oldCmd := procRoot, cgroupRoot, splitCgroup, nftCmd
-	procRoot, cgroupRoot, splitCgroup, nftCmd = fakeProc(t, procs), cg, filepath.Join(cg, "xray-split"), stub
+	withFakeNft(t)
+	oldProc, oldRoot, oldSplit, oldCmd := procRoot, cgroupRoot, splitCgroup, ssCmd
+	procRoot, cgroupRoot, splitCgroup, ssCmd = fakeProc(t, procs), cg, filepath.Join(cg, "xray-split"), stub
 	clear(splitHome)
 	clear(splitUnclosed)
 	t.Cleanup(func() {
-		procRoot, cgroupRoot, splitCgroup, nftCmd = oldProc, oldRoot, oldSplit, oldCmd
+		procRoot, cgroupRoot, splitCgroup, ssCmd = oldProc, oldRoot, oldSplit, oldCmd
 		clear(splitHome)
 		clear(splitUnclosed)
 	})
@@ -349,89 +351,107 @@ func TestEnableSplitSkipsMissingProcesses(t *testing.T) {
 	}
 }
 
-// The rule order is the load-bearing part: DNS has to be redirected before the
-// bypass returns, or a resolver on 127.0.0.53 leaks every lookup.
-func TestEnableSplitRuleOrder(t *testing.T) {
-	stub := withFakes(t, map[string]string{"42": "code"})
-
+// What the split does to a packet, by the order of its rules: DNS is
+// redirected before the bypass returns, or a resolver on 127.0.0.53 leaks every
+// lookup; the LAN keeps its path; everything the redirect cannot carry — other
+// UDP, all of IPv6 — is rejected rather than left to go out directly; and none
+// of it reaches a process outside the cgroup.
+func TestSplitDecisions(t *testing.T) {
+	withFakes(t, map[string]string{"42": "code"})
 	if _, err := EnableSplit([]string{"code"}, 10810, 10853); err != nil {
 		t.Fatalf("EnableSplit: %v", err)
 	}
+	f := nftOps.(*fakeNft)
+	nat, block := f.table[splitNatChain], f.table[splitBlockChain]
+	if !nat.nat || nat.priority != -100 || block.nat || block.priority != 0 {
+		t.Fatalf("chains %+v / %+v: want nat at -100 and filter at 0", nat, block)
+	}
 
-	var rules []string
-	for _, c := range stub.calls {
-		if line := strings.Join(c, " "); strings.Contains(line, "add rule") {
-			rules = append(rules, line)
+	const in = "xray-split"
+	cases := []struct {
+		name  string
+		p     packet
+		nat   nftRule // the nat chain's verdict
+		block nftVerdict
+	}{
+		{"DNS to the local resolver", packet{cgroup: in, daddr: "127.0.0.53", l4proto: protoUDP, dport: 53},
+			nftRule{verdict: nftRedirect, port: 10853}, nftReturn},
+		{"TCP out", packet{cgroup: in, daddr: "1.1.1.1", l4proto: protoTCP, dport: 443},
+			nftRule{verdict: nftRedirect, port: 10810}, nftReturn},
+		{"LAN", packet{cgroup: in, daddr: "192.168.1.10", l4proto: protoTCP, dport: 445},
+			nftRule{verdict: nftReturn}, nftReturn},
+		{"QUIC", packet{cgroup: in, daddr: "1.1.1.1", l4proto: protoUDP, dport: 443},
+			nftRule{verdict: nftAccept}, nftRejectICMP},
+		{"IPv6", packet{cgroup: in, daddr: "2606:4700::1111", l4proto: protoTCP, dport: 443},
+			nftRule{verdict: nftAccept}, nftRejectICMP},
+		{"IPv6 link-local", packet{cgroup: in, daddr: "fe80::1", l4proto: protoUDP, dport: 5353},
+			nftRule{verdict: nftAccept}, nftReturn},
+		{"outside the cgroup", packet{cgroup: "user.slice", daddr: "1.1.1.1", l4proto: protoTCP, dport: 443},
+			nftRule{verdict: nftAccept}, nftAccept},
+	}
+	for _, c := range cases {
+		gotNat, _ := nftEval(nat, c.p)
+		if gotNat.verdict != c.nat.verdict || gotNat.port != c.nat.port {
+			t.Errorf("%s: nat %v port %d, want %v port %d", c.name, gotNat.verdict, gotNat.port, c.nat.verdict, c.nat.port)
+		}
+		// By the filter hook a redirected packet is addressed to loopback, and
+		// the bypass returns it.
+		p := c.p
+		if gotNat.verdict == nftRedirect {
+			p.daddr = "127.0.0.1"
+		}
+		if gotBlock, _ := nftEval(block, p); gotBlock.verdict != c.block {
+			t.Errorf("%s: filter %v, want %v", c.name, gotBlock.verdict, c.block)
 		}
 	}
-	if len(rules) != 8 {
-		t.Fatalf("got %d rules, want 8: %v", len(rules), rules)
+	// TCP that nat did not turn around — it still carries its real address —
+	// is reset rather than let out.
+	if r, _ := nftEval(block, packet{cgroup: in, daddr: "1.1.1.1", l4proto: protoTCP, dport: 443}); r.verdict != nftRejectTCP {
+		t.Errorf("unredirected TCP: %v, want a reset", r.verdict)
 	}
-	// The blocks come last and live in filter chains, so they do not disturb the
-	// nat ordering above. Everything the redirect does not cover — other UDP,
-	// all of IPv6 — is rejected rather than left to go out directly.
-	for i, want := range []string{
-		"udp dport 53 redirect to :10853",
-		"ip daddr",
-		"l4proto tcp redirect to :10810",
-		"ip daddr",
-		"l4proto udp reject",
-		// TCP, которого nat не развернул, рвётся, а не уходит наружу с реальным
-		// адресом.
-		"l4proto tcp reject with tcp reset",
-		"ip6 daddr",
-		"reject with icmpv6",
-	} {
-		if !strings.Contains(rules[i], want) {
-			t.Errorf("rule[%d] = %q, want it to contain %q", i, rules[i], want)
-		}
-	}
-	for i, r := range rules {
-		if !strings.Contains(r, `socket cgroupv2 level 1 "xray-split"`) {
-			t.Errorf("rule[%d] = %q, missing the cgroup match — it would capture the whole host", i, r)
+	for _, ch := range []nftChain{nat, block} {
+		for i, r := range ch.rules {
+			if r.cgroup != in || r.level != 1 {
+				t.Errorf("%s rule %d = %+v, missing the cgroup match — it would capture the whole host", ch.name, i, r)
+			}
 		}
 	}
 }
 
 // An empty list is also the sweep for a run that was killed before its
-// teardown: its table would otherwise keep redirecting the leftover cgroup into
-// a port nobody listens on.
+// teardown: its chains would otherwise keep redirecting the leftover cgroup
+// into a port nobody listens on.
 func TestEnableSplitWithNoNamesClearsStaleRules(t *testing.T) {
-	stub := withFakes(t, map[string]string{"42": "code"})
+	withFakes(t, map[string]string{"42": "code"})
+	f := nftOps.(*fakeNft)
+	f.table = map[string]nftChain{splitNatChain: {name: splitNatChain}, splitBlockChain: {name: splitBlockChain}}
 
 	if _, err := EnableSplit(nil, 10810, 10853); err != nil {
 		t.Fatalf("EnableSplit: %v", err)
 	}
-	for _, family := range []string{"ip", "ip6"} {
-		want := "delete table " + family + " " + splitTable
-		if !slices.ContainsFunc(stub.calls, func(c []string) bool {
-			return strings.Contains(strings.Join(c, " "), want)
-		}) {
-			t.Errorf("%q never ran: %v", want, stub.calls)
-		}
+	if f.table != nil {
+		t.Errorf("stale chains left: %v", f.table)
 	}
 }
 
 // An unprivileged run puts the cgroup under the delegated user@<uid>.service,
-// four levels down. The nft match has to follow it: "level 1" there names
+// four levels down. The match has to follow it: level 1 there names
 // user.slice and would capture the whole session instead of the listed apps.
-// And the path is spelled from the hierarchy root, which is how nft resolves
-// it: the last component alone names no cgroup at all (G05).
+// And the path is spelled from the hierarchy root: the last component alone
+// names no cgroup at all (G05).
 func TestEnableSplitMatchesDelegatedCgroupLevel(t *testing.T) {
-	stub := withFakes(t, map[string]string{"42": "code"})
+	withFakes(t, map[string]string{"42": "code"})
 	splitCgroup = filepath.Join(cgroupRoot, "user.slice", "user-1000.slice", "user@1000.service", "xray-split")
 
 	if _, err := EnableSplit([]string{"code"}, 10810, 10853); err != nil {
 		t.Fatalf("EnableSplit: %v", err)
 	}
-
-	for _, c := range stub.calls {
-		line := strings.Join(c, " ")
-		if !strings.Contains(line, "add rule") {
-			continue
-		}
-		if !strings.Contains(line, `socket cgroupv2 level 4 "user.slice/user-1000.slice/user@1000.service/xray-split"`) {
-			t.Errorf("rule = %q, want level 4 for the delegated cgroup", line)
+	f := nftOps.(*fakeNft)
+	for _, ch := range f.table {
+		for _, r := range ch.rules {
+			if r.level != 4 || r.cgroup != "user.slice/user-1000.slice/user@1000.service/xray-split" {
+				t.Errorf("rule %+v, want level 4 for the delegated cgroup", r)
+			}
 		}
 	}
 }
@@ -439,14 +459,30 @@ func TestEnableSplitMatchesDelegatedCgroupLevel(t *testing.T) {
 // A failed ruleset must not leave the cgroup behind: processes inside it with no
 // rules would be reported as tunnelled while routing nowhere.
 func TestEnableSplitRollsBackOnRuleFailure(t *testing.T) {
-	stub := withFakes(t, map[string]string{"42": "code"})
-	stub.failOn = "add rule"
+	withFakes(t, map[string]string{"42": "code"})
+	nftOps.(*fakeNft).failApply = syscall.EOPNOTSUPP
 
 	if _, err := EnableSplit([]string{"code"}, 10810, 10853); err == nil {
-		t.Fatal("EnableSplit succeeded despite a failing nft rule")
+		t.Fatal("EnableSplit succeeded despite a refused batch")
 	}
 	if _, err := os.Stat(splitCgroup); !os.IsNotExist(err) {
 		t.Errorf("cgroup %s survived a failed bring-up", splitCgroup)
+	}
+}
+
+// The split leaves the kill switch's chain alone, and the table with it.
+func TestDisableSplitKeepsOtherChains(t *testing.T) {
+	withFakes(t, map[string]string{"42": "code"})
+	if _, err := EnableSplit([]string{"code"}, 10810, 10853); err != nil {
+		t.Fatalf("EnableSplit: %v", err)
+	}
+	f := nftOps.(*fakeNft)
+	f.table[killSwitchChain] = nftChain{name: killSwitchChain}
+	if err := DisableSplit(); err != nil {
+		t.Fatal(err)
+	}
+	if chains, _ := f.chains(); !slices.Equal(chains, []string{killSwitchChain}) {
+		t.Errorf("chains after the split went: %v", chains)
 	}
 }
 

@@ -227,7 +227,7 @@ func RecoverJournal() (string, error) {
 	}
 	if found.KillSwitch {
 		what = append(what, "kill switch")
-		if err := DisableKillSwitch(); err != nil {
+		if err := recoverKillSwitch(); err != nil {
 			errs = append(errs, err)
 		}
 	}
