@@ -40,6 +40,8 @@ func TestValidateRefuses(t *testing.T) {
 		"unix address":   parts(`[{"protocol":"vless","settings":{"vnext":[{"address":"/run/docker.sock","port":0}]}}]`, ""),
 		"abstract sock":  parts(`[{"protocol":"socks","settings":{"servers":[{"address":"@x","port":1}]}}]`, ""),
 		"freedom unix":   parts(`[{"protocol":"freedom","settings":{"redirect":"/tmp/s"}}]`, ""),
+		"windows path":   parts(`[{"protocol":"vless","settings":{"vnext":[{"address":"C:\\\\ProgramData\\\\x.sock","port":0}]}}]`, ""),
+		"windows slash":  parts(`[{"protocol":"vless","settings":{"vnext":[{"address":"c:/x.sock","port":0}]}}]`, ""),
 		"domainsocket":   parts(`[{"protocol":"vless","streamSettings":{"network":"domainsocket"}}]`, ""),
 		"ext list":       parts(`[{"protocol":"freedom"}]`, `{"rules":[{"domain":["ext:../../etc/passwd:x"],"outboundTag":"direct"}]}`),
 		"ext-ip list":    parts(`[{"protocol":"freedom"}]`, `{"rules":[{"ip":["EXT-IP:a.dat:b"],"outboundTag":"direct"}]}`),

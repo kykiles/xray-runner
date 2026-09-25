@@ -122,9 +122,10 @@ func forbiddenKey(k string) bool {
 func checkString(path, key, s string) error {
 	switch key {
 	case "address", "redirect", "dest", "server":
-		// A unix socket, by path or in the abstract namespace: the core would
-		// connect to it with the service's rights.
-		if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "@") {
+		// A unix socket, by path or in the abstract namespace — on Windows a
+		// path with a drive or backslashes: the core would connect to it with
+		// the service's rights. No host name or address looks like one.
+		if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "@") || strings.Contains(s, `\`) || drivePath(s) {
 			return fmt.Errorf("%s: unix-сокет службой не принимается", path)
 		}
 	case "network":
@@ -138,6 +139,12 @@ func checkString(path, key, s string) error {
 		return fmt.Errorf("%s: списки из файлов (ext:) службой не принимаются", path)
 	}
 	return nil
+}
+
+// drivePath reports a Windows path: a drive letter, a colon, a slash.
+func drivePath(s string) bool {
+	return len(s) >= 3 && s[1] == ':' && (s[2] == '/' || s[2] == '\\') &&
+		(s[0] >= 'a' && s[0] <= 'z' || s[0] >= 'A' && s[0] <= 'Z')
 }
 
 // AssembleService builds the config the service runs from validated parts:
