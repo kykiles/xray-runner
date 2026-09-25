@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"xray-runner/internal/neterr"
-	"xray-runner/internal/system"
 )
 
 // maxUncompressedSize caps a single zip entry during extraction so a crafted
@@ -511,7 +510,7 @@ func InstallCore(ctx context.Context, a Asset, xrayPath string) error {
 		discard(bin)
 		return err
 	}
-	if err := seal(bin, binName, 0o755); err != nil {
+	if err := seal(bin, dir, binName, 0o755); err != nil {
 		discard(bin)
 		return err
 	}
@@ -585,7 +584,7 @@ func installGeo(ctx context.Context, geoip, geosite Asset, dir string, allowUnpu
 		default:
 			return fmt.Errorf("контрольная сумма %s: %w", a.Name, cerr)
 		}
-		if err := seal(f, a.Name, 0o644); err != nil {
+		if err := seal(f, dir, a.Name, 0o644); err != nil {
 			return err
 		}
 	}
@@ -689,18 +688,21 @@ func swap(newPath, dst string) error {
 	return nil
 }
 
-// seal readies a staged file for its rename into place. It sets mode and, when
-// running as root under sudo, hands ownership back to the invoking user
-// (SUDO_UID/SUDO_GID) — without this a download made under sudo lands as
-// root-owned 0600, unreadable to the user afterwards. Both go through the
-// descriptor, so no link on disk can redirect them. Then it flushes the file,
-// which is about to be renamed over the one in use, and closes it.
-func seal(f *os.File, name string, mode os.FileMode) error {
+// seal readies a staged file for its rename into dir/name. It sets mode and,
+// when running as root, gives the file the owner of the one it replaces — or of
+// dir, for a first install (installOwner). Handing it to the sudo user instead
+// made the core in a root-owned install, which TUN runs as root, writable by
+// that user (G04); a user's own install stays theirs either way. Both go
+// through the descriptor, so no link on disk can redirect them. Then it flushes
+// the file, which is about to be renamed over the one in use, and closes it.
+func seal(f *os.File, dir, name string, mode os.FileMode) error {
 	if err := f.Chmod(mode); err != nil {
 		return fmt.Errorf("права %s: %w", name, err)
 	}
-	if err := system.RestoreSudoOwnerFile(f); err != nil {
-		return fmt.Errorf("владелец %s: %w", name, err)
+	if uid, gid, ok := installOwner(dir, name); ok {
+		if err := f.Chown(uid, gid); err != nil {
+			return fmt.Errorf("владелец %s: %w", name, err)
+		}
 	}
 	if err := f.Sync(); err != nil {
 		return fmt.Errorf("запись %s: %w", name, err)

@@ -15,11 +15,12 @@ import (
 // check there tests nothing. seal still runs on Windows — Chmod just has little
 // to say about the result.
 func TestSealSetsMode(t *testing.T) {
-	f, err := stage(t.TempDir(), geoipName)
+	dir := t.TempDir()
+	f, err := stage(dir, geoipName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := seal(f, geoipName, 0o644); err != nil {
+	if err := seal(f, dir, geoipName, 0o644); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	fi, err := os.Stat(f.Name())
@@ -192,4 +193,71 @@ func useOtherFilesystemTmp(t *testing.T, dir string) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(tmp) })
 	t.Setenv("TMPDIR", tmp)
+}
+
+// The owner of an installed file comes from the file it replaces, or from the
+// directory for a first install — never from SUDO_UID, which made a core in a
+// root-owned install writable by the sudo user (G04).
+func TestInstallOwner_FollowsReplacedFileNotSudo(t *testing.T) {
+	t.Setenv("SUDO_UID", "4242")
+	t.Setenv("SUDO_GID", "4242")
+	orig := geteuid
+	geteuid = func() int { return 0 }
+	t.Cleanup(func() { geteuid = orig })
+
+	dir := t.TempDir()
+	want := func(path string) (int, int) {
+		t.Helper()
+		fi, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := fi.Sys().(*syscall.Stat_t)
+		return int(st.Uid), int(st.Gid)
+	}
+
+	uid, gid, ok := installOwner(dir, "xray")
+	wu, wg := want(dir)
+	if !ok || uid != wu || gid != wg {
+		t.Errorf("first install: owner %d:%d ok=%v, want the dir's %d:%d", uid, gid, ok, wu, wg)
+	}
+
+	path := filepath.Join(dir, "xray")
+	if err := os.WriteFile(path, []byte("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid, ok = installOwner(dir, "xray")
+	wu, wg = want(path)
+	if !ok || uid != wu || gid != wg {
+		t.Errorf("replace: owner %d:%d ok=%v, want the old file's %d:%d", uid, gid, ok, wu, wg)
+	}
+}
+
+// End to end, as root: a new core takes the old core's owner.
+func TestInstallCore_KeepsOldOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("changing a file's owner needs root")
+	}
+	t.Setenv("SUDO_UID", "4243")
+	t.Setenv("SUDO_GID", "4243")
+	dir := t.TempDir()
+	xrayPath := filepath.Join(dir, "xray")
+	if err := os.WriteFile(xrayPath, []byte("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(xrayPath, 4242, 4242); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := InstallCore(context.Background(), coreServer(t, "BINARY"), xrayPath); err != nil {
+		t.Fatalf("InstallCore: %v", err)
+	}
+
+	fi, err := os.Stat(xrayPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := fi.Sys().(*syscall.Stat_t); st.Uid != 4242 || st.Gid != 4242 {
+		t.Errorf("new core owner %d:%d, want the old core's 4242:4242", st.Uid, st.Gid)
+	}
 }
