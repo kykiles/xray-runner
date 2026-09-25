@@ -59,6 +59,9 @@ func TestWindowsEndToEnd(t *testing.T) {
 	t.Run("kill switch", e.testKillSwitch)
 	t.Run("killed app", e.testKilledApp)
 	t.Run("killed tun app", e.testKilledTunApp)
+	// The same app with the service installed: TUN through it (H10). Last, so
+	// the runs above test the app on its own.
+	t.Run("service", e.testService)
 }
 
 // env is what every subtest shares: the built app with the core beside it and
@@ -368,6 +371,8 @@ func (e *env) startApp(t *testing.T, name, mode string, env ...string) *appRun {
 		"XRAY_LOG_LEVEL=info",
 		"PROXY_SYSTEM=true",
 		"KILL_SWITCH=false",
+		// The app on its own unless a subtest asks for the service.
+		"XRAY_RUNNER_NO_SERVICE=1",
 	)
 	// Later entries win: exec keeps the last value of a repeated variable.
 	r.cmd.Env = append(r.cmd.Env, env...)
@@ -427,7 +432,9 @@ func (r *appRun) waitLog(t *testing.T, substr string, timeout time.Duration) {
 	}
 }
 
-var corePIDLine = regexp.MustCompile(`msg="xray started" pid=(\d+)`)
+// corePIDLine finds the core's pid in the app's log: logged by the app
+// itself, or by the service and forwarded (msg="служба: xray started pid=N").
+var corePIDLine = regexp.MustCompile(`xray started"? pid=(\d+)`)
 
 // corePID is the pid of the core the app started last.
 func (r *appRun) corePID(t *testing.T) int {

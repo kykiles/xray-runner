@@ -57,6 +57,30 @@ jobs:
         run: |
           go test -c -o systest ./internal/system/
           sudo env XRAY_RUNNER_NETNS=1 unshare -n ./systest -test.run Live -test.v
+      # The built service with the real core, run the way systemd runs it,
+      # against a stand-in server in a namespace of its own: TUN with the kill
+      # switch, the grace period, the split, recovery after a kill
+      # (internal/service/live_linux_test.go). The core is xray.MinVersion,
+      # checked against the release's .dgst.
+      - name: Live service (netns)
+        run: |
+          set -euo pipefail
+          core="$(sed -n 's/^const MinVersion = "\(.*\)"$/\1/p' internal/xray/runner.go)"
+          [ -n "$core" ] || { echo "xray.MinVersion not found in internal/xray/runner.go"; exit 1; }
+          url="https://github.com/XTLS/Xray-core/releases/download/v$core/Xray-linux-64.zip"
+          curl -fsSL -o core.zip "$url"
+          curl -fsSL -o core.zip.dgst "$url.dgst"
+          want="$(tr -d '\r' < core.zip.dgst | sed -n 's/^SHA2-256= *//p')"
+          got="$(sha256sum core.zip | cut -d' ' -f1)"
+          if [ -z "$want" ] || [ "$want" != "$got" ]; then
+            echo "SHA-256 mismatch for Xray-linux-64.zip: .dgst says '$want', file is '$got'"
+            exit 1
+          fi
+          mkdir -p live/bin
+          unzip -q -o core.zip xray geoip.dat geosite.dat -d live/bin
+          go build -o live/xray-runner ./cmd/xray-runner
+          go test -c -o servicetest ./internal/service/
+          sudo env XRAY_RUNNER_NETNS=1 XRAY_RUNNER_LIVE_DIR="$PWD/live" unshare -n ./servicetest -test.run Live -test.v
 
   build:
     name: Build
