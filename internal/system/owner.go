@@ -12,16 +12,16 @@ import (
 // disk, so it cannot be redirected at a symlink or raced by a swap between the
 // open and the chown. A no-op when not running as root or not launched via sudo.
 func RestoreSudoOwnerFile(f *os.File) error {
-	uid, gid, ok := sudoOwner()
+	uid, gid, ok := SudoOwner()
 	if !ok {
 		return nil
 	}
 	return f.Chown(uid, gid)
 }
 
-// sudoOwner reports the user behind a sudo invocation, and false when there is
+// SudoOwner reports the user behind a sudo invocation, and false when there is
 // nobody to hand ownership back to.
-func sudoOwner() (uid, gid int, ok bool) {
+func SudoOwner() (uid, gid int, ok bool) {
 	if os.Geteuid() != 0 {
 		return 0, 0, false
 	}
