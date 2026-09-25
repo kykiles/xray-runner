@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -59,6 +60,20 @@ type Service struct {
 	mu    sync.Mutex
 	sess  *session
 	conns map[*ipc.Conn]bool
+	// logTo is the connection holding the session, for forwardLog. Apart
+	// from mu: the service logs with mu held, and a log line must not wait
+	// for the lock its own writer holds. Set by attached, under mu.
+	logTo atomic.Pointer[ipc.Conn]
+}
+
+// attached records who holds the session now; with s.mu held, after every
+// change to s.sess or its conn.
+func (s *Service) attached() {
+	if s.sess == nil {
+		s.logTo.Store(nil)
+		return
+	}
+	s.logTo.Store(s.sess.conn)
 }
 
 type session struct {
@@ -208,6 +223,7 @@ func (s *Service) resume(c *ipc.Conn, token string) bool {
 		old.Close()
 	}
 	sess.conn = c
+	s.attached()
 	slog.Info("служба: сессия возвращена интерфейсу", "user", c.Peer.Name, "kind", sess.kind)
 	return true
 }
@@ -221,6 +237,7 @@ func (s *Service) detach(c *ipc.Conn) {
 		return
 	}
 	sess.conn = nil
+	s.attached()
 	slog.Warn("служба: интерфейс отключился, сессия ждёт его", "user", c.Peer.Name, "grace", s.d.Grace)
 	sess.grace = time.AfterFunc(s.d.Grace, func() {
 		s.mu.Lock()
@@ -252,6 +269,7 @@ func (s *Service) claim(c *ipc.Conn, sess *session) error {
 	}
 	sess.token, sess.owner, sess.uid, sess.conn = token, c.Peer.Key, c.Peer.UID, c
 	s.sess = sess
+	s.attached()
 	return nil
 }
 
@@ -299,6 +317,7 @@ func (s *Service) startTun(c *ipc.Conn, m ipc.Message) {
 		s.mu.Lock()
 		if s.sess == sess {
 			s.sess = nil
+			s.attached()
 		}
 		if sess.grace != nil {
 			sess.grace.Stop()
@@ -402,13 +421,7 @@ func (s *Service) emit(sess *session, ev ipc.Event) {
 // forwardLog hands a line of the service's log to the connection holding the
 // session: the core's output reaches the user's own log that way.
 func (s *Service) forwardLog(level slog.Level, line string) {
-	s.mu.Lock()
-	var conn *ipc.Conn
-	if s.sess != nil {
-		conn = s.sess.conn
-	}
-	s.mu.Unlock()
-	if conn != nil {
+	if conn := s.logTo.Load(); conn != nil {
 		conn.Event(ipc.Event{Kind: ipc.EventLog, Level: level.String(), Line: line})
 	}
 }
@@ -447,6 +460,7 @@ func (s *Service) teardown(sess *session) {
 		s.mu.Lock()
 		if s.sess == sess {
 			s.sess = nil
+			s.attached()
 		}
 		s.mu.Unlock()
 	}
@@ -529,6 +543,7 @@ func (s *Service) split(c *ipc.Conn, m ipc.Message) (*ipc.SplitReply, error) {
 		s.mu.Lock()
 		if s.sess == sess {
 			s.sess = nil
+			s.attached()
 		}
 		s.mu.Unlock()
 		return nil, err

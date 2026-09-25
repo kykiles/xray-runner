@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net"
 	"slices"
 	"strings"
@@ -116,6 +118,11 @@ func newRig(t *testing.T) *rig {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &rig{t: t, l: l, m: m, cancel: cancel, done: make(chan error, 1)}
 	s := New(m.deps())
+	// The log goes to the session's connection, as in the real service: a
+	// line logged under the service's lock must not wait on it.
+	old := slog.Default()
+	slog.SetDefault(slog.New(&teeHandler{Handler: slog.NewTextHandler(io.Discard, nil), fwd: s.forwardLog}))
+	t.Cleanup(func() { slog.SetDefault(old) })
 	go func() { r.done <- s.Serve(ctx, l) }()
 	t.Cleanup(func() {
 		cancel()
@@ -205,14 +212,27 @@ func TestStartStop(t *testing.T) {
 	r := newRig(t)
 	c := r.connect(alice, "")
 	start(t, c)
-	// The status update reaches the interface as an event.
-	select {
-	case ev := <-c.Events():
-		if ev.Kind != ipc.EventStatus || !ev.OK || ev.LatencyMs != 42 {
-			t.Fatalf("event %+v", ev)
+	// The status update reaches the interface as an event, and so does the
+	// service's log of the session.
+	sawLog := false
+	for done := false; !done; {
+		select {
+		case ev := <-c.Events():
+			switch ev.Kind {
+			case ipc.EventLog:
+				sawLog = sawLog || strings.Contains(ev.Line, "TUN-сессия")
+			case ipc.EventStatus:
+				if !ev.OK || ev.LatencyMs != 42 {
+					t.Fatalf("event %+v", ev)
+				}
+				done = true
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("no status event")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("no status event")
+	}
+	if !sawLog {
+		t.Error("the session's log line did not reach the interface")
 	}
 	r.m.mu.Lock()
 	spec := r.m.lastSpec
