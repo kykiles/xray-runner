@@ -192,18 +192,26 @@ func WriteMessage(w io.Writer, m Message) error {
 // ReadMessage reads one frame. A frame of another protocol version is an
 // error, as is one over MaxMessage: nothing past the length is read then, and
 // the connection is of no further use.
-func ReadMessage(r io.Reader) (Message, error) {
+func ReadMessage(r io.Reader) (Message, error) { return readMessage(r, MaxMessage) }
+
+// readMessage is ReadMessage with a limit of its own. The buffer grows with
+// what arrives rather than with what the length promises: a peer that
+// announces a large frame and sends nothing gets nothing set aside for it.
+func readMessage(r io.Reader, limit uint32) (Message, error) {
 	var hdr [4]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return Message{}, err
 	}
 	n := binary.BigEndian.Uint32(hdr[:])
-	if n == 0 || n > MaxMessage {
+	if n == 0 || n > limit {
 		return Message{}, ErrTooLarge
 	}
-	data := make([]byte, n)
-	if _, err := io.ReadFull(r, data); err != nil {
+	data, err := io.ReadAll(io.LimitReader(r, int64(n)))
+	if err != nil {
 		return Message{}, err
+	}
+	if len(data) < int(n) {
+		return Message{}, io.ErrUnexpectedEOF
 	}
 	var m Message
 	if err := json.Unmarshal(data, &m); err != nil {
