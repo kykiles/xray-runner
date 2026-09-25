@@ -65,12 +65,20 @@ func TestClaim_RefusesUntrustedRuntimeBase(t *testing.T) {
 			return base
 		},
 		// Under sudo the user's own directories are what root must not trust:
-		// sudo -E hands TMPDIR over.
+		// sudo -E hands TMPDIR over. As real root the base is handed to another
+		// user; otherwise root is played and the test user's own base stands in.
 		"user-owned under root": func(t *testing.T) string {
+			base := privateTempDir(t)
+			if os.Geteuid() == 0 {
+				if err := os.Chown(base, 4242, 4242); err != nil {
+					t.Fatal(err)
+				}
+				return base
+			}
 			orig := geteuid
 			geteuid = func() int { return 0 }
 			t.Cleanup(func() { geteuid = orig })
-			return privateTempDir(t)
+			return base
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
