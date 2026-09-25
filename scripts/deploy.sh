@@ -87,4 +87,10 @@ cp LICENSE "$BIN_DIR/"
 cp .env.example "$DEPLOY_DIR/.env"
 
 echo "==> Deploy folder: $DEPLOY_DIR"
+# TUN without elevation: the service, installed once from the deploy folder.
+if [ "$GOOS" = "windows" ]; then
+    echo "    TUN without administrator: run once as administrator — .\\xray-runner.exe service install"
+else
+    echo "    TUN without sudo: run once — sudo ./xray-runner service install"
+fi
 ls -la "$DEPLOY_DIR/" "$BIN_DIR/"
