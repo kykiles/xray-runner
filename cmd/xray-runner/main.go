@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -21,6 +20,15 @@ import (
 var Version = "dev"
 
 func main() {
+	os.Exit(run())
+}
+
+// run is the whole program; its result is the exit code. It exists so that
+// every deferred call — the ownership handback to the sudo user, the log's
+// close — runs before the process exits: os.Exit skips defers, and a failed
+// sudo run used to leave its state files root-owned for the next run without
+// sudo (G10).
+func run() int {
 	flagVersion := flag.Bool("version", false, "show version")
 	flagConfig := flag.String("config", ".env", "path to .env file")
 	// U-2: scripted/non-interactive selection.
@@ -32,7 +40,7 @@ func main() {
 
 	if *flagVersion {
 		fmt.Printf("xray-runner %s\n", Version)
-		os.Exit(0)
+		return 0
 	}
 
 	// Before anything is read: an earlier sudo run may have left the files
@@ -42,7 +50,8 @@ func main() {
 
 	cfg, err := config.Load(*flagConfig)
 	if err != nil {
-		log.Fatalf("%v", err)
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
 	// Colors are tunable from .env (task #6); apply them once the environment is
 	// loaded, before any TUI screen renders.
@@ -55,15 +64,15 @@ func main() {
 		}
 		if subURL == "" {
 			fmt.Fprintln(os.Stderr, "dump-links: не задан URL подписки (аргумент или SUBSCRIPTION_URL)")
-			os.Exit(2)
+			return 2
 		}
 		path, err := dumpLinks(cfg, subURL)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Printf("Ссылки сохранены: %s\n", path)
-		os.Exit(0)
+		return 0
 	}
 
 	defer applog.Init(cfg)()
@@ -89,7 +98,7 @@ func main() {
 		// deferred cleanup has already released proxies/firewall by this point.
 		if errors.Is(err, app.ErrUserQuit) || errors.Is(err, context.Canceled) {
 			slog.Info("session ended by user")
-			return
+			return 0
 		}
 		slog.Error("fatal", "error", err)
 		// Logs go to the file only, so a fatal error must still reach the user.
@@ -97,10 +106,11 @@ func main() {
 		// U-2: distinct exit codes for scripts/systemd — 2 means the requested
 		// server/subscription could not be selected, 1 is a runtime failure.
 		if errors.Is(err, app.ErrSelection) {
-			os.Exit(2)
+			return 2
 		}
-		os.Exit(1)
+		return 1
 	}
 
 	slog.Info("session ended")
+	return 0
 }
