@@ -1,0 +1,51 @@
+name: E2E (Windows)
+on: [push, pull_request, workflow_dispatch]
+
+# The built app on a real Windows machine: the real core, the tun adapter, the
+# routing table and the system proxy, with a local VLESS server for the VPN
+# (e2e/). Hosted runners are elevated, which TUN needs.
+jobs:
+  e2e-windows:
+    name: E2E (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # The core the bundles ship: xray.MinVersion, read the way
+      # scripts/deploy.sh reads it, and checked against the release's .dgst.
+      # Its zip carries wintun.dll and the geo databases too.
+      - name: Fetch the core
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $m = Select-String -Path internal/xray/runner.go -Pattern '^const MinVersion = "(.*)"$'
+          if (-not $m) { throw 'xray.MinVersion not found in internal/xray/runner.go' }
+          $version = $m.Matches[0].Groups[1].Value
+          $url = "https://github.com/XTLS/Xray-core/releases/download/v$version/Xray-windows-64.zip"
+          $zip = Join-Path $env:RUNNER_TEMP 'Xray-windows-64.zip'
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $dgst = (Invoke-WebRequest -Uri "$url.dgst").Content
+          if ($dgst -is [byte[]]) { $dgst = [Text.Encoding]::UTF8.GetString($dgst) }
+          $want = ([regex]::Match($dgst, 'SHA2-256=\s*([0-9a-fA-F]{64})')).Groups[1].Value
+          $got = (Get-FileHash -Algorithm SHA256 $zip).Hash
+          if (-not $want -or $want -ine $got) { throw "SHA-256 mismatch for Xray-windows-64.zip: .dgst says '$want', file is '$got'" }
+          $dir = Join-Path $env:RUNNER_TEMP 'xray-core'
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          "E2E_CORE_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "E2E_LOG_DIR=$(Join-Path $env:RUNNER_TEMP 'e2e-logs')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "xray $version, sha256 $got"
+
+      - run: go vet -tags e2e ./e2e/
+      - run: go test -tags e2e -v -count=1 -timeout 15m ./e2e/
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-windows-logs
+          path: ${{ runner.temp }}/e2e-logs
