@@ -17,8 +17,12 @@ type fakeDesktop struct {
 	writes  []string
 }
 
+// newFakeDesktop has both desktops' tools, KDE's in their Plasma 5 version.
 func newFakeDesktop() *fakeDesktop {
-	return &fakeDesktop{replies: map[string]string{}, missing: map[string]bool{}}
+	return &fakeDesktop{
+		replies: map[string]string{},
+		missing: map[string]bool{"kreadconfig6": true, "kwriteconfig6": true},
+	}
 }
 
 func (f *fakeDesktop) call(bin string, args ...string) ([]byte, error) {
@@ -26,7 +30,7 @@ func (f *fakeDesktop) call(bin string, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("exec: %q: executable file not found in $PATH", bin)
 	}
 	joined := bin + " " + strings.Join(args, " ")
-	if len(args) > 0 && (args[0] == "set" || bin == "kwriteconfig5") {
+	if len(args) > 0 && (args[0] == "set" || strings.HasPrefix(bin, "kwriteconfig")) {
 		f.writes = append(f.writes, joined)
 		return nil, nil
 	}
@@ -49,9 +53,15 @@ func (f *fakeDesktop) wrote(substr string) bool {
 
 func withFakeDesktop(t *testing.T, f *fakeDesktop) {
 	t.Helper()
-	orig := desktopCmd
+	orig, origDesktop := desktopCmd, currentDesktop
 	desktopCmd = f.call
-	t.Cleanup(func() { desktopCmd = orig })
+	currentDesktop = func() string { return "" }
+	t.Cleanup(func() { desktopCmd, currentDesktop = orig, origDesktop })
+}
+
+func onDesktop(t *testing.T, name string) {
+	t.Helper()
+	currentDesktop = func() string { return name }
 }
 
 // A desktop configured for PAC has mode=auto, which is not "manual" and so
@@ -206,5 +216,109 @@ func TestClearProxySetsModeNone(t *testing.T) {
 
 	if !f.wrote("org.gnome.system.proxy mode none") {
 		t.Errorf("mode not set to none, writes: %v", f.writes)
+	}
+}
+
+// gsettings is installed on most KDE systems too. On a KDE session the proxy
+// goes into KDE's own setting, which KDE apps and Chromium read there (G09).
+func TestEnable_PrefersKDEOnAKDESession(t *testing.T) {
+	f := newFakeDesktop()
+	withFakeDesktop(t, f)
+	onDesktop(t, "KDE")
+
+	if err := New().Enable(10809, ProxyState{}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	if !f.wrote("kwriteconfig5 --group Proxy --key httpProxy 127.0.0.1:10809") {
+		t.Errorf("KDE proxy not written, wrote: %v", f.writes)
+	}
+	if f.wrote("gsettings") {
+		t.Errorf("GNOME settings written on a KDE session: %v", f.writes)
+	}
+}
+
+// Elsewhere GNOME's settings still come first.
+func TestEnable_PrefersGNOMEElsewhere(t *testing.T) {
+	f := newFakeDesktop()
+	withFakeDesktop(t, f)
+	onDesktop(t, "ubuntu:GNOME")
+
+	if err := New().Enable(10809, ProxyState{}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	if !f.wrote("proxy.http host 127.0.0.1") || f.wrote("kwriteconfig") {
+		t.Errorf("want GNOME only, wrote: %v", f.writes)
+	}
+}
+
+// Plasma 6 ships kreadconfig6/kwriteconfig6 instead of the 5 tools.
+func TestKDE_UsesPlasma6Tools(t *testing.T) {
+	f := newFakeDesktop()
+	f.missing = map[string]bool{"gsettings": true, "kreadconfig5": true, "kwriteconfig5": true}
+	withFakeDesktop(t, f)
+
+	if err := New().Enable(10809, ProxyState{}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	if !f.wrote("kwriteconfig6 --group Proxy --key ProxyType 1") {
+		t.Errorf("Plasma 6 tools not used, wrote: %v", f.writes)
+	}
+}
+
+// A desktop whose proxy was not manual gets its own host, port and exceptions
+// back after the session, not ours (G09). Before, only the mode was restored.
+func TestRestore_GivesBackValuesOfANonManualDesktop(t *testing.T) {
+	f := newFakeDesktop()
+	f.replies["gsettings get org.gnome.system.proxy mode"] = "'none'\n"
+	f.replies["gsettings get org.gnome.system.proxy.http host"] = "'corp.proxy'\n"
+	f.replies["gsettings get org.gnome.system.proxy.http port"] = "3128\n"
+	f.replies["gsettings get org.gnome.system.proxy.https host"] = "'secure.proxy'\n"
+	f.replies["gsettings get org.gnome.system.proxy.https port"] = "3129\n"
+	f.replies["gsettings get org.gnome.system.proxy ignore-hosts"] = "['intranet']\n"
+	withFakeDesktop(t, f)
+
+	saved := ReadProxyState()
+	pm := New()
+	if err := pm.Enable(10809, saved); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	f.writes = nil
+	if err := pm.Restore(saved); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	for _, want := range []string{
+		"proxy mode none",
+		"proxy.http host corp.proxy", "proxy.http port 3128",
+		"proxy.https host secure.proxy", "proxy.https port 3129",
+		"ignore-hosts ['intranet']",
+	} {
+		if !f.wrote(want) {
+			t.Errorf("%q not restored, wrote: %v", want, f.writes)
+		}
+	}
+}
+
+// An empty exceptions list prints as "@as []": it is the empty list, not an
+// entry named "@as", and it is restored as empty (G09).
+func TestReadProxyState_EmptyIgnoreHosts(t *testing.T) {
+	f := newFakeDesktop()
+	f.replies["gsettings get org.gnome.system.proxy mode"] = "'none'\n"
+	f.replies["gsettings get org.gnome.system.proxy ignore-hosts"] = "@as []\n"
+	withFakeDesktop(t, f)
+
+	saved := ReadProxyState()
+	if saved.Overrides != "" || !saved.OverridesSet {
+		t.Fatalf("Overrides = %q (set %v), want the empty list", saved.Overrides, saved.OverridesSet)
+	}
+	f.writes = nil
+	if err := WriteProxyState(saved); err != nil {
+		t.Fatalf("WriteProxyState: %v", err)
+	}
+	if !f.wrote("ignore-hosts []") {
+		t.Errorf("empty list not restored, wrote: %v", f.writes)
+	}
+	if f.wrote("@as") {
+		t.Errorf("the type prefix leaked into the list: %v", f.writes)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -59,25 +60,53 @@ func asDesktopUser(cmd *exec.Cmd) {
 // numeric ProxyType, which would be rejected (or worse, misread) here.
 var gsettingsModes = map[string]bool{"none": true, "manual": true, "auto": true}
 
+// currentDesktop is XDG_CURRENT_DESKTOP; a var so tests can pick a desktop.
+var currentDesktop = func() string { return os.Getenv("XDG_CURRENT_DESKTOP") }
+
+// kdeFirst reports a KDE session, where KDE's own setting is the one to use.
+// gsettings is installed on most KDE systems too — GTK apps pull it in — so
+// trying it first wrote a proxy that KDE apps, and Chromium on KDE, never read,
+// while the read-back confirmed it (G09). The variable is a colon-separated
+// list ("KDE", "ubuntu:GNOME"). sudo usually drops it; the order then stays
+// GNOME first, as before.
+func kdeFirst() bool {
+	return slices.Contains(strings.Split(currentDesktop(), ":"), "KDE")
+}
+
 func ReadProxyState() ProxyState {
-	if state, ok := readGsettings(); ok {
-		return state
+	readers := []func() (ProxyState, bool){readGsettings, readKDE}
+	if kdeFirst() {
+		slices.Reverse(readers)
 	}
-	if state, ok := readKDE(); ok {
-		return state
+	for _, read := range readers {
+		if state, ok := read(); ok {
+			return state
+		}
 	}
-	slog.Warn("состояние прокси не прочитано: ни gsettings, ни kreadconfig5 не ответили")
+	slog.Warn("состояние прокси не прочитано: ни gsettings, ни kreadconfig не ответили")
 	return ProxyState{}
 }
 
 func WriteProxyState(s ProxyState) error {
-	if writeGsettings(s) {
+	if writeDesktop(s) {
 		return nil
 	}
-	if writeKDE(s) {
-		return nil
+	return fmt.Errorf("no supported desktop environment found (tried GNOME gsettings and KDE kwriteconfig)")
+}
+
+// writeDesktop writes s to the first desktop backend that takes it, in the
+// order kdeFirst gives.
+func writeDesktop(s ProxyState) bool {
+	writers := []func(ProxyState) bool{writeGsettings, writeKDE}
+	if kdeFirst() {
+		slices.Reverse(writers)
 	}
-	return fmt.Errorf("no supported desktop environment found (tried GNOME gsettings and KDE kwriteconfig5)")
+	for _, write := range writers {
+		if write(s) {
+			return true
+		}
+	}
+	return false
 }
 
 func readGsettings() (ProxyState, bool) {
@@ -86,22 +115,39 @@ func readGsettings() (ProxyState, bool) {
 		return ProxyState{}, false
 	}
 	rawMode := strings.Trim(strings.TrimSpace(string(mode)), "'")
-	enabled := rawMode == "manual"
+	state := ProxyState{Enabled: rawMode == "manual", Mode: rawMode}
 
-	host, _ := desktopCmd("gsettings", "get", "org.gnome.system.proxy.http", "host")
-	port, _ := desktopCmd("gsettings", "get", "org.gnome.system.proxy.http", "port")
-
-	h := strings.Trim(string(host), "'\n\r ")
-	p := strings.Trim(string(port), "'\n\r ")
-	server := h
-	if p != "" {
-		server = h + ":" + p
+	var serverErr error
+	read := func(schema string) string {
+		host, err1 := desktopCmd("gsettings", "get", schema, "host")
+		port, err2 := desktopCmd("gsettings", "get", schema, "port")
+		if err1 != nil || err2 != nil {
+			serverErr = fmt.Errorf("%s: %w", schema, errOr(err1, err2))
+		}
+		h := strings.Trim(string(host), "'\n\r ")
+		p := strings.Trim(string(port), "'\n\r ")
+		if p != "" {
+			return h + ":" + p
+		}
+		return h
 	}
+	state.Server = read("org.gnome.system.proxy.http")
+	state.SecureServer = read("org.gnome.system.proxy.https")
+	state.ServerSet = serverErr == nil
 
-	overrides, _ := desktopCmd("gsettings", "get", "org.gnome.system.proxy", "ignore-hosts")
-	overridesStr := trimGSettingsArray(overrides)
+	overrides, err := desktopCmd("gsettings", "get", "org.gnome.system.proxy", "ignore-hosts")
+	state.Overrides = trimGSettingsArray(overrides)
+	state.OverridesSet = err == nil
+	return state, true
+}
 
-	return ProxyState{Enabled: enabled, Mode: rawMode, Server: server, Overrides: overridesStr}, true
+func errOr(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func writeGsettings(s ProxyState) bool {
@@ -115,19 +161,48 @@ func writeGsettings(s ProxyState) bool {
 			_, _ = desktopCmd("gsettings", "set", "org.gnome.system.proxy", "mode", "none")
 			return false
 		}
-	} else {
-		// Restore the mode the desktop actually had. Forcing "none" would turn a
-		// PAC-configured desktop (auto) into no proxy at all, which the user
-		// never asked for and gets no warning about.
-		mode := "none"
-		if s.Mode != "" && s.Mode != "manual" && gsettingsModes[s.Mode] {
-			mode = s.Mode
+		return true
+	}
+	// Restore the mode the desktop actually had. Forcing "none" would turn a
+	// PAC-configured desktop (auto) into no proxy at all, which the user
+	// never asked for and gets no warning about.
+	mode := "none"
+	if s.Mode != "" && s.Mode != "manual" && gsettingsModes[s.Mode] {
+		mode = s.Mode
+	}
+	if _, err := desktopCmd("gsettings", "set", "org.gnome.system.proxy", "mode", mode); err != nil {
+		return false
+	}
+	// The values the mode no longer points at go back too: Enable wrote ours
+	// over them, and the user's own host, port and exceptions are theirs to
+	// find again when they switch the mode back themselves (G09). Best-effort —
+	// the mode, which is what decides where traffic goes, is already right.
+	if s.ServerSet {
+		if !writeGsettingsServer("org.gnome.system.proxy.http", s.Server) ||
+			!writeGsettingsServer("org.gnome.system.proxy.https", s.SecureServer) {
+			slog.Warn("прежние адрес и порт прокси GNOME не восстановлены")
 		}
-		if _, err := desktopCmd("gsettings", "set", "org.gnome.system.proxy", "mode", mode); err != nil {
-			return false
+	}
+	if s.OverridesSet {
+		if err := setGSettingsIgnoreHosts(s.Overrides, true); err != nil {
+			slog.Warn("прежние исключения прокси GNOME не восстановлены", "error", err)
 		}
 	}
 	return true
+}
+
+// writeGsettingsServer writes one schema's host and port exactly as they were
+// read: an empty host stays empty, rather than turning into the local proxy.
+func writeGsettingsServer(schema, server string) bool {
+	host, port, _ := strings.Cut(server, ":")
+	if port == "" {
+		port = "0"
+	}
+	if _, err := desktopCmd("gsettings", "set", schema, "host", host); err != nil {
+		return false
+	}
+	_, err := desktopCmd("gsettings", "set", schema, "port", port)
+	return err == nil
 }
 
 // writeGsettingsManual applies host/port/ignore-hosts for the already-enabled
@@ -139,59 +214,92 @@ func writeGsettingsManual(s ProxyState) bool {
 	if port == "" {
 		port = "0"
 	}
+	secureHost, securePort := host, port
+	if s.SecureServer != "" {
+		if secureHost, securePort, _ = strings.Cut(s.SecureServer, ":"); securePort == "" {
+			securePort = "0"
+		}
+	}
 	if _, err := desktopCmd("gsettings", "set", "org.gnome.system.proxy.http", "host", host); err != nil {
 		return false
 	}
 	if _, err := desktopCmd("gsettings", "set", "org.gnome.system.proxy.http", "port", port); err != nil {
 		return false
 	}
-	if _, err := desktopCmd("gsettings", "set", "org.gnome.system.proxy.https", "host", host); err != nil {
+	if _, err := desktopCmd("gsettings", "set", "org.gnome.system.proxy.https", "host", secureHost); err != nil {
 		return false
 	}
-	if _, err := desktopCmd("gsettings", "set", "org.gnome.system.proxy.https", "port", port); err != nil {
+	if _, err := desktopCmd("gsettings", "set", "org.gnome.system.proxy.https", "port", securePort); err != nil {
 		return false
 	}
-	return setGSettingsIgnoreHosts(s.Overrides) == nil
+	return setGSettingsIgnoreHosts(s.Overrides, s.OverridesSet) == nil
+}
+
+// kdeVersion picks the KDE config tools: kreadconfig6/kwriteconfig6 on Plasma
+// 6, the 5 ones before it. Both write the same kioslaverc.
+func kdeVersion() string {
+	if _, err := desktopCmd("kreadconfig6", "--group", "Proxy", "--key", "ProxyType"); err == nil {
+		return "6"
+	}
+	return "5"
 }
 
 func readKDE() (ProxyState, bool) {
-	proxyType, err := desktopCmd("kreadconfig5", "--group", "Proxy", "--key", "ProxyType")
+	read := "kreadconfig" + kdeVersion()
+	proxyType, err := desktopCmd(read, "--group", "Proxy", "--key", "ProxyType")
 	if err != nil {
 		return ProxyState{}, false
 	}
 	rawType := strings.TrimSpace(string(proxyType))
-	enabled := rawType == "1"
+	state := ProxyState{Enabled: rawType == "1", Mode: rawType}
 
-	httpProxy, _ := desktopCmd("kreadconfig5", "--group", "Proxy", "--key", "httpProxy")
-	server := strings.TrimSpace(string(httpProxy))
+	httpProxy, err1 := desktopCmd(read, "--group", "Proxy", "--key", "httpProxy")
+	httpsProxy, err2 := desktopCmd(read, "--group", "Proxy", "--key", "httpsProxy")
+	state.Server = strings.TrimSpace(string(httpProxy))
+	state.SecureServer = strings.TrimSpace(string(httpsProxy))
+	state.ServerSet = err1 == nil && err2 == nil
 
-	noProxy, _ := desktopCmd("kreadconfig5", "--group", "Proxy", "--key", "NoProxyFor")
-	overrides := strings.TrimSpace(string(noProxy))
-
-	return ProxyState{Enabled: enabled, Mode: rawType, Server: server, Overrides: overrides}, true
+	noProxy, err := desktopCmd(read, "--group", "Proxy", "--key", "NoProxyFor")
+	state.Overrides = strings.TrimSpace(string(noProxy))
+	state.OverridesSet = err == nil
+	return state, true
 }
 
 func writeKDE(s ProxyState) bool {
+	write := "kwriteconfig" + kdeVersion()
 	if s.Enabled {
-		if _, err := desktopCmd("kwriteconfig5", "--group", "Proxy", "--key", "ProxyType", "1"); err != nil {
+		if _, err := desktopCmd(write, "--group", "Proxy", "--key", "ProxyType", "1"); err != nil {
 			return false
 		}
-		if !writeKDEManual(s) {
+		if !writeKDEManual(write, s) {
 			// R-2: same rollback as gsettings — don't leave ProxyType=1 with a
 			// half-configured proxy.
-			_, _ = desktopCmd("kwriteconfig5", "--group", "Proxy", "--key", "ProxyType", "0")
+			_, _ = desktopCmd(write, "--group", "Proxy", "--key", "ProxyType", "0")
 			return false
 		}
-	} else {
-		// Same reasoning as gsettings: ProxyType 2 (PAC) or 3 (system) must come
-		// back as it was. Only a numeric mode is replayed — a GNOME state would
-		// carry "auto" here, which KDE does not understand.
-		proxyType := "0"
-		if s.Mode != "" && s.Mode != "1" && isNumeric(s.Mode) {
-			proxyType = s.Mode
+		return true
+	}
+	// Same reasoning as gsettings: ProxyType 2 (PAC) or 3 (system) must come
+	// back as it was. Only a numeric mode is replayed — a GNOME state would
+	// carry "auto" here, which KDE does not understand.
+	proxyType := "0"
+	if s.Mode != "" && s.Mode != "1" && isNumeric(s.Mode) {
+		proxyType = s.Mode
+	}
+	if _, err := desktopCmd(write, "--group", "Proxy", "--key", "ProxyType", proxyType); err != nil {
+		return false
+	}
+	// As for GNOME: the values Enable wrote over go back, best-effort.
+	if s.ServerSet {
+		for key, v := range map[string]string{"httpProxy": s.Server, "httpsProxy": s.SecureServer} {
+			if _, err := desktopCmd(write, "--group", "Proxy", "--key", key, v); err != nil {
+				slog.Warn("прежний адрес прокси KDE не восстановлен", "key", key, "error", err)
+			}
 		}
-		if _, err := desktopCmd("kwriteconfig5", "--group", "Proxy", "--key", "ProxyType", proxyType); err != nil {
-			return false
+	}
+	if s.OverridesSet {
+		if _, err := desktopCmd(write, "--group", "Proxy", "--key", "NoProxyFor", s.Overrides); err != nil {
+			slog.Warn("прежние исключения прокси KDE не восстановлены", "error", err)
 		}
 	}
 	return true
@@ -199,7 +307,7 @@ func writeKDE(s ProxyState) bool {
 
 // writeKDEManual applies the proxy values for the already-enabled ProxyType=1;
 // false means the caller must roll ProxyType back (R-2).
-func writeKDEManual(s ProxyState) bool {
+func writeKDEManual(write string, s ProxyState) bool {
 	host, port := splitProxyServer(s.Server)
 	proxyVal := host
 	// A trailing colon is not a valid proxy address, so a portless host stays
@@ -207,14 +315,18 @@ func writeKDEManual(s ProxyState) bool {
 	if port != "" {
 		proxyVal = host + ":" + port
 	}
-	if _, err := desktopCmd("kwriteconfig5", "--group", "Proxy", "--key", "httpProxy", proxyVal); err != nil {
+	secureVal := proxyVal
+	if s.SecureServer != "" {
+		secureVal = s.SecureServer
+	}
+	if _, err := desktopCmd(write, "--group", "Proxy", "--key", "httpProxy", proxyVal); err != nil {
 		return false
 	}
-	if _, err := desktopCmd("kwriteconfig5", "--group", "Proxy", "--key", "httpsProxy", proxyVal); err != nil {
+	if _, err := desktopCmd(write, "--group", "Proxy", "--key", "httpsProxy", secureVal); err != nil {
 		return false
 	}
-	if s.Overrides != "" {
-		if _, err := desktopCmd("kwriteconfig5", "--group", "Proxy", "--key", "NoProxyFor", s.Overrides); err != nil {
+	if s.Overrides != "" || s.OverridesSet {
+		if _, err := desktopCmd(write, "--group", "Proxy", "--key", "NoProxyFor", s.Overrides); err != nil {
 			return false
 		}
 	}
@@ -240,13 +352,15 @@ func isNumeric(s string) bool {
 	return s != ""
 }
 
-func setGSettingsIgnoreHosts(overrides string) error {
-	if overrides == "" {
+// setGSettingsIgnoreHosts writes the exceptions list. An empty list is left
+// alone unless it is known to be what the desktop had (set), in which case it
+// is written as the empty array it was.
+func setGSettingsIgnoreHosts(overrides string, set bool) error {
+	if overrides == "" && !set {
 		return nil
 	}
-	parts := strings.Split(overrides, ",")
 	var gv []string
-	for _, p := range parts {
+	for p := range strings.SplitSeq(overrides, ",") {
 		p = strings.TrimSpace(p)
 		if p != "" {
 			// S-4: escape single quotes so a value containing ' doesn't break the
@@ -260,12 +374,15 @@ func setGSettingsIgnoreHosts(overrides string) error {
 	return err
 }
 
+// trimGSettingsArray reads a gsettings string array into a comma list. An empty
+// one prints with its type, "@as []", and is the empty list — not the entry
+// "@as" (G09).
 func trimGSettingsArray(raw []byte) string {
 	s := strings.TrimSpace(string(raw))
+	s = strings.TrimPrefix(s, "@as ")
 	s = strings.Trim(s, "[]")
-	parts := strings.Split(s, ",")
 	var out []string
-	for _, p := range parts {
+	for p := range strings.SplitSeq(s, ",") {
 		p = strings.TrimSpace(p)
 		p = strings.Trim(p, "'")
 		if p != "" {

@@ -235,6 +235,7 @@ IPv6 на двух системах устроен по-разному. На Lin
 - **KDE:** «Параметры системы» → «Сеть» → «Прокси» → «Без прокси». Из терминала:
   посмотреть — `kreadconfig5 --group Proxy --key ProxyType` и `--key httpProxy`; если тип
   `1`, а адрес `127.0.0.1:10809`, выполните `kwriteconfig5 --group Proxy --key ProxyType 0`.
+  На Plasma 6 те же команды называются `kreadconfig6` и `kwriteconfig6`.
 
 Команды выполняйте от своего пользователя, без `sudo`.
 

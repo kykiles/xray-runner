@@ -15,30 +15,13 @@ func (pm *ProxyManager) Enable(port int, saved ProxyState) error {
 
 	slog.Debug("enabling system proxy", "port", port, "overrides", overrides)
 
-	if setDesktopProxy("127.0.0.1", port, overrides) {
+	server := fmt.Sprintf("127.0.0.1:%d", port)
+	if writeDesktop(ProxyState{Enabled: true, Server: server, SecureServer: server, Overrides: overrides}) {
 		return nil
 	}
 
 	_ = WriteProxyState(saved)
-	return fmt.Errorf("no supported desktop environment found (tried GNOME gsettings and KDE kwriteconfig5)")
-}
-
-func setDesktopProxy(host string, port int, overrides string) bool {
-	if writeGsettings(ProxyState{
-		Enabled:   true,
-		Server:    fmt.Sprintf("%s:%d", host, port),
-		Overrides: overrides,
-	}) {
-		return true
-	}
-	if writeKDE(ProxyState{
-		Enabled:   true,
-		Server:    fmt.Sprintf("%s:%d", host, port),
-		Overrides: overrides,
-	}) {
-		return true
-	}
-	return false
+	return fmt.Errorf("no supported desktop environment found (tried GNOME gsettings and KDE kwriteconfig)")
 }
 
 // forceDisable is the fallback Restore calls when the exact restore failed.
