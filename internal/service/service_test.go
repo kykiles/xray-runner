@@ -50,7 +50,14 @@ type fakeMachine struct {
 	splitCall int
 	lastSpec  app.ServiceTun
 	listener  int // uid on the redirect port; -1 for none
+	dns       int // uid on the DNS redirect port; -1 for none
 	closeUID  int
+	// slow is how long taking a session down takes: the core stopping, the
+	// split's rules coming out.
+	slow        time.Duration
+	tunStopping int
+	// tun replaces the session's run when set.
+	tun func(ctx context.Context, ready func(error), status func(tui.StatusUpdate)) error
 }
 
 func (m *fakeMachine) deps() Deps {
@@ -59,10 +66,18 @@ func (m *fakeMachine) deps() Deps {
 			m.mu.Lock()
 			m.tunUp++
 			m.lastSpec = spec
+			tun, slow := m.tun, m.slow
 			m.mu.Unlock()
+			if tun != nil {
+				return tun(ctx, ready, status)
+			}
 			ready(nil)
 			status(tui.StatusUpdate{OK: true, Latency: 42 * time.Millisecond, Generation: 1})
 			<-ctx.Done()
+			m.mu.Lock()
+			m.tunStopping++
+			m.mu.Unlock()
+			time.Sleep(slow)
 			m.mu.Lock()
 			m.tunDown++
 			m.mu.Unlock()
@@ -86,11 +101,26 @@ func (m *fakeMachine) deps() Deps {
 		},
 		DisableSplit: func() error {
 			m.mu.Lock()
+			slow := m.slow
+			m.mu.Unlock()
+			time.Sleep(slow)
+			m.mu.Lock()
 			defer m.mu.Unlock()
 			m.splitOn = false
 			return nil
 		},
-		ListenerUID: func(int) (int, bool) { return m.listener, m.listener >= 0 },
+		ListenerUIDs: func(network string, port int) []int {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			uid := m.listener
+			if network == "udp" {
+				uid = m.dns
+			}
+			if uid < 0 {
+				return nil
+			}
+			return []int{uid}
+		},
 		Binary:      "/svc/xray",
 		CoreVersion: "Xray 26.7.28",
 		Version:     "test",
@@ -112,12 +142,31 @@ type rig struct {
 	done   chan error
 }
 
-func newRig(t *testing.T) *rig {
-	m := &fakeMachine{listener: 1000}
+func (m *fakeMachine) set(f func(m *fakeMachine)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f(m)
+}
+
+func (m *fakeMachine) split() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.splitOn
+}
+
+func newRig(t *testing.T) *rig { return newRigWith(t, nil) }
+
+// newRigWith is newRig with the deps adjusted by adjust.
+func newRigWith(t *testing.T, adjust func(*Deps)) *rig {
+	m := &fakeMachine{listener: 1000, dns: 1000}
 	l := &pipeListener{ch: make(chan *ipc.Conn), closed: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &rig{t: t, l: l, m: m, cancel: cancel, done: make(chan error, 1)}
-	s := New(m.deps())
+	d := m.deps()
+	if adjust != nil {
+		adjust(&d)
+	}
+	s := New(d)
 	// The log goes to the session's connection, as in the real service: a
 	// line logged under the service's lock must not wait on it.
 	old := slog.Default()
@@ -482,5 +531,307 @@ func TestCloseConns(t *testing.T) {
 	r.m.mu.Unlock()
 	if uid != alice.UID || len(rep.Open) != 1 || rep.Open[0].Src != "c:3" {
 		t.Fatalf("uid %d, open %v", uid, rep.Open)
+	}
+}
+
+// hello says hello on c, asking for token's session back, and reports whether
+// it was.
+func hello(t *testing.T, c *ipc.Client, token string) bool {
+	t.Helper()
+	var h ipc.HelloReply
+	if err := c.Call(ctxT(t), ipc.TypeHello, ipc.Hello{Version: ipc.Version, Resume: token}, &h); err != nil {
+		t.Fatal(err)
+	}
+	return h.Resumed
+}
+
+// dial opens a connection as peer without saying hello.
+func (r *rig) dial(peer ipc.Peer) *ipc.Client {
+	cli, srv := net.Pipe()
+	r.l.ch <- ipc.NewConn(srv, peer)
+	c := ipc.NewClient(cli)
+	r.t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// A session on its way down is not handed back: the client would think its
+// tunnel up while nothing is (review H10, 9).
+func TestNoResumeDuringTeardown(t *testing.T) {
+	r := newRig(t)
+	r.m.set(func(m *fakeMachine) { m.slow = 300 * time.Millisecond })
+	c := r.connect(alice, "")
+	token := start(t, c)
+	_ = c.Close()
+	waitFor(t, func() bool {
+		r.m.mu.Lock()
+		defer r.m.mu.Unlock()
+		return r.m.tunStopping == 1
+	}, "the grace period did not take the session down")
+	if hello(t, r.dial(alice), token) {
+		t.Fatal("a session on its way down was resumed")
+	}
+	waitFor(t, func() bool { _, down := r.m.counts(); return down == 1 }, "session not down")
+}
+
+// Coming back just as the grace period runs out either gets the session back
+// for good or not at all.
+func TestResumeAtGraceExpiry(t *testing.T) {
+	const grace = 30 * time.Millisecond
+	for i := range 20 {
+		func() {
+			r := newRigWith(t, func(d *Deps) { d.Grace = grace })
+			r.m.set(func(m *fakeMachine) { m.slow = 20 * time.Millisecond })
+			c := r.connect(alice, "")
+			token := start(t, c)
+			_ = c.Close()
+			time.Sleep(grace - 10*time.Millisecond + time.Duration(i)*time.Millisecond)
+			c2 := r.dial(alice)
+			resumed := hello(t, c2, token)
+			time.Sleep(3 * grace)
+			_, down := r.m.counts()
+			if resumed && down != 0 {
+				t.Fatalf("attempt %d: the resumed session was taken down", i)
+			}
+			if !resumed && down == 0 {
+				waitFor(t, func() bool { _, down := r.m.counts(); return down == 1 }, "an orphan outlived its grace period")
+			}
+			r.cancel()
+			<-r.done
+			r.done <- nil
+		}()
+	}
+}
+
+// When the service ends a session its client did not ask to end, the client
+// is told.
+func TestEndedOnServiceStop(t *testing.T) {
+	r := newRig(t)
+	c := r.connect(alice, "")
+	start(t, c)
+	r.cancel()
+	for {
+		select {
+		case ev, ok := <-c.Events():
+			if !ok {
+				t.Fatal("connection closed without an ended event")
+			}
+			if ev.Kind == ipc.EventEnded {
+				return
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("no ended event")
+		}
+	}
+}
+
+// A stop and an enable_split right after it from the same connection run one
+// after the other: the rules the enable puts in have a session to take them
+// out (review H10, 10).
+func TestStopThenEnableSplit(t *testing.T) {
+	if system.SplitOverTUN {
+		t.Skip("the split is built on the tunnel here")
+	}
+	r := newRig(t)
+	r.m.set(func(m *fakeMachine) { m.slow = 50 * time.Millisecond })
+	c := r.connect(alice, "")
+	req := ipc.SplitRequest{Names: []string{"curl"}}
+	for i := range 5 {
+		if err := c.Call(ctxT(t), ipc.TypeEnableSplit, req, nil); err != nil {
+			t.Fatal(err)
+		}
+		stopped := make(chan error, 1)
+		go func() { stopped <- c.Call(ctxT(t), ipc.TypeStop, struct{}{}, nil) }()
+		time.Sleep(5 * time.Millisecond)
+		if err := c.Call(ctxT(t), ipc.TypeEnableSplit, req, nil); err != nil {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+		if err := <-stopped; err != nil {
+			t.Fatal(err)
+		}
+		if !r.m.split() {
+			t.Fatalf("attempt %d: the enable after the stop left no rules", i)
+		}
+		var st ipc.StatusReply
+		if err := c.Call(ctxT(t), ipc.TypeStatus, struct{}{}, &st); err != nil || !st.Active || st.Kind != "split" {
+			t.Fatalf("attempt %d: rules without a session: %+v %v", i, st, err)
+		}
+		if err := c.Call(ctxT(t), ipc.TypeDisableSplit, struct{}{}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if r.m.split() {
+			t.Fatalf("attempt %d: split still on", i)
+		}
+	}
+}
+
+// Once Serve is stopping no new session starts: the service does not exit
+// with rules in place (review H10, 11).
+func TestNoSplitWhileServeStops(t *testing.T) {
+	if system.SplitOverTUN {
+		t.Skip("the split is built on the tunnel here")
+	}
+	r := newRig(t)
+	r.m.set(func(m *fakeMachine) { m.slow = 200 * time.Millisecond })
+	a := r.connect(alice, "")
+	start(t, a)
+	b := r.connect(alice, "")
+	r.cancel()
+	req := ipc.SplitRequest{Names: []string{"curl"}}
+	for {
+		err := b.Call(ctxT(t), ipc.TypeEnableSplit, req, nil)
+		if err == nil {
+			// Taken down by Serve, or not taken at all.
+			break
+		}
+		if !strings.Contains(err.Error(), "занята") {
+			break
+		}
+	}
+	select {
+	case <-r.done:
+		r.done <- nil
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return")
+	}
+	r.m.mu.Lock()
+	on, calls := r.m.splitOn, r.m.splitCall
+	r.m.mu.Unlock()
+	if on {
+		t.Fatalf("the service stopped with the split on (%d enables)", calls)
+	}
+}
+
+// Somebody else taking the redirect ports — the core's TCP one or its DNS
+// one — while the split is on takes the split down (review H10, 8).
+func TestSplitPortOwner(t *testing.T) {
+	if system.SplitOverTUN {
+		t.Skip("the split is built on the tunnel here")
+	}
+	r := newRig(t)
+	c := r.connect(alice, "")
+	req := ipc.SplitRequest{Names: []string{"curl"}}
+
+	r.m.set(func(m *fakeMachine) { m.dns = bob.UID })
+	if err := c.Call(ctxT(t), ipc.TypeEnableSplit, req, nil); err == nil {
+		t.Fatal("split into another user's DNS listener")
+	}
+	r.m.set(func(m *fakeMachine) { m.dns = -1 })
+	if err := c.Call(ctxT(t), ipc.TypeEnableSplit, req, nil); err == nil {
+		t.Fatal("split with nobody on the DNS port")
+	}
+
+	for _, take := range []func(m *fakeMachine){
+		func(m *fakeMachine) { m.listener = bob.UID },
+		func(m *fakeMachine) { m.dns = bob.UID },
+	} {
+		r.m.set(func(m *fakeMachine) { m.listener, m.dns = alice.UID, alice.UID })
+		if err := c.Call(ctxT(t), ipc.TypeEnableSplit, req, nil); err != nil {
+			t.Fatal(err)
+		}
+		// The core restarting leaves the ports empty for a moment: that is
+		// no reason to take the split down.
+		r.m.set(func(m *fakeMachine) { m.listener, m.dns = -1, -1 })
+		if err := c.Call(ctxT(t), ipc.TypeRefreshSplit, req, nil); err != nil {
+			t.Fatal(err)
+		}
+		r.m.set(func(m *fakeMachine) { m.listener, m.dns = alice.UID, alice.UID })
+		r.m.set(take)
+		if err := c.Call(ctxT(t), ipc.TypeRefreshSplit, req, nil); err == nil {
+			t.Fatal("refresh with another user on the port")
+		}
+		if r.m.split() {
+			t.Fatal("split left on into another user's port")
+		}
+		var st ipc.StatusReply
+		if err := c.Call(ctxT(t), ipc.TypeStatus, struct{}{}, &st); err != nil || st.Active {
+			t.Fatalf("session left: %+v %v", st, err)
+		}
+	}
+}
+
+// An owner that stops reading holds up nobody but itself: its session still
+// ends, and the service is free for the next one (review H10, 6).
+func TestSilentOwnerHoldsNothing(t *testing.T) {
+	r := newRig(t)
+	r.m.set(func(m *fakeMachine) {
+		m.tun = func(ctx context.Context, ready func(error), status func(tui.StatusUpdate)) error {
+			ready(nil)
+			for i := range 2000 {
+				status(tui.StatusUpdate{OK: true, Generation: i})
+			}
+			return errors.New("ядро упало")
+		}
+	})
+	cli, srv := net.Pipe()
+	t.Cleanup(func() { _ = cli.Close() })
+	r.l.ch <- ipc.NewConn(srv, alice)
+	send := func(id uint64, typ string, body any) {
+		data, _ := json.Marshal(body)
+		if err := ipc.WriteMessage(cli, ipc.Message{ID: id, Type: typ, Body: data}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send(1, ipc.TypeHello, ipc.Hello{Version: ipc.Version})
+	send(2, ipc.TypeStartTun, tunReq())
+	// Nothing is ever read on cli.
+	waitFor(t, func() bool { up, _ := r.m.counts(); return up == 1 }, "the session did not start")
+
+	b := r.connect(bob, "")
+	waitFor(t, func() bool {
+		var st ipc.StatusReply
+		if err := b.Call(ctxT(t), ipc.TypeStatus, struct{}{}, &st); err != nil {
+			t.Fatal(err)
+		}
+		return !st.Active
+	}, "the session of a client that does not read never ended")
+	r.m.set(func(m *fakeMachine) { m.tun = nil })
+	start(t, b)
+}
+
+// The session's holder sees the session's lines, not the rest of the
+// service's log (review H10, 13).
+func TestLogOnlyTheSessions(t *testing.T) {
+	r := newRig(t)
+	c := r.connect(alice, "")
+	start(t, c)
+	r.connect(bob, "")
+	if err := c.Call(ctxT(t), ipc.TypeStop, struct{}{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	sawSession := false
+	for {
+		select {
+		case ev := <-c.Events():
+			if ev.Kind != ipc.EventLog {
+				continue
+			}
+			if strings.Contains(ev.Line, "bob") || strings.Contains(ev.Line, "подключился") {
+				t.Fatalf("the service's own line reached the session: %q", ev.Line)
+			}
+			sawSession = sawSession || strings.Contains(ev.Line, "TUN-сессия")
+			continue
+		case <-time.After(200 * time.Millisecond):
+		}
+		break
+	}
+	if !sawSession {
+		t.Error("the session's line did not reach it")
+	}
+}
+
+func TestSessionCode(t *testing.T) {
+	for fn, want := range map[string]bool{
+		"xray-runner/internal/xray.(*Runner).pump":       true,
+		"xray-runner/internal/app.serveTun.func2":        true,
+		"xray-runner/internal/system.EnableSplitFor":     true,
+		"xray-runner/internal/xraycfg.AssembleService":   false,
+		"xray-runner/internal/service.(*Service).handle": false,
+		"xray-runner/internal/ipc.Refuse":                false,
+		"example.com/other/internal/app.Foo":             false,
+		"main.main":                                      false,
+	} {
+		if got := sessionFunc(fn); got != want {
+			t.Errorf("%s: %v, want %v", fn, got, want)
+		}
 	}
 }
