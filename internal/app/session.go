@@ -704,7 +704,7 @@ func (a *App) bringUpSplit() {
 	if err != nil {
 		slog.Warn("split tunnel not enabled", "error", err)
 		if splitNeedsRoot(err) {
-			a.splitOff("нужны права root — запустите через sudo")
+			a.splitOff("нужны права root или CAP_NET_ADMIN — см. README, «Режим TUN без sudo»")
 		} else {
 			a.splitOff(err.Error())
 		}

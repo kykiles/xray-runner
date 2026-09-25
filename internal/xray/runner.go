@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"xray-runner/internal/netcap"
 )
 
 type Runner struct {
@@ -66,10 +68,16 @@ func FindBinary() (string, error) {
 		}
 	}
 
-	if p, err := exec.LookPath(name); err == nil {
+	// A run given CAP_NET_ADMIN hands it to the core, so a core off PATH comes
+	// only from a directory root owns — PATH is the caller's to set (H07).
+	if p, err := netcap.LookPath(name); err == nil {
 		return p, nil
 	}
 
+	if netcap.Delegated() {
+		return "", fmt.Errorf("xray не найден: положите %s рядом с исполняемым файлом, в bin/ или в системную папку вроде /usr/local/bin — "+
+			"программа с CAP_NET_ADMIN не запускает ядро из других папок PATH", name)
+	}
 	return "", fmt.Errorf("xray не найден: положите %s рядом с исполняемым файлом, в bin/ или в PATH", name)
 }
 

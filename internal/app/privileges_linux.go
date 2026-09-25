@@ -3,15 +3,22 @@
 package app
 
 import (
-	"fmt"
+	"errors"
 	"os"
+
+	"xray-runner/internal/netcap"
 )
 
-// checkTunPrivileges fails fast when tun mode is requested without root, so
-// the user sees one clear error instead of 30s of xray retries (R-5).
+// checkTunPrivileges fails fast when tun mode is requested without the right
+// to change the network, so the user sees one clear error instead of 30s of
+// xray retries (R-5). Root has it, and so has a binary given CAP_NET_ADMIN with
+// setcap, which hands it on to the core and to ip (H07).
 func checkTunPrivileges() error {
-	if os.Geteuid() != 0 {
-		return fmt.Errorf("режим TUN требует прав root — запустите через sudo")
+	if os.Geteuid() == 0 || netcap.Delegated() {
+		return nil
 	}
-	return nil
+	return errNoTunPrivileges
 }
+
+var errNoTunPrivileges = errors.New("режиму TUN нужно право менять сеть: выдайте его программе один раз — " +
+	"sudo setcap cap_net_admin+ep <путь к xray-runner> — или запустите её через sudo")
