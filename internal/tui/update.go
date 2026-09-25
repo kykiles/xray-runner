@@ -45,9 +45,12 @@ type geoReleaseMsg struct {
 type installedMsg struct{ err error }
 
 type updateModel struct {
-	ctx       context.Context
-	xrayPath  string
-	dir       string
+	ctx      context.Context
+	xrayPath string
+	dir      string
+	// foreign is a core that is not the program's own (xray.Bundled): found on
+	// PATH, it is updated the way it was installed, not by this screen (H05).
+	foreign   bool
 	installed string // current core version number, e.g. "26.6.27" ("" if unknown)
 	geoDate   string // geoip.dat modification date, e.g. "2026-07-16" ("" if unknown)
 
@@ -69,11 +72,12 @@ var updateMenu = []string{"Обновить ядро xray", "Обновить г
 // RunUpdate shows the update screen. xrayPath is the core binary; the geo
 // databases live next to it. installed is the currently-running core version
 // (empty if it could not be determined), shown so the user knows what they are
-// updating from.
-func RunUpdate(ctx context.Context, xrayPath, installed string) error {
+// updating from. bundled says whether that core is the program's own; one that
+// is not is left alone, databases included.
+func RunUpdate(ctx context.Context, xrayPath, installed string, bundled bool) error {
 	dir := filepath.Dir(xrayPath)
 	sp := newSpinner()
-	m := updateModel{ctx: ctx, xrayPath: xrayPath, dir: dir, installed: installed, geoDate: geoDate(dir), spinner: sp}
+	m := updateModel{ctx: ctx, xrayPath: xrayPath, dir: dir, foreign: !bundled, installed: installed, geoDate: geoDate(dir), spinner: sp}
 	_, err := runScreen(m)
 	return err
 }
@@ -223,6 +227,11 @@ func (m updateModel) keyMenu(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor++
 		}
 	case "enter", "right":
+		if m.foreign {
+			m.fail(fmt.Errorf("ядро найдено в %s — это не папка программы (его, скорее всего, поставил пакетный менеджер). "+
+				"Программа обновляет только своё ядро и его гео-базы: рядом с собой или в bin/. Обновите это ядро тем же способом, каким его ставили", m.dir))
+			return m, nil
+		}
 		switch m.cursor {
 		case 0:
 			m.kind = kindCore

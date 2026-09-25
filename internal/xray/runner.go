@@ -73,6 +73,19 @@ func FindBinary() (string, error) {
 	return "", fmt.Errorf("xray не найден: положите %s рядом с исполняемым файлом, в bin/ или в PATH", name)
 }
 
+// Bundled reports whether the core at binary is the program's own: next to the
+// program or in bin/ beside it, the places FindBinary looks first. A core found
+// on PATH belongs to whatever put it there — a package manager, most often —
+// and the program does not overwrite it or write its databases beside it (H05).
+func Bundled(binary string) bool {
+	exe, err := osExecutable()
+	if err != nil {
+		return false
+	}
+	dir, own := filepath.Dir(filepath.Clean(binary)), filepath.Dir(exe)
+	return dir == own || dir == filepath.Join(own, "bin")
+}
+
 // Version returns the first line of `xray version`. Failure is non-fatal; the
 // caller only logs it (X-4). The timeout is internal so the signature stays put:
 // this runs on the startup path, and a wedged binary would otherwise hang the

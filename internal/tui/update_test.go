@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"xray-runner/internal/updater"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestUpdateView_ShowsInstalledCore(t *testing.T) {
@@ -116,5 +118,26 @@ func TestUpdateView_ReleaseListFitsTerminal(t *testing.T) {
 	}
 	if !strings.Contains(out, "→ установить") {
 		t.Errorf("legend pushed off the screen:\n%s", out)
+	}
+}
+
+// A core that is not the program's own is not updated from here, and neither
+// are the databases beside it: nothing is fetched, and the screen says why
+// (H05).
+func TestUpdate_ForeignCoreIsLeftAlone(t *testing.T) {
+	for cursor, what := range updateMenu {
+		t.Run(what, func(t *testing.T) {
+			m := updateModel{foreign: true, dir: "/usr/local/bin", stage: updMenu, cursor: cursor}
+
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+			got := next.(updateModel)
+			if cmd != nil {
+				t.Error("a fetch was started for a core that is not the program's")
+			}
+			if got.stage != updDone || got.err == nil || !strings.Contains(got.err.Error(), "/usr/local/bin") {
+				t.Errorf("stage %v, err %v; want done with the reason naming the core's directory", got.stage, got.err)
+			}
+		})
 	}
 }
