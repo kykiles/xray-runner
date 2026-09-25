@@ -81,7 +81,10 @@ type App struct {
 	// splitUnclosed: the running ones whose connections from before the move
 	// still go past the tunnel, as the last scan reported them (14b).
 	splitUnclosed []string
-	interfaces    func() ([]net.Interface, error)
+	// splitErr is the rescan failure last put on the screen, so one that
+	// repeats every second is said once.
+	splitErr   string
+	interfaces func() ([]net.Interface, error)
 	// disableKillSwitch / restoreProxy are the teardown side of the two system
 	// changes a session makes; fields so tests can observe them without touching
 	// the machine's firewall or proxy settings.

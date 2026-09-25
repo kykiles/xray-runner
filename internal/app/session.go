@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"xray-runner/internal/config"
+	"xray-runner/internal/ipc"
 	"xray-runner/internal/subscription"
 	"xray-runner/internal/system"
 	"xray-runner/internal/tui"
@@ -35,6 +36,12 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	if err != nil {
 		slog.Warn("apps list not read", "file", appsPath, "error", err)
 	}
+	// Before the split is resolved: without the service, split and TUN are
+	// judged by this process's own rights again.
+	lost := a.redialService(ctx)
+	if lost != nil {
+		slog.Warn("служба не используется", "reason", lost)
+	}
 	a.splitApps = apps
 	a.resolveSplit()
 	// Fixed for the session's life: the m key sets a.mode for the next session
@@ -43,6 +50,14 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	tun, split := a.tunMode(), a.split
 	if tun && a.service() != nil {
 		return a.runRemoteSession(ctx, t, split)
+	}
+	if lost != nil {
+		if tun {
+			if err := a.tunReady(); err != nil {
+				return tui.StatusQuit, fmt.Errorf("%v, а без неё TUN недоступен: %w", lost, err)
+			}
+		}
+		a.noteOnStatus(lost.Error() + ". Работаем без неё.")
 	}
 
 	cfgJSON, ports, err := a.buildSessionConfig(t)
@@ -771,15 +786,26 @@ func (a *App) setSplitMatched(on bool, matched []string) {
 //
 // ponytail: полный /proc-скан раз в секунду; окно остаётся ~1с. Если и его
 // мало — netlink proc connector (PROC_EVENT_EXEC) даёт событие на exec.
+//
+// A split through the service is also watched here, on the same goroutine as
+// the rescans, so a lost connection is taken back before the next one.
 func (a *App) splitRescanLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
+		lost := a.splitConnLost()
 		select {
 		case <-ctx.Done():
 			return
+		case <-lost:
+			a.resumeSplit(ctx)
 		case <-ticker.C:
-			a.refreshSplit()
+			select {
+			case <-lost:
+				a.resumeSplit(ctx)
+			default:
+				a.refreshSplit()
+			}
 		}
 	}
 }
@@ -792,10 +818,30 @@ func (a *App) refreshSplit() {
 		return
 	}
 	scan, err := a.rescanSplit(a.splitApps)
-	if err != nil {
+	if errors.Is(err, ipc.ErrClosed) {
+		// The connection went under the rescan: splitRescanLoop takes it back.
 		slog.Debug("split tunnel rescan failed", "error", err)
 		return
 	}
+	if err != nil {
+		// Said once, not every second: apps started from now on stay out of the
+		// tunnel until the rescans work again.
+		a.statusMu.Lock()
+		fresh := err.Error() != a.splitErr
+		a.splitErr = err.Error()
+		a.statusMu.Unlock()
+		if fresh {
+			slog.Warn("split tunnel rescan failed", "error", err)
+			a.publishStatus(tui.StatusUpdate{Note: "Не удалось обновить список процессов в туннеле: " + err.Error() + ". Запущенные после этого программы идут напрямую.", Err: true})
+		}
+		return
+	}
+	a.statusMu.Lock()
+	if a.splitErr != "" {
+		slog.Info("split tunnel rescan works again")
+		a.splitErr = ""
+	}
+	a.statusMu.Unlock()
 	matched := scan.Matched
 	// Non-nil even when empty: the screen reads a nil Apps as "no rescan in this
 	// update", so a list that emptied out would keep showing the old names.
