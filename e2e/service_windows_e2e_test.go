@@ -11,12 +11,16 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
 // withService is the variable that lets the app use the service.
 const withService = "XRAY_RUNNER_NO_SERVICE=0"
+
+// usersGroup is the local group of the service's users (ipc.UsersGroup).
+const usersGroup = "xray-runner Users"
 
 // testService installs the service from the app's folder and runs TUN
 // through it (H10): the core that carries the tunnel is the service's own
@@ -25,7 +29,8 @@ const withService = "XRAY_RUNNER_NO_SERVICE=0"
 // once the grace period is out, and uninstall leaves nothing behind.
 func (e *env) testService(t *testing.T) {
 	installDir := filepath.Join(os.Getenv("ProgramFiles"), "xray-runner")
-	serviceLog := filepath.Join(os.Getenv("ProgramData"), "xray-runner", "service.log")
+	logDir := filepath.Join(installDir, "log")
+	serviceLog := filepath.Join(logDir, "service.log")
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("--- service log ---\n%s", tail(serviceLog, 150))
@@ -43,6 +48,21 @@ func (e *env) testService(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(installDir, "bin", "xray.exe")); err != nil {
 		t.Fatalf("the core was not installed: %v", err)
+	}
+	// The log is in a folder the install made, the administrators' own, that
+	// inherits nothing from Program Files (users read that).
+	if owner, protected := securityOf(t, logDir); !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || !protected {
+		t.Errorf("log folder: owner %s, DACL protected %v; want the administrators and protected", owner, protected)
+	}
+	if _, err := os.Stat(serviceLog); err != nil {
+		t.Errorf("the service writes no log: %v", err)
+	}
+	// Who may use the service is the group's to say, and the install put
+	// someone in it.
+	if members, err := localGroup(usersGroup); err != nil {
+		t.Errorf("group %q after install: %v", usersGroup, err)
+	} else if !strings.Contains(out, "добавлен в неё") {
+		t.Errorf("the install added no one to the group; its members:\n%s", members)
 	}
 
 	t.Run("tun", func(t *testing.T) {
@@ -133,6 +153,9 @@ func (e *env) testService(t *testing.T) {
 		if _, err := os.Stat(installDir); !os.IsNotExist(err) {
 			t.Errorf("%s still there: %v", installDir, err)
 		}
+		if _, err := localGroup(usersGroup); err == nil {
+			t.Errorf("group %q outlived the uninstall", usersGroup)
+		}
 		// Without the service the app is on its own again, and still works.
 		r := e.startApp(t, "after-uninstall", "proxy", withService)
 		r.waitLog(t, "msg=connected", 90*time.Second)
@@ -192,4 +215,29 @@ func processPath(t *testing.T, pid int) string {
 	// CIM, not Get-Process: the latter reads the path out of the process,
 	// which a SYSTEM process may not allow.
 	return strings.TrimSpace(ps(t, `(Get-CimInstance Win32_Process -Filter "ProcessId=`+strconv.Itoa(pid)+`").ExecutablePath`))
+}
+
+// securityOf is the owner of path and whether its DACL is protected.
+func securityOf(t *testing.T, path string) (*windows.SID, bool) {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("security of %s: %v", path, err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctl, _, err := sd.Control()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return owner, ctl&windows.SE_DACL_PROTECTED != 0
+}
+
+// localGroup is what `net localgroup` says of a group, an error without it.
+func localGroup(name string) (string, error) {
+	out, err := exec.Command("net", "localgroup", name).CombinedOutput()
+	return string(out), err
 }
