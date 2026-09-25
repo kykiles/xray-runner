@@ -145,9 +145,15 @@
 1. Закройте программу. В PowerShell **от администратора** в папке сборки:
    `.\xray-runner.exe service install`.
 2. **Ожидается:** «Служба установлена в C:\Program Files\xray-runner и
-   запущена». В `services.msc` есть служба `xray-runner`, «Выполняется»,
-   вход от «Локальная система». В `C:\Program Files\xray-runner` лежат
-   `xray-runner.exe` и `bin\` с `xray.exe`, `wintun.dll`, базами geo.
+   запущена» и «… <ваше имя> добавлен в неё» (группа `xray-runner Users`). В
+   `services.msc` есть служба `xray-runner`, «Выполняется», вход от
+   «Локальная система». В `C:\Program Files\xray-runner` лежат
+   `xray-runner.exe`, `bin\` с `xray.exe`, `wintun.dll`, базами geo и `log\`.
+   `net localgroup "xray-runner Users"` показывает вас. Если права
+   администратора вы вводили от другой учётной записи, в группе должны
+   оказаться вы, а не она.
+   `icacls "C:\Program Files\xray-runner\log"` — только `NT AUTHORITY\SYSTEM`
+   и `BUILTIN\Администраторы`, без `(I)`.
 3. Откройте **обычное** окно PowerShell (не от администратора) и выполните
    `.\xray-runner.exe service status`. **Ожидается:** «Служба отвечает:
    версия <коммит>, ядро Xray …», «Сессии нет».
@@ -168,13 +174,37 @@
 9. Запустите программу снова, подключитесь в TUN и в «Службы» перезапустите
    службу `xray-runner`. **Ожидается:** программа сообщает, что соединение
    со службой потеряно, и возвращается в меню; маршрутов не осталось.
-10. Удаление: от администратора `.\xray-runner.exe service uninstall`.
+10. Если есть второй пользователь без прав администратора (не в группе):
+    войдите им (или `runas /user:<имя> powershell`) и выполните
+    `.\xray-runner.exe service status`. **Ожидается:** отказ со словами
+    «членов группы «xray-runner Users»» и командой `net localgroup …`; в TUN
+    программа просит права администратора. Добавьте его от администратора:
+    `net localgroup "xray-runner Users" <имя> /add` — **ожидается:** сразу,
+    без повторного входа, `service status` отвечает «Служба отвечает».
+    Под ним же `type "C:\Program Files\xray-runner\log\service.log"` —
+    «Отказано в доступе».
+11. Занятый канал: остановите службу (`sc stop xray-runner`), в обычном окне
+    PowerShell займите имя:
+    `$p = New-Object System.IO.Pipes.NamedPipeServerStream('xray-runner'); $p.WaitForConnection()`
+    (окно ждёт подключения; имя занято, пока окно открыто). От
+    администратора `sc start xray-runner`.
+    **Ожидается:** служба не запускается, в
+    `C:\Program Files\xray-runner\log\service.log` строка «канал
+    \\.\pipe\xray-runner уже занят (владелец <ваше имя>, процесс <pid>
+    …powershell.exe)». Программа из обычного окна к такому каналу не
+    подключается. Закройте окно PowerShell и снова `sc start xray-runner` —
+    служба запускается.
+12. Удаление: от администратора `.\xray-runner.exe service uninstall`.
     **Ожидается:** службы нет в `services.msc`, папки
-    `C:\Program Files\xray-runner` нет. Программа из обычного окна в TUN
-    снова просит права администратора, в PROXY работает как раньше.
+    `C:\Program Files\xray-runner` нет, `net localgroup "xray-runner Users"`
+    — «Указанная локальная группа не существует». Программа из обычного окна в
+    TUN снова просит права администратора, в PROXY работает как раньше.
 
-Лог службы: `C:\ProgramData\xray-runner\service.log` (открывается только от
-администратора).
+Лог службы: `C:\Program Files\xray-runner\log\service.log` (открывается только
+от администратора). Если его нет, причина — в журнале событий: «Журналы
+Windows» → «Приложение», источник `xray-runner`. Лог прежних версий,
+`C:\ProgramData\xray-runner\service.log`, больше не пишется; папку
+`C:\ProgramData\xray-runner` можно удалить.
 
 ## 5. Сохранение настроек (затронуто G02)
 
