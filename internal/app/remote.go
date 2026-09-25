@@ -57,7 +57,23 @@ type remoteState struct {
 	// connections from before the move could not be closed; they stay listed
 	// until the process exits, as system's own bookkeeping keeps them (14b).
 	unclosed map[string]string
+	// split is set while the Linux split goes through the service, and local
+	// holds the split's own functions for when the service is gone.
+	split bool
+	local splitFuncs
 }
+
+// splitFuncs are the split's system side, as App holds them.
+type splitFuncs struct {
+	enable  func(names []string, tcpPort, dnsPort int) (system.SplitScan, error)
+	rescan  func(names []string) (system.SplitScan, error)
+	disable func() error
+}
+
+// serviceHelloTimeout is how long a dial waits for the service's hello. A
+// service started by its socket on the first call runs the core's version and
+// the journal's recovery first, which on a slow machine takes seconds.
+const serviceHelloTimeout = 10 * time.Second
 
 // useService connects to the service when there is one. Without it — none
 // installed, stopped, or not this user's to use — the interface does it all in
@@ -67,7 +83,7 @@ func (a *App) useService(ctx context.Context) {
 	if os.Getenv(NoServiceEnv) == "1" {
 		return
 	}
-	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, serviceHelloTimeout)
 	defer cancel()
 	c, err := dialService(cctx, "")
 	if err != nil {
@@ -83,9 +99,59 @@ func (a *App) useService(ctx context.Context) {
 	slog.Info("работаем через службу", "service", h.ServiceVersion, "core", h.CoreVersion)
 	a.attachService(c)
 	if !system.SplitOverTUN {
+		a.remote.mu.Lock()
+		a.remote.split = true
+		a.remote.local = splitFuncs{a.enableSplit, a.rescanSplit, a.disableSplit}
+		a.remote.mu.Unlock()
 		a.enableSplit = a.serviceEnableSplit
 		a.rescanSplit = a.serviceRefreshSplit
 		a.disableSplit = a.serviceDisableSplit
+	}
+}
+
+// redialService, run before each session, replaces a connection that went
+// while nothing was running: the service restarted or was updated under the
+// open interface. A service that is gone for good leaves the interface on its
+// own, as useService would have found it; the error says so.
+func (a *App) redialService(ctx context.Context) error {
+	c := a.service()
+	if c == nil {
+		return nil
+	}
+	select {
+	case <-c.Done():
+	default:
+		return nil
+	}
+	slog.Warn("соединение со службой потеряно, подключаюсь заново")
+	cctx, cancel := context.WithTimeout(ctx, serviceHelloTimeout)
+	defer cancel()
+	nc, err := dialService(cctx, "")
+	if err != nil {
+		a.dropService()
+		return fmt.Errorf("служба xray-runner больше недоступна: %w", err)
+	}
+	h := nc.Hello()
+	slog.Info("снова работаем через службу", "service", h.ServiceVersion, "core", h.CoreVersion)
+	a.attachService(nc)
+	return nil
+}
+
+// dropService forgets a service that is gone and gives the split back its
+// own functions.
+func (a *App) dropService() {
+	a.remote.mu.Lock()
+	c := a.remote.conn
+	a.remote.conn = nil
+	a.remote.token = ""
+	split, local := a.remote.split, a.remote.local
+	a.remote.split = false
+	a.remote.mu.Unlock()
+	if c != nil {
+		_ = c.Close()
+	}
+	if split {
+		a.enableSplit, a.rescanSplit, a.disableSplit = local.enable, local.rescan, local.disable
 	}
 }
 
@@ -348,6 +414,51 @@ func (a *App) stopRemote() {
 
 // The Linux split through the service: the same calls as system's, the
 // processes moved by the service and only this user's.
+
+// splitConnLost is closed once the connection the split went through is
+// gone; nil while there is no split through the service to lose.
+func (a *App) splitConnLost() <-chan struct{} {
+	if !a.splitState() {
+		return nil
+	}
+	a.remote.mu.Lock()
+	defer a.remote.mu.Unlock()
+	if !a.remote.split || a.remote.conn == nil {
+		return nil
+	}
+	return a.remote.conn.Done()
+}
+
+// resumeSplit is watchRemote for the split: the service takes the split down
+// once its grace period is out, so the connection is dialled again at once
+// and the split asked back. One that does not come back is switched off on
+// the screen — the listed apps go direct from then on, and the user has to
+// hear it.
+func (a *App) resumeSplit(ctx context.Context) {
+	slog.Warn("соединение со службой потеряно, возвращаю маршрутизацию по процессам")
+	err := a.reconnectService(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	if err == nil && !a.service().Hello().Resumed {
+		err = errors.New("соединение со службой потеряно, и маршрутизация по процессам не вернулась")
+	}
+	if err == nil {
+		slog.Info("маршрутизация по процессам возвращена службой")
+		return
+	}
+	slog.Error("split tunnel lost", "error", err)
+	a.remote.mu.Lock()
+	a.remote.token = ""
+	a.remote.unclosed = nil
+	a.remote.mu.Unlock()
+	// Nothing left to undo: the service took the rules down with the session.
+	a.setSplitMatched(false, nil)
+	a.publishStatus(tui.StatusUpdate{
+		Note: "Маршрутизация по процессам выключена: " + err.Error() + ". Программы из списка идут напрямую — подключитесь заново.",
+		Err:  true, Apps: []string{},
+	})
+}
 
 func (a *App) serviceEnableSplit(names []string, _, _ int) (system.SplitScan, error) {
 	return a.serviceSplit(ipc.TypeEnableSplit, names)

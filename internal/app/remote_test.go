@@ -14,6 +14,7 @@ import (
 
 	"xray-runner/internal/ipc"
 	"xray-runner/internal/system"
+	"xray-runner/internal/tui"
 )
 
 // fakeService stands in for the service's connection.
@@ -28,9 +29,12 @@ type fakeService struct {
 	stopped chan struct{}
 	once    sync.Once
 	// split
-	moved    map[string]string
-	open     []system.Conn
-	closeReq ipc.CloseConns
+	moved      map[string]string
+	open       []system.Conn
+	closeReq   ipc.CloseConns
+	splitToken string
+	splitErr   error
+	lost       sync.Once
 }
 
 func newFakeService() *fakeService {
@@ -64,8 +68,12 @@ func (f *fakeService) Call(ctx context.Context, typ string, req, reply any) erro
 		f.mu.Lock()
 		moved := f.moved
 		f.moved = nil
+		token, err := f.splitToken, f.splitErr
 		f.mu.Unlock()
-		*reply.(*ipc.SplitReply) = ipc.SplitReply{Matched: req.(ipc.SplitRequest).Names, Moved: moved}
+		if err != nil {
+			return err
+		}
+		*reply.(*ipc.SplitReply) = ipc.SplitReply{Token: token, Matched: req.(ipc.SplitRequest).Names, Moved: moved}
 	case ipc.TypeCloseConns:
 		f.mu.Lock()
 		f.closeReq = req.(ipc.CloseConns)
@@ -80,6 +88,9 @@ func (f *fakeService) Events() <-chan ipc.Event { return f.events }
 func (f *fakeService) Done() <-chan struct{}    { return f.done }
 func (f *fakeService) Close() error             { return nil }
 func (f *fakeService) Hello() ipc.HelloReply    { return f.hello }
+
+// drop is the connection going: the service restarted, or the socket broke.
+func (f *fakeService) drop() { f.lost.Do(func() { close(f.done) }) }
 
 func (f *fakeService) callList() []string {
 	f.mu.Lock()
@@ -282,5 +293,180 @@ func TestServiceSplitClosesOldConnections(t *testing.T) {
 	scan, _ = a.serviceRefreshSplit([]string{"code"})
 	if len(scan.Unclosed) != 0 {
 		t.Fatalf("unclosed after disable %v", scan.Unclosed)
+	}
+}
+
+// fakeDial makes dialService hand out next, recording the resume token asked
+// for; err, when set, is a service that is gone.
+func fakeDial(t *testing.T, next *fakeService, err error) *[]string {
+	t.Helper()
+	var mu sync.Mutex
+	var resumes []string
+	old := dialService
+	dialService = func(_ context.Context, resume string) (serviceConn, error) {
+		mu.Lock()
+		resumes = append(resumes, resume)
+		mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+		return next, nil
+	}
+	t.Cleanup(func() { dialService = old })
+	return &resumes
+}
+
+// newServiceSplitApp is a proxy session's split running through f, the way
+// bringUpSplit leaves it, with the status channel open to read notes from.
+func newServiceSplitApp(t *testing.T, f *fakeService) *App {
+	t.Helper()
+	if system.SplitOverTUN {
+		t.Skip("the split rides on the tunnel here")
+	}
+	a := newTemplateApp(t)
+	fakeDial(t, f, nil)
+	a.useService(context.Background())
+	a.splitApps = []string{"curl"}
+	a.bringUpSplit()
+	if !a.splitState() {
+		t.Fatalf("split not on: %q", a.pendingNote)
+	}
+	a.statusCh = make(chan tui.StatusUpdate, 64)
+	return a
+}
+
+// A split through the service survives the connection dropping: the
+// interface dials again with the split's token, and the service hands the
+// split back.
+func TestServiceSplitResumedAfterDrop(t *testing.T) {
+	f := newFakeService()
+	f.splitToken = "stok"
+	a := newServiceSplitApp(t, f)
+	next := newFakeService()
+	next.hello.Resumed = true
+	resumes := fakeDial(t, next, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { a.splitRescanLoop(ctx); close(done) }()
+	f.drop()
+	waitFor(t, nil, func() bool {
+		return slices.Contains(next.callList(), ipc.TypeRefreshSplit)
+	}, "a rescan on the resumed connection")
+	cancel()
+	<-done
+	if !a.splitState() {
+		t.Fatal("split off after a resume")
+	}
+	if len(*resumes) == 0 || (*resumes)[0] != "stok" {
+		t.Fatalf("resume tokens %v", *resumes)
+	}
+}
+
+// A split the service did not hand back is switched off, on the screen, and
+// teardown has nothing to take down.
+func TestServiceSplitLostAfterDrop(t *testing.T) {
+	f := newFakeService()
+	f.splitToken = "stok"
+	a := newServiceSplitApp(t, f)
+	next := newFakeService()
+	fakeDial(t, next, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { a.splitRescanLoop(ctx); close(done) }()
+	f.drop()
+	waitFor(t, nil, func() bool { return !a.splitState() }, "the split to go off")
+	cancel()
+	<-done
+	var note string
+	for len(a.statusCh) > 0 {
+		if u := <-a.statusCh; u.Note != "" {
+			note = u.Note
+		}
+	}
+	if !strings.Contains(note, "не вернулась") || !strings.Contains(note, "напрямую") {
+		t.Fatalf("note %q", note)
+	}
+	a.releaseSession()
+	if slices.Contains(next.callList(), ipc.TypeDisableSplit) {
+		t.Fatal("split the service no longer has taken down again")
+	}
+}
+
+// A rescan the service refuses is said on the screen, once, not every second.
+func TestServiceSplitRescanErrorShownOnce(t *testing.T) {
+	f := newFakeService()
+	a := newServiceSplitApp(t, f)
+	f.mu.Lock()
+	f.splitErr = &ipc.RemoteError{Msg: "cgroup недоступна"}
+	f.mu.Unlock()
+	for range 3 {
+		a.refreshSplit()
+	}
+	notes := 0
+	for len(a.statusCh) > 0 {
+		if u := <-a.statusCh; strings.Contains(u.Note, "cgroup недоступна") {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("%d notes for one failure", notes)
+	}
+}
+
+// A connection that went while no session ran is dialled again before the
+// next one, which goes to the service as usual.
+func TestServiceRedialedBetweenSessions(t *testing.T) {
+	a, f := newRemoteApp(t)
+	next := newFakeService()
+	fakeDial(t, next, nil)
+	f.drop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.runSession(ctx, coreSessionTarget())
+		done <- err
+	}()
+	waitFor(t, done, func() bool {
+		return slices.Contains(next.callList(), ipc.TypeStartTun)
+	}, "start_tun on the new connection")
+	cancel()
+	<-done
+	if slices.Contains(f.callList(), ipc.TypeStartTun) {
+		t.Fatal("start_tun sent on the dead connection")
+	}
+}
+
+// A service gone for good between sessions leaves the interface on its own:
+// TUN is judged by its own rights again, and the split has its own functions
+// back.
+func TestServiceGoneBetweenSessions(t *testing.T) {
+	a := newTemplateApp(t)
+	a.mode = "tun"
+	a.noTTY = true
+	a.checkPrivileges = func() error { return errors.New("no privileges") }
+	localSplit := false
+	a.enableSplit = func([]string, int, int) (system.SplitScan, error) {
+		localSplit = true
+		return system.SplitScan{}, nil
+	}
+	f := newFakeService()
+	fakeDial(t, f, nil)
+	a.useService(context.Background())
+	fakeDial(t, nil, errors.New("connection refused"))
+	f.drop()
+
+	_, err := a.runSession(context.Background(), coreSessionTarget())
+	if err == nil || !strings.Contains(err.Error(), "больше недоступна") || !strings.Contains(err.Error(), "no privileges") {
+		t.Fatalf("err = %v", err)
+	}
+	if a.service() != nil || a.tunReady() == nil {
+		t.Fatal("tun allowed without rights or service")
+	}
+	_, _ = a.enableSplit(nil, 0, 0)
+	if !system.SplitOverTUN && !localSplit {
+		t.Fatal("split still goes to the gone service")
 	}
 }
