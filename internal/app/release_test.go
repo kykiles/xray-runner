@@ -126,3 +126,93 @@ func TestReleaseSession_KeepsKillSwitchItFailedToRemove(t *testing.T) {
 		t.Errorf("after a second teardown: %d removals, killSwitchOn = %v; want 2, false", calls, a.killSwitchOn)
 	}
 }
+
+// A restore that failed is not forgotten: releaseSession, right after the
+// early call in teardown, tries again, and once it goes through nothing more
+// is written.
+func TestRestoreSystemProxyRetriesAfterFailure(t *testing.T) {
+	calls := 0
+	a := &App{
+		restoreProxy: func(system.ProxyState) error {
+			calls++
+			if calls == 1 {
+				return errors.New("gsettings: временно недоступен")
+			}
+			return nil
+		},
+		readProxyState: func() system.ProxyState {
+			return system.ProxyState{Enabled: true, Server: "127.0.0.1:10809"}
+		},
+		proxyTouched: true,
+		proxyAddr:    "127.0.0.1:10809",
+	}
+
+	a.restoreSystemProxy()
+	if !a.proxyTouched {
+		t.Fatal("proxyTouched cleared by a restore that failed")
+	}
+	a.releaseSession()
+	a.releaseSession()
+
+	if calls != 2 {
+		t.Errorf("restore called %d times, want 2 (the failure and one retry)", calls)
+	}
+	if a.proxyTouched {
+		t.Error("proxyTouched still set after the retry went through")
+	}
+}
+
+// A retry finds a proxy somebody set after us: it is theirs, and not written
+// over with the snapshot from before the session.
+func TestRestoreSystemProxyLeavesSomebodyElsesProxy(t *testing.T) {
+	calls := 0
+	a := &App{
+		restoreProxy: func(system.ProxyState) error {
+			calls++
+			return errors.New("отказ")
+		},
+		readProxyState: func() system.ProxyState {
+			return system.ProxyState{Enabled: true, Server: "10.0.0.1:3128"}
+		},
+		proxyTouched: true,
+		proxyAddr:    "127.0.0.1:10809",
+	}
+
+	a.restoreSystemProxy()
+	a.restoreSystemProxy()
+
+	if calls != 1 {
+		t.Errorf("restore called %d times, want 1: the retry must see the proxy is not ours", calls)
+	}
+	if a.proxyTouched {
+		t.Error("proxyTouched still set for a proxy that is not ours any more")
+	}
+}
+
+// The fallback after a failed restore switched the proxy off: putting the
+// user's setting back is still owed.
+func TestRestoreSystemProxyRetriesAfterFallbackSwitchedOff(t *testing.T) {
+	calls := 0
+	a := &App{
+		restoreProxy: func(system.ProxyState) error {
+			calls++
+			if calls == 1 {
+				return errors.New("отказ")
+			}
+			return nil
+		},
+		readProxyState: func() system.ProxyState { return system.ProxyState{Enabled: false} },
+		proxyTouched:   true,
+		proxyAddr:      "127.0.0.1:10809",
+	}
+
+	a.restoreSystemProxy()
+	a.restoreSystemProxy()
+
+	if calls != 2 {
+		t.Errorf("restore called %d times, want 2", calls)
+	}
+	if a.proxyTouched {
+		t.Error("proxyTouched still set after the retry went through")
+	}
+}

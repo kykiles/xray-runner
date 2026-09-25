@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
 )
 
 // Split routing: the whole system's traffic arrives through the TUN inbound and
@@ -14,19 +17,22 @@ import (
 // The rule cannot be inverted: xray has no "every process except these", so the
 // order of the rules is what makes the mode safe. See ADR-0003.
 
-// ErrNoTunnelTarget means the config has nothing the split rule could point at:
-// no balancer and no rule leading into a proxy outbound.
+// ErrNoTunnelTarget means the config has nothing the listed processes could be
+// sent to: no rule leading into the tunnel, and no server as the first outbound.
 var ErrNoTunnelTarget = errors.New("в конфиге не найден outbound туннеля")
 
 // ApplySplitRouting rewrites a finished config so that only the named processes
 // travel the tunnel and everything else goes out directly.
 //
-// The panel's own rules are kept only where they lead somewhere local — direct,
-// block, the dns outbound. Rules leading into the tunnel are dropped: the panel
-// ends with a catch-all of its own, and left in place it would send the whole
-// system through the tunnel no matter which process opened the connection.
-// Their target is what the process rule then aims at, so the listed processes
-// go exactly where a TUN session would have sent everything.
+// The panel's rules stay where they were, in their order. Those leading
+// somewhere local — a freedom, blackhole or dns outbound, whatever its tag —
+// are kept as they are. Those leading into the tunnel are narrowed to the
+// listed processes: left as they were, the panel's catch-all would send the
+// whole system through the tunnel no matter which process opened the
+// connection. After them the listed processes go where unmatched traffic goes —
+// the first outbound — and everything else goes direct. So a listed process
+// goes exactly where a TUN session would have sent it, balancer by balancer
+// and domain by domain.
 func ApplySplitRouting(raw json.RawMessage, processes []string) (json.RawMessage, error) {
 	if len(processes) == 0 {
 		return nil, errors.New("список процессов пуст")
@@ -37,21 +43,37 @@ func ApplySplitRouting(raw json.RawMessage, processes []string) (json.RawMessage
 		return nil, fmt.Errorf("config: %w", err)
 	}
 
-	local, err := localOutbounds(cfg["outbounds"])
+	outbounds, err := readOutbounds(cfg["outbounds"])
 	if err != nil {
 		return nil, err
 	}
-	directTag := local["freedom"]
+	local := map[string]bool{}
+	directTag := ""
+	for _, o := range outbounds {
+		if o.Tag == "" || !isLocalProtocol(o.Protocol) {
+			continue
+		}
+		local[o.Tag] = true
+		if o.Protocol == "freedom" && directTag == "" {
+			directTag = o.Tag
+		}
+	}
+	// Unmatched traffic takes the first outbound. When that is the tunnel, the
+	// listed processes are sent there once the panel's rules are through.
+	defaultTag := ""
+	if len(outbounds) > 0 && outbounds[0].Tag != "" && !local[outbounds[0].Tag] {
+		defaultTag = outbounds[0].Tag
+	}
 	if directTag == "" {
 		// A panel without a freedom outbound has no way out except the tunnel,
 		// which is the one thing the mode must not do with unlisted traffic.
-		outbounds, err := appendDirectOutbound(cfg["outbounds"])
+		withDirect, err := appendDirectOutbound(cfg["outbounds"])
 		if err != nil {
 			return nil, err
 		}
-		cfg["outbounds"] = outbounds
+		cfg["outbounds"] = withDirect
 		directTag = directOutboundTag
-		local["freedom"] = directTag
+		local[directTag] = true
 	}
 
 	routing := map[string]json.RawMessage{}
@@ -67,43 +89,55 @@ func ApplySplitRouting(raw json.RawMessage, processes []string) (json.RawMessage
 		}
 	}
 
-	kept := make([]map[string]json.RawMessage, 0, len(rules))
-	var tunnelKey string
-	var tunnelTag json.RawMessage
+	out := make([]map[string]json.RawMessage, 0, len(rules)+2)
+	tunnel := false
 	for _, r := range rules {
-		if b := r["balancerTag"]; len(b) > 0 {
-			tunnelKey, tunnelTag = "balancerTag", b
-			continue
+		if len(r["balancerTag"]) == 0 {
+			tag, err := ruleOutboundTag(r)
+			if err != nil {
+				return nil, err
+			}
+			if local[tag] {
+				out = append(out, r)
+				continue
+			}
+			// A rule with no tag at all rides the default outbound: there is
+			// nothing to narrow, and keeping it would emit a rule xray rejects.
+			if tag == "" {
+				continue
+			}
 		}
-		tag, err := ruleOutboundTag(r)
+		narrowed, ok, err := forProcesses(r, processes)
 		if err != nil {
 			return nil, err
 		}
-		if isLocalTag(local, tag) {
-			kept = append(kept, r)
+		if !ok {
 			continue
 		}
-		// A rule with no tag at all rides the default outbound: there is nothing
-		// to point the split rule at, and taking it anyway emits
-		// "outboundTag": null, which xray rejects outright.
-		if out := r["outboundTag"]; len(out) > 0 {
-			tunnelKey, tunnelTag = "outboundTag", out
+		out = append(out, narrowed)
+		tunnel = true
+	}
+	if defaultTag != "" {
+		tag, err := json.Marshal(defaultTag)
+		if err != nil {
+			return nil, err
 		}
+		rest, err := splitRule(processes, "outboundTag", tag)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rest)
+		tunnel = true
 	}
-	if tunnelKey == "" {
+	if !tunnel {
 		return nil, ErrNoTunnelTarget
-	}
-
-	split, err := splitRule(processes, tunnelKey, tunnelTag)
-	if err != nil {
-		return nil, err
 	}
 	catchAll, err := catchAllRule(directTag)
 	if err != nil {
 		return nil, err
 	}
 
-	if routing["rules"], err = json.Marshal(append(kept, split, catchAll)); err != nil {
+	if routing["rules"], err = json.Marshal(append(out, catchAll)); err != nil {
 		return nil, fmt.Errorf("routing rules: %w", err)
 	}
 	if cfg["routing"], err = json.Marshal(routing); err != nil {
@@ -116,44 +150,60 @@ func ApplySplitRouting(raw json.RawMessage, processes []string) (json.RawMessage
 // has none.
 const directOutboundTag = "direct"
 
-// localOutbounds maps each protocol that resolves traffic without the tunnel to
-// the tag of the first outbound carrying it: freedom (direct), blackhole
-// (blocked) and dns (answered by xray itself).
-func localOutbounds(raw json.RawMessage) (map[string]string, error) {
-	var outbounds []struct {
-		Tag      string `json:"tag"`
-		Protocol string `json:"protocol"`
-	}
+// outboundInfo is what the routing rewrites need to know of an outbound.
+type outboundInfo struct {
+	Tag      string `json:"tag"`
+	Protocol string `json:"protocol"`
+}
+
+func readOutbounds(raw json.RawMessage) ([]outboundInfo, error) {
+	var outbounds []outboundInfo
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &outbounds); err != nil {
 			return nil, fmt.Errorf("outbounds: %w", err)
 		}
 	}
-	local := map[string]string{}
-	for _, o := range outbounds {
-		switch o.Protocol {
-		case "freedom", "blackhole", "dns":
-			if local[o.Protocol] == "" {
-				local[o.Protocol] = o.Tag
-			}
-		}
-	}
-	return local, nil
+	return outbounds, nil
 }
 
-// isLocalTag reports whether a rule's outboundTag names one of the outbounds
-// that never enter the tunnel. An empty tag (a rule pointing nowhere) counts as
-// tunnel-bound: it falls through to the first outbound, which is the proxy.
-func isLocalTag(local map[string]string, tag string) bool {
-	if tag == "" {
-		return false
-	}
-	for _, t := range local {
-		if t == tag {
-			return true
-		}
+// isLocalProtocol reports whether an outbound of this protocol resolves
+// traffic without the tunnel: freedom (direct), blackhole (blocked) and dns
+// (answered by xray itself).
+func isLocalProtocol(protocol string) bool {
+	switch protocol {
+	case "freedom", "blackhole", "dns":
+		return true
 	}
 	return false
+}
+
+// forProcesses narrows a tunnel rule to the listed processes. A rule that names
+// processes of its own keeps those of them that are listed; ok is false when
+// none are, and the rule is dropped.
+func forProcesses(r map[string]json.RawMessage, processes []string) (map[string]json.RawMessage, bool, error) {
+	names := processes
+	if len(r["process"]) > 0 {
+		own, err := stringList(r["process"])
+		if err != nil {
+			return nil, false, fmt.Errorf("routing rule process: %w", err)
+		}
+		names = nil
+		for _, p := range own {
+			if slices.ContainsFunc(processes, func(l string) bool { return strings.EqualFold(l, strings.TrimSpace(p)) }) {
+				names = append(names, strings.TrimSpace(p))
+			}
+		}
+		if len(names) == 0 {
+			return nil, false, nil
+		}
+	}
+	procs, err := json.Marshal(names)
+	if err != nil {
+		return nil, false, err
+	}
+	narrowed := maps.Clone(r)
+	narrowed["process"] = procs
+	return narrowed, true, nil
 }
 
 func ruleOutboundTag(r map[string]json.RawMessage) (string, error) {

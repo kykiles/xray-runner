@@ -168,3 +168,79 @@ func TestPrependProbeRuleRefusesZonedIPv6(t *testing.T) {
 		t.Errorf("error does not name the zone: %v", err)
 	}
 }
+
+// A panel may put its direct outbound first and reach the server by rules: the
+// probe must still go to the server, not out direct.
+func TestPrependProbeRuleSkipsLocalFirstOutbound(t *testing.T) {
+	raw := json.RawMessage(`{
+		"outbounds": [{"tag": "direct", "protocol": "freedom"}, {"tag": "block", "protocol": "blackhole"}, {"tag": "proxy", "protocol": "vless"}],
+		"routing": {"rules": [{"network": "tcp,udp", "outboundTag": "proxy"}]}
+	}`)
+	out, err := PrependProbeRule(raw, []string{"full:www.google.com"})
+	if err != nil {
+		t.Fatalf("PrependProbeRule() = %v, want nil", err)
+	}
+	if got := rules(t, out); got[0]["outboundTag"] != "proxy" {
+		t.Errorf("probe rule = %v, want it aimed at proxy", got[0])
+	}
+}
+
+// Nothing but local outbounds: there is no tunnel to aim at, so no rule.
+func TestPrependProbeRuleLeavesLocalOnlyConfigAlone(t *testing.T) {
+	raw := json.RawMessage(`{"outbounds": [{"tag": "direct", "protocol": "freedom"}]}`)
+	out, err := PrependProbeRule(raw, []string{"full:www.google.com"})
+	if err != nil {
+		t.Fatalf("PrependProbeRule() = %v, want nil", err)
+	}
+	if string(out) != string(raw) {
+		t.Errorf("config = %s, want it unchanged", out)
+	}
+}
+
+// With an inbound given, every probe rule is limited to it; without, none is.
+func TestPrependProbeRuleLimitsToInbound(t *testing.T) {
+	raw := json.RawMessage(`{"outbounds": [{"tag": "proxy", "protocol": "vless"}]}`)
+	out, err := PrependProbeRule(raw, []string{"full:www.google.com", "1.1.1.1"}, ProbeInboundTag)
+	if err != nil {
+		t.Fatalf("PrependProbeRule() = %v, want nil", err)
+	}
+	got := rules(t, out)
+	if len(got) != 2 {
+		t.Fatalf("rules = %v, want a domain rule and an ip rule", got)
+	}
+	for _, r := range got {
+		in, _ := r["inboundTag"].([]any)
+		if len(in) != 1 || in[0] != ProbeInboundTag {
+			t.Errorf("probe rule = %v, want inboundTag [%s]", r, ProbeInboundTag)
+		}
+	}
+
+	out, err = PrependProbeRule(raw, []string{"full:www.google.com"})
+	if err != nil {
+		t.Fatalf("PrependProbeRule() = %v, want nil", err)
+	}
+	if r := rules(t, out)[0]; r["inboundTag"] != nil {
+		t.Errorf("probe rule = %v, want no inboundTag without an inbound", r)
+	}
+}
+
+// Split over tun: the probe rules go first, and must not catch an unlisted
+// process's connection to a probe host on the tun inbound.
+func TestProbeRuleDoesNotBypassSplit(t *testing.T) {
+	raw, err := ApplySplitRouting(json.RawMessage(panelConfig), []string{"Telegram.exe"})
+	if err != nil {
+		t.Fatalf("ApplySplitRouting: %v", err)
+	}
+	raw, err = PrependProbeRule(raw, []string{"full:www.google.com"}, ProbeInboundTag)
+	if err != nil {
+		t.Fatalf("PrependProbeRule: %v", err)
+	}
+	for _, r := range rulesOf(t, raw) {
+		if r["outboundTag"] == "direct" || r["outboundTag"] == "block" {
+			continue
+		}
+		if r["process"] == nil && r["inboundTag"] == nil {
+			t.Errorf("rule %v sends traffic into the tunnel whatever process opened it", r)
+		}
+	}
+}

@@ -63,7 +63,7 @@ func setUp(version string) (*Service, ipc.Listener, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	xraycfg.SetGeoAssets(filepath.Dir(binary), "")
+	xraycfg.SetGeoAssets(filepath.Dir(binary), geoNote)
 	coreVer, err := xray.Version(binary)
 	if err != nil {
 		slog.Warn("версия ядра не прочитана", "error", err)
@@ -101,6 +101,16 @@ func setUp(version string) (*Service, ipc.Listener, error) {
 	slog.SetDefault(slog.New(&teeHandler{Handler: slog.Default().Handler(), fwd: s.forwardLog}))
 	return s, l, nil
 }
+
+// geoNote follows a refusal over geo lists the service's databases lack. The
+// service has only the databases copied in at install: the ones a subscription
+// brings sit in the user's cache, out of its reach, and those updated by `u`
+// beside the program reach it with the next install (H10).
+const geoNote = "TUN через службу проверяет правила по гео-базам из папки службы. " +
+	"Гео-базы, которые скачаны для подписки, службе недоступны, а обновлённые клавишей u " +
+	"попадают к ней только после повторного `xray-runner service install`. " +
+	"Если нужных списков нет и после этого, подключитесь в режиме PROXY " +
+	"или запустите программу с правами администратора (root) и XRAY_RUNNER_NO_SERVICE=1"
 
 // ownCore is the core beside the service's binary. Nothing else is run with
 // the service's rights: a core off PATH is whatever put it there.

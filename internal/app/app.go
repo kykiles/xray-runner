@@ -64,7 +64,12 @@ type App struct {
 	serverUDP     bool
 	originalProxy system.ProxyState
 	proxyTouched  bool
-	tunRouted     bool // tun routing attempted; teardown must take ours back out
+	// proxyAddr is the "127.0.0.1:PORT" the session put into the system proxy
+	// settings; proxyRestoreFailed says the last restore did not go through, so
+	// the next one first checks the settings are still ours to put back.
+	proxyAddr          string
+	proxyRestoreFailed bool
+	tunRouted          bool // tun routing attempted; teardown must take ours back out
 	// The active config routes something past the tunnel — as a rule the panel
 	// profile's own direct rules. The TUN label says so instead of promising
 	// that every packet goes through the VPN (A03).

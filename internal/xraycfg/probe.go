@@ -19,14 +19,21 @@ import (
 //
 // The target is read out of the config rather than passed in: a profile's
 // balancer is where its traffic actually goes, and without one the first
-// outbound is what unmatched traffic falls through to. Either way the probe
-// follows the same path as the user's own traffic.
+// outbound through a server — unmatched traffic falls through to the first
+// outbound, and a panel that puts direct first still sends its traffic to a
+// server by rules. Either way the probe measures the tunnel.
 // hosts carries two kinds of entry: a domain as "full:<domain>", and an IP
 // target as a bare literal. The two cannot share one rule — a rule's domain and
 // ip fields are alternatives the request has to satisfy together, and a request
 // carries a name or an address, never both — so an IP target gets a rule of its
 // own aimed at the same place (F04).
-func PrependProbeRule(raw json.RawMessage, hosts []string) (json.RawMessage, error) {
+//
+// inbounds, when given, limits the probe rules to the traffic of those inbounds.
+// A tun session passes its probe inbound: every process's traffic arrives
+// through the tun inbound, and a rule matching the probe hosts from any inbound
+// would send an unlisted browser's www.google.com through the tunnel, ahead of
+// the split's process rules and the panel's own direct ones.
+func PrependProbeRule(raw json.RawMessage, hosts []string, inbounds ...string) (json.RawMessage, error) {
 	if len(hosts) == 0 {
 		return raw, nil
 	}
@@ -43,12 +50,16 @@ func PrependProbeRule(raw json.RawMessage, hosts []string) (json.RawMessage, err
 	switch {
 	case firstTag(cfg["routing"], "balancers") != "":
 		aim["balancerTag"] = firstTag(cfg["routing"], "balancers")
-	case firstOutboundTag(cfg["outbounds"]) != "":
-		aim["outboundTag"] = firstOutboundTag(cfg["outbounds"])
+	case firstTunnelOutboundTag(cfg["outbounds"]) != "":
+		aim["outboundTag"] = firstTunnelOutboundTag(cfg["outbounds"])
 	default:
 		// Nothing to aim at — leave the config as it is rather than write a rule
 		// pointing at a tag that does not exist, which xray refuses to start on.
 		return raw, nil
+	}
+
+	if len(inbounds) > 0 {
+		aim["inboundTag"] = inbounds
 	}
 
 	// One rule per kind, and none at all for a kind with nothing in it: a rule
@@ -163,4 +174,20 @@ func firstOutboundTag(arr json.RawMessage) string {
 		return ""
 	}
 	return items[0].Tag
+}
+
+// firstTunnelOutboundTag reads the tag of the first outbound that goes through
+// a server: a freedom, blackhole or dns outbound put first by the panel is not
+// the tunnel, and a probe aimed at it would read "ок" off the plain internet.
+func firstTunnelOutboundTag(arr json.RawMessage) string {
+	outbounds, err := readOutbounds(arr)
+	if err != nil {
+		return ""
+	}
+	for _, o := range outbounds {
+		if o.Tag != "" && !isLocalProtocol(o.Protocol) {
+			return o.Tag
+		}
+	}
+	return ""
 }
