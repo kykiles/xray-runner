@@ -137,6 +137,9 @@ type App struct {
 	// proxy session's own loop, the core's number in a tun session (C01).
 	healthGen int
 	statusCh  chan tui.StatusUpdate
+
+	// remote is the connection to the service, when there is one (H10).
+	remote remoteState
 }
 
 func New(cfg *config.Config, opts Options) *App {
@@ -200,6 +203,10 @@ func (a *App) Run(ctx context.Context) error {
 	} else {
 		slog.Warn("could not determine xray version", "error", err)
 	}
+
+	// The service, when there is one, is what makes TUN possible without
+	// elevation, so it is asked before the mode is settled.
+	a.useService(ctx)
 
 	// Whether TUN can run depends on the core's version, so the mode is settled
 	// only once that is known.
@@ -289,6 +296,9 @@ func (a *App) resolveSplit() {
 // needs elevation and a core at xray.MinVersion or newer. An unknown version is
 // let through, the same as an unreadable one.
 func (a *App) tunReady() error {
+	if c := a.service(); c != nil {
+		return a.serviceCoreReady(c)
+	}
 	if err := a.checkPrivileges(); err != nil {
 		return err
 	}
@@ -393,6 +403,7 @@ func (a *App) cleanup() {
 	// back here, before main prints its goodbye.
 	tui.ReleaseScreen()
 	a.releaseSession()
+	a.closeService()
 	// Then the lock; its handle goes with it, so a second cleanup cannot free
 	// the next owner's. The lock file itself stays — see acquireLock.
 	if a.lock != nil {

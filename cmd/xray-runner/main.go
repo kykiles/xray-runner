@@ -14,6 +14,7 @@ import (
 	"xray-runner/internal/config"
 	applog "xray-runner/internal/log"
 	"xray-runner/internal/secret"
+	"xray-runner/internal/service"
 	"xray-runner/internal/tui"
 	"xray-runner/internal/ui"
 )
@@ -34,6 +35,11 @@ func run() int {
 	// before flags, config and the log, none of which it has any use for.
 	if len(os.Args) == 2 && os.Args[1] == secret.HelperArg {
 		return secret.HelperMain()
+	}
+	// The privileged half (H10): `xray-runner service run|install|uninstall|
+	// status`. It reads no .env: nothing the user can edit steers it.
+	if len(os.Args) >= 2 && os.Args[1] == "service" {
+		return service.Main(os.Args[2:], Version)
 	}
 
 	flagVersion := flag.Bool("version", false, "show version")

@@ -41,6 +41,9 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	// while this one is still up, and a core restarted in between is still this
 	// session's (C01).
 	tun, split := a.tunMode(), a.split
+	if tun && a.service() != nil {
+		return a.runRemoteSession(ctx, t, split)
+	}
 
 	cfgJSON, ports, err := a.buildSessionConfig(t)
 	if err != nil {
@@ -1055,7 +1058,7 @@ func (a *App) killSwitchEndpoints(t *target) []system.Endpoint {
 
 	add(a.serverHost, a.serverPort, a.serverUDP)
 	for _, e := range t.profileSrvs {
-		add(e.Address, e.Port, e.Protocol == "hysteria2")
+		add(e.Address, e.Port, xraycfg.UDPProtocol(e.Protocol))
 	}
 	return out
 }
