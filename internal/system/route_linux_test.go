@@ -1291,3 +1291,21 @@ func TestDisableTunRouting_KeepsOwnershipOnAnUnreadableType(t *testing.T) {
 		t.Error("ownership dropped after a teardown that could not read the host")
 	}
 }
+
+// With the network gone `ip route get` finds no path to the server. That is
+// reported as ErrNoRoute, which a restarted core waits out instead of ending
+// the session (G06), and nothing is changed.
+func TestEnableTunRouting_OfflineIsErrNoRoute(t *testing.T) {
+	f := cleanHost()
+	f.routeGetOut = "RTNETLINK answers: Network is unreachable\n"
+	f.routeGetErr = errors.New("exit status 2")
+	withFakeIP(t, f)
+
+	err := EnableTunRouting(tunCfg)
+	if !errors.Is(err, ErrNoRoute) {
+		t.Fatalf("err = %v, want ErrNoRoute", err)
+	}
+	if len(f.cmds) != 0 {
+		t.Errorf("changes made with no route out: %v", f.cmds)
+	}
+}

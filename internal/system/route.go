@@ -1,5 +1,12 @@
 package system
 
+import "errors"
+
+// ErrNoRoute marks a tun setup that found no physical path out — to a VPN
+// server, or to the internet for direct traffic. The machine is offline for
+// now, which a restarted core waits out rather than ending the session (G06).
+var ErrNoRoute = errors.New("нет маршрута в сеть")
+
 // TunRouteConfig describes the routes that make the OS actually use the TUN
 // device. Xray only creates the interface and reads packets off it — unlike
 // sing-box's auto_route it never touches the routing table, so without these

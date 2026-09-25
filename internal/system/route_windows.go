@@ -69,7 +69,7 @@ func DirectBind() (xraycfg.DirectBind, error) {
 		`$r = Find-NetRoute -RemoteIPAddress '%s' -ErrorAction Stop | Select-Object -First 1; (Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction Stop).InterfaceAlias`,
 		bindProbe))
 	if err != nil {
-		return xraycfg.DirectBind{}, fmt.Errorf("определить физический адаптер: %w\n%s", err, out)
+		return xraycfg.DirectBind{}, fmt.Errorf("определить физический адаптер: %w: %w\n%s", ErrNoRoute, err, out)
 	}
 	alias := strings.TrimSpace(string(out))
 	if alias == "" {
@@ -321,7 +321,7 @@ func physicalPath(ip netip.Addr) (tunEntry, error) {
 		`Find-NetRoute -RemoteIPAddress '%s' -ErrorAction Stop | Where-Object NextHop | Select-Object -First 1 -Property NextHop,InterfaceIndex | ConvertTo-Json -Compress`,
 		ip))
 	if err != nil {
-		return tunEntry{}, fmt.Errorf("определить маршрут до сервера %s: %w", ip, err)
+		return tunEntry{}, fmt.Errorf("определить маршрут до сервера %s: %w: %w", ip, ErrNoRoute, err)
 	}
 	r := found[0]
 	hop, err := netip.ParseAddr(r.NextHop)

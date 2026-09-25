@@ -141,7 +141,7 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 		}
 		out, err := ipCmd.run("ip", "route", "get", ip)
 		if err != nil {
-			return fmt.Errorf("определить маршрут до сервера %s: %w\n%s", ip, err, out)
+			return fmt.Errorf("определить маршрут до сервера %s: %w: %w\n%s", ip, ErrNoRoute, err, out)
 		}
 		via, dev, err := parseRouteGet(string(out))
 		if err != nil {
@@ -155,7 +155,7 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 	// place `ip route get` answers with the tun device.
 	out, err := ipCmd.run("ip", "route", "get", markProbe)
 	if err != nil {
-		return fmt.Errorf("определить физический маршрут по умолчанию: %w\n%s", err, out)
+		return fmt.Errorf("определить физический маршрут по умолчанию: %w: %w\n%s", ErrNoRoute, err, out)
 	}
 	directVia, directDev, err := parseRouteGet(string(out))
 	if err != nil {

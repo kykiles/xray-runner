@@ -655,3 +655,37 @@ func TestTunSession_RestartOnAnotherAdapterEndsSession(t *testing.T) {
 	}
 	assertEvents(t, n, "route 10", "ks on", "unroute", "ks off")
 }
+
+// A core restarted while the network is down finds no route out. The session
+// waits for the network instead of ending: ending it took the kill switch down,
+// and once the network was back everything went out directly (G06). The same
+// core is routed as soon as there is a path again.
+func TestTunSession_RestartWaitsOutAnOutage(t *testing.T) {
+	a, n := newTunGenerationApp(t, 0)
+	offline := fmt.Errorf("определить маршрут до сервера: %w", system.ErrNoRoute)
+	n.failRoute = map[int]error{2: offline, 3: offline}
+	// Only the first core asks for a restart; the second one is to stay.
+	a.healthLoop = func(ctx context.Context, _ sessionPorts) {
+		if n.routed() == 1 {
+			a.runner.RequestRestart()
+		}
+		<-ctx.Done()
+	}
+	retry := offlineRetry
+	offlineRetry = 20 * time.Millisecond
+	t.Cleanup(func() { offlineRetry = retry })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := runTunSession(a, ctx)
+	waitFor(t, done, func() bool { return n.routed() == 4 }, "the restarted core to be routed once back online")
+	cancel()
+
+	if err := waitEnd(t, done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("runSession err = %v, want context.Canceled — the outage must not end the session", err)
+	}
+	if got := coreStarts(t); got != 2 {
+		t.Errorf("core started %d times, want 2 — the wait is for the network, not a new core", got)
+	}
+	assertEvents(t, n, "route 10", "ks on", "unroute", "route failed", "route failed", "route 11", "unroute", "ks off")
+}

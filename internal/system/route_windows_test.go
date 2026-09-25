@@ -397,8 +397,10 @@ func TestEnableTunRouting_FailsWithoutTouchingRoutesWhenServerPathUnknown(t *tes
 	f.queryErr = map[string]error{"find": errors.New("no route")}
 	withFakeIP(t, f)
 
-	if err := EnableTunRouting(tunCfg); err == nil {
-		t.Fatal("expected error when the server's physical route can't be resolved")
+	// Reported as ErrNoRoute: offline for now, which a restarted core waits out
+	// instead of ending the session (G06).
+	if err := EnableTunRouting(tunCfg); !errors.Is(err, ErrNoRoute) {
+		t.Fatalf("err = %v, want ErrNoRoute when the server's physical route can't be resolved", err)
 	}
 	if len(f.cmds) != 0 {
 		t.Errorf("no routes may be installed on failure, got: %v", f.cmds)

@@ -864,7 +864,7 @@ func (a *App) newTunLifecycle(t *target, ports sessionPorts, split bool) *tunLif
 func (l *tunLifecycle) afterStart(ctx context.Context) error {
 	l.gen++
 	l.failed = nil
-	err := l.setUp(ctx)
+	err := l.setUpOnline(ctx)
 	if err != nil && ctx.Err() != nil {
 		return err
 	}
@@ -883,6 +883,41 @@ func (l *tunLifecycle) afterStart(ctx context.Context) error {
 		l.ready <- err
 	}
 	return err
+}
+
+// offlineRetry is how often a restarted core's setup tries again while the
+// machine has no route out; a variable so tests need not sit through it.
+var offlineRetry = 3 * time.Second
+
+// setUpOnline is setUp that waits out a network that is gone (G06). A core
+// restarted during an outage finds no physical path to its server, and ending
+// the session over it took the kill switch down too — so once the network came
+// back, traffic went out directly, which is the moment a kill switch is for.
+// Such a core is set up again once there is a route out; any other failure
+// still ends the session. Bring-up itself does not wait: nothing is protected
+// yet, and the connecting screen should say why at once.
+func (l *tunLifecycle) setUpOnline(ctx context.Context) error {
+	noted := false
+	for {
+		err := l.setUp(ctx)
+		if err == nil || !l.sent || !errors.Is(err, system.ErrNoRoute) {
+			return err
+		}
+		if !noted {
+			noted = true
+			slog.Warn("tun setup: no route out, waiting for the network", "error", err)
+			note := "Нет сети: жду её, соединение восстановится само."
+			if l.a.killSwitchOn {
+				note += " Kill switch держит трафик до тех пор."
+			}
+			l.a.publishStatus(tui.StatusUpdate{Note: note, Err: true})
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(offlineRetry):
+		}
+	}
 }
 
 // setUp routes the current core's interface. The first core to get that far
