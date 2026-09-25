@@ -122,6 +122,7 @@ func (r *Runner) Start(ctx context.Context) error {
 	defer r.mu.Unlock()
 
 	r.cmd = exec.CommandContext(ctx, r.binary, "run", "-c", r.config) //nolint:gosec // G204: argument vector, no shell: the core on our own config
+	prepareChild(r.cmd)
 
 	stdout, err := r.cmd.StdoutPipe()
 	if err != nil {
@@ -135,6 +136,7 @@ func (r *Runner) Start(ctx context.Context) error {
 	if err := r.cmd.Start(); err != nil {
 		return fmt.Errorf("start xray: %w", err)
 	}
+	adoptChild(r.cmd.Process)
 
 	// xray prints its fatal "Failed to start" on stdout, so DEBUG would hide the
 	// one line that explains why a session never came up.
