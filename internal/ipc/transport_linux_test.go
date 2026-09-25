@@ -5,9 +5,12 @@ package ipc
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -99,5 +102,51 @@ func TestRefusalAnswersLateHello(t *testing.T) {
 	m, err := ReadMessage(rw)
 	if err != nil || m.ID != 1 || !strings.Contains(m.Error, Group) {
 		t.Fatalf("reply %+v, %v", m, err)
+	}
+}
+
+// On socket activation the socket's directory is made passable too: a run
+// under sudo may have left it 0700, and systemd keeps the mode it finds.
+func TestListenActivatedFixesRuntimeDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "xray-runner")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "control.sock")
+	sl, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sl.Close() }()
+	f, err := sl.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The descriptor handed over is Listen's to close, as systemd's is.
+	fd, err := syscall.Dup(int(f.Fd()))
+	_ = f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldDir, oldFD := runtimeDir, listenFDsStart
+	runtimeDir, listenFDsStart = dir, fd
+	t.Cleanup(func() { runtimeDir, listenFDsStart = oldDir, oldFD })
+	t.Setenv("LISTEN_PID", strconv.Itoa(os.Getpid()))
+	t.Setenv("LISTEN_FDS", "1")
+
+	l, err := Listen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	if got := l.(*unixListener).l.Addr().String(); got != path {
+		t.Fatalf("listening at %q, want the socket passed in", got)
+	}
+	st, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o755 {
+		t.Fatalf("directory mode %v, want 0755", st.Mode().Perm())
 	}
 }
