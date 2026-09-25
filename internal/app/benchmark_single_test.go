@@ -104,9 +104,9 @@ func TestMeasureRefusesMissingGeoLists(t *testing.T) {
 	ports := portPair{socks: 41080, http: 41081}
 
 	results := map[string]subscription.BenchmarkResult{
-		"single server": pb.measureEntry(context.Background(), entry, ports, t.TempDir()),
+		"single server": pb.measureEntry(context.Background(), entry, ports),
 		"whole profile": pb.measureProfileEntry(context.Background(),
-			subscription.Profile{Name: "Auto", Raw: profile, Entries: []subscription.SubEntry{entry}}, ports, t.TempDir()),
+			subscription.Profile{Name: "Auto", Raw: profile, Entries: []subscription.SubEntry{entry}}, ports),
 	}
 	for name, res := range results {
 		if res.Error == nil || !strings.Contains(res.Error.Error(), "torrent") {

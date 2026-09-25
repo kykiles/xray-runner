@@ -62,9 +62,6 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	// E03: the rules were checked against databases that are not the panel's
 	// current ones — the screen says why.
 	a.noteGeoDatabases()
-	if err := a.writeConfigJSON(cfgJSON); err != nil {
-		return tui.StatusQuit, err
-	}
 	// Read off the JSON that actually went to the core, so the label reflects
 	// the panel's rules and ours alike.
 	a.hasBypass = xraycfg.HasBypassRules(cfgJSON)
@@ -75,7 +72,11 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	// in between looks the same for either server.
 	slog.Info("──── connecting: "+t.title()+" ────", "binary", a.binary, "mode", a.mode)
 
-	a.runner = xray.New(a.binary, a.tmpFile)
+	// The config goes to the core on stdin and is never written to disk: H-2's
+	// owner-only file, and the private runtime dir it later needed (11b, F07),
+	// were only there to keep it from other users of the machine (H01).
+	slog.Debug("generated xray config", "bytes", len(cfgJSON))
+	a.runner = xray.New(a.binary, cfgJSON)
 
 	sessCtx, sessCancel := context.WithCancel(ctx)
 	defer sessCancel()

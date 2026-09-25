@@ -98,7 +98,6 @@ func newTunGenerationApp(t *testing.T, crashes int) (*App, *tunNet) {
 	a.cfg.KillSwitch = true
 	a.cfg.HealthCheckURLs = []string{"http://127.0.0.1:1/"}
 	a.binary = buildGenerationXray(t)
-	a.tmpFile = filepath.Join(t.TempDir(), "xray_config.json")
 	t.Setenv("MOCK_XRAY_STARTS", filepath.Join(t.TempDir(), "starts"))
 	t.Setenv("MOCK_XRAY_CRASHES", strconv.Itoa(crashes))
 

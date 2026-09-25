@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -125,7 +123,7 @@ func TestProxyBenchmarkerMeasureOne(t *testing.T) {
 	}
 
 	pb := NewProxyBenchmarker(tc, xrayBin, benchTestConfig(8*time.Second))
-	result := pb.measureOne(context.Background(), entry, portPair{socks: 10850, http: 10860}, t.TempDir())
+	result := pb.measureOne(context.Background(), entry, portPair{socks: 10850, http: 10860})
 
 	if result.Error != nil {
 		t.Fatalf("unexpected error: %v", result.Error)
@@ -150,9 +148,5 @@ func xrayCanRunTemplate(t *testing.T, xrayBin string, tc *xraycfg.XrayConfig) bo
 	if err != nil {
 		return false
 	}
-	path := filepath.Join(t.TempDir(), "probe.json")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return false
-	}
-	return xray.New(xrayBin, path).TestConfig(context.Background()) == nil
+	return xray.New(xrayBin, data).TestConfig(context.Background()) == nil
 }

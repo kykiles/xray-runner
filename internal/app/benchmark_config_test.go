@@ -79,7 +79,7 @@ func TestRunAndMeasure_SeparatesRejectedConfigFromSlowStart(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			pb := &ProxyBenchmarker{xrayBinary: mockCore(t, c.reject), timeout: 300 * time.Millisecond}
-			res := pb.runAndMeasure(context.Background(), []byte(`{}`), ports, t.TempDir())
+			res := pb.runAndMeasure(context.Background(), []byte(`{}`), ports)
 
 			if !errors.Is(res.Error, c.wantErr) {
 				t.Fatalf("error = %v, want %v", res.Error, c.wantErr)
@@ -99,7 +99,7 @@ func TestRunAndMeasure_RejectedConfigCarriesCoreOutput(t *testing.T) {
 	}
 
 	pb := &ProxyBenchmarker{xrayBinary: mockCore(t, true), timeout: 300 * time.Millisecond}
-	res := pb.runAndMeasure(context.Background(), []byte(`{}`), ports, t.TempDir())
+	res := pb.runAndMeasure(context.Background(), []byte(`{}`), ports)
 
 	if res.Error == nil || !strings.Contains(res.Error.Error(), "vless-next") {
 		t.Errorf("error lost the core's own words: %v", res.Error)

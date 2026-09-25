@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
 // The steps of replaceFile, swapped by tests to fail one of them.
@@ -16,27 +15,16 @@ var (
 	publishStaged = (*os.Root).Rename
 )
 
-// replaceFile puts data under path as a new file staged next to it (0600 on
-// Unix), instead of writing into whatever path already names. A link planted at
-// path is replaced, not followed, so the file on its other end keeps its bytes
-// (A04). Nothing at path changes before the final rename: a failure at any step
-// leaves the previous file intact, and the temp this call made goes with it.
-//
-// The rename is atomic on Unix only — Go promises no atomicity for it on
-// Windows — and it does not guard against a hostile parent directory.
-func replaceFile(path string, data []byte) error {
-	r, err := os.OpenRoot(filepath.Dir(path))
-	if err != nil {
-		return fmt.Errorf("open dir: %w", err)
-	}
-	defer func() { _ = r.Close() }()
-	return replaceInRoot(r, filepath.Base(path), data, nil)
-}
-
-// replaceInRoot is replaceFile for name directly inside r. Staging, rename and
-// cleanup all go through r, so the directory cannot be swapped for a link
-// between them. own, when set, runs on the staged file before it is published —
-// the place to hand it over by descriptor rather than by name afterwards.
+// replaceInRoot puts data under name directly inside r as a new file staged
+// next to it (0600 on Unix), instead of writing into whatever name already
+// holds. A link planted at name is replaced, not followed, so the file on its
+// other end keeps its bytes (A04). Nothing at name changes before the final
+// rename: a failure at any step leaves the previous file intact, and the temp
+// this call made goes with it. Staging, rename and cleanup all go through r, so
+// the directory cannot be swapped for a link between them. The rename is
+// atomic on Unix only — Go promises no atomicity for it on Windows. own, when
+// set, runs on the staged file before it is published — the place to hand it
+// over by descriptor rather than by name afterwards.
 func replaceInRoot(r *os.Root, name string, data []byte, own func(*os.File) error) (err error) {
 	// O_EXCL: the staged name is never a file or link that was already there.
 	tmp := "." + name + "-" + rand.Text() + ".tmp"

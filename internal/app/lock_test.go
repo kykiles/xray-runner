@@ -13,14 +13,19 @@ import (
 )
 
 // newLockApp builds a minimal App wired for lock tests: its lock file in dir, as
-// New puts it, and a config beside it for the tests of acquireLock alone —
-// claimInstance moves the config into a runtime dir of its own. Apps built on
-// the same dir contend for one lock, the way instances of one install do.
+// New puts it. Apps built on the same dir contend for one lock, the way
+// instances of one install do.
 func newLockApp(dir string) *App {
-	return &App{
-		tmpFile:  filepath.Join(dir, "xray_config.json"),
-		lockFile: filepath.Join(dir, "xray_config.json.lock"),
-	}
+	return &App{lockFile: filepath.Join(dir, "xray_config.json.lock")}
+}
+
+// neighbour is a file of another instance's beside the lock: a refused or
+// failed run must leave it alone.
+func neighbour(t *testing.T, a *App) string {
+	t.Helper()
+	path := filepath.Join(filepath.Dir(a.lockFile), "xray_config.json")
+	writeFile(t, path, "someone-elses-file")
+	return path
 }
 
 // ownLock takes the lock in dir for the whole test. The cleanup lets it go
@@ -51,10 +56,9 @@ func assertLockFree(t *testing.T, lockFile string) {
 	}
 }
 
-// lockProbe contends for lockFile with a config of its own elsewhere, so its
-// cleanup cannot take the config a test is watching.
+// lockProbe contends for lockFile, and lets it go again at the end of the test.
 func lockProbe(t *testing.T, lockFile string) *App {
-	p := &App{tmpFile: filepath.Join(t.TempDir(), "probe.json"), lockFile: lockFile}
+	p := &App{lockFile: lockFile}
 	t.Cleanup(p.cleanup)
 	return p
 }
@@ -81,16 +85,14 @@ func assertFileHolds(t *testing.T, path, want string) {
 func ownPidLine() string { return strconv.Itoa(os.Getpid()) + "\n" }
 
 // A07: an instance refused by a live lock used to delete the config of the
-// instance that holds it — the core running there reads that file on its next
-// restart. Since 11b the owner's config is in its runtime dir.
-func TestCleanup_RefusedInstanceKeepsOwnersFiles(t *testing.T) {
-	isolateRuntime(t)
+// instance that holds it. The refused one leaves the owner's lock, pid and all,
+// as it found it.
+func TestCleanup_RefusedInstanceKeepsOwnersLock(t *testing.T) {
 	dir := t.TempDir()
-	owner := ownClaim(t, dir)
-	writeFile(t, owner.tmpFile, "active-instance-config")
+	owner := ownLock(t, dir)
 
 	second := newLockApp(dir)
-	err := second.claimInstance()
+	err := second.acquireLock()
 	if err == nil {
 		t.Fatal("acquireLock should refuse while another instance holds the lock")
 	}
@@ -99,29 +101,21 @@ func TestCleanup_RefusedInstanceKeepsOwnersFiles(t *testing.T) {
 	}
 	second.cleanup()
 
-	assertFileHolds(t, owner.tmpFile, "active-instance-config")
 	assertFileHolds(t, owner.lockFile, ownPidLine())
 	assertLockTaken(t, owner.lockFile)
 }
 
-// The owner takes its config away and lets the lock go, but the lock file stays:
-// unlinking it would let the next instance lock a new file while a third still
-// has the old one open — two owners at once (11a). Until 11a, cleanup removed
-// the lock file too, and this test checked that. Since 11b the config goes with
-// the instance's runtime dir.
-func TestCleanup_OwnerRemovesConfigKeepsLockFile(t *testing.T) {
-	isolateRuntime(t)
+// The owner lets the lock go, but the lock file stays: unlinking it would let
+// the next instance lock a new file while a third still has the old one open —
+// two owners at once (11a).
+func TestCleanup_OwnerKeepsLockFile(t *testing.T) {
 	a := newLockApp(t.TempDir())
-	if err := a.claimInstance(); err != nil {
-		t.Fatalf("claimInstance: %v", err)
+	if err := a.acquireLock(); err != nil {
+		t.Fatalf("acquireLock: %v", err)
 	}
-	writeFile(t, a.tmpFile, "own-config")
 
 	a.cleanup()
 
-	if _, err := os.Stat(a.tmpFile); !os.IsNotExist(err) {
-		t.Errorf("config left behind after the owner's cleanup (stat err = %v)", err)
-	}
 	if _, err := os.Stat(a.lockFile); err != nil {
 		t.Errorf("lock file removed by cleanup: %v", err)
 	}
@@ -129,21 +123,18 @@ func TestCleanup_OwnerRemovesConfigKeepsLockFile(t *testing.T) {
 }
 
 // Once released, the lock belongs to whoever takes it next: a second cleanup
-// must neither remove the next instance's config nor free its lock.
-func TestCleanup_TwiceLeavesNextOwnersFiles(t *testing.T) {
-	isolateRuntime(t)
+// must not free the next instance's lock.
+func TestCleanup_TwiceLeavesNextOwnersLock(t *testing.T) {
 	dir := t.TempDir()
 	a := newLockApp(dir)
-	if err := a.claimInstance(); err != nil {
-		t.Fatalf("claimInstance: %v", err)
+	if err := a.acquireLock(); err != nil {
+		t.Fatalf("acquireLock: %v", err)
 	}
 	a.cleanup()
 
-	next := ownClaim(t, dir)
-	writeFile(t, next.tmpFile, "next-instance-config")
+	next := ownLock(t, dir)
 	a.cleanup()
 
-	assertFileHolds(t, next.tmpFile, "next-instance-config")
 	assertLockTaken(t, next.lockFile)
 }
 
@@ -181,7 +172,6 @@ func TestAcquireLock_UnheldFileIsFree(t *testing.T) {
 func TestAcquireLock_EmptyFileOfLiveOwnerRefused(t *testing.T) {
 	dir := t.TempDir()
 	owner := ownLock(t, dir)
-	writeFile(t, owner.tmpFile, "active-instance-config")
 	writeFile(t, owner.lockFile, "")
 
 	second := newLockApp(dir)
@@ -190,7 +180,7 @@ func TestAcquireLock_EmptyFileOfLiveOwnerRefused(t *testing.T) {
 	}
 	second.cleanup()
 
-	assertFileHolds(t, owner.tmpFile, "active-instance-config")
+	assertLockTaken(t, owner.lockFile)
 }
 
 // A lock that cannot be taken for a reason other than a live owner is an error
@@ -200,7 +190,7 @@ func TestAcquireLock_OpenFailure(t *testing.T) {
 	if err := os.Mkdir(a.lockFile, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, a.tmpFile, "someone-elses-config")
+	other := neighbour(t, a)
 
 	err := a.acquireLock()
 	if err == nil {
@@ -211,7 +201,7 @@ func TestAcquireLock_OpenFailure(t *testing.T) {
 	}
 	a.cleanup()
 
-	assertFileHolds(t, a.tmpFile, "someone-elses-config")
+	assertFileHolds(t, other, "someone-elses-file")
 	if fi, err := os.Stat(a.lockFile); err != nil || !fi.IsDir() {
 		t.Errorf("the directory at the lock path was touched (stat err = %v)", err)
 	}
@@ -225,7 +215,7 @@ func TestAcquireLock_PidWriteFailureLetsGo(t *testing.T) {
 	t.Cleanup(func() { writeLockPID = orig })
 
 	a := newLockApp(t.TempDir())
-	writeFile(t, a.tmpFile, "someone-elses-config")
+	other := neighbour(t, a)
 	err := a.acquireLock()
 	if err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("acquireLock err = %v, want the pid write failure", err)
@@ -233,7 +223,7 @@ func TestAcquireLock_PidWriteFailureLetsGo(t *testing.T) {
 	a.cleanup()
 	writeLockPID = orig
 
-	assertFileHolds(t, a.tmpFile, "someone-elses-config")
+	assertFileHolds(t, other, "someone-elses-file")
 	assertLockFree(t, a.lockFile)
 }
 
@@ -305,11 +295,9 @@ func TestAcquireLock_HandsLockFileBackToSudoUser(t *testing.T) {
 	}
 }
 
-// The lock stays where 11a put it, beside where config.Path finds the config,
-// so the runs of one install keep meeting at one lock; a stray lock file in the
-// working directory still does not pull it there. The config itself has no
-// path until claimInstance makes the runtime dir (11b) — until then this test
-// checked that the lock sat next to the config.
+// The lock stays where 11a put it, beside where config.Path once found the
+// core's config, so the runs of one install keep meeting at one lock; a stray
+// lock file in the working directory still does not pull it there.
 func TestNew_LockStaysWhereTheConfigWas(t *testing.T) {
 	for name, tc := range map[string]struct {
 		plant string
@@ -333,9 +321,6 @@ func TestNew_LockStaysWhereTheConfigWas(t *testing.T) {
 			}
 			if a.lockFile != want {
 				t.Errorf("lock at %q, want %q", a.lockFile, want)
-			}
-			if a.tmpFile != "" {
-				t.Errorf("config path %q chosen before the instance made its runtime dir", a.tmpFile)
 			}
 		})
 	}

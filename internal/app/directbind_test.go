@@ -9,8 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -78,7 +76,6 @@ func TestRunSession_DirectBindFailureStopsBeforeCore(t *testing.T) {
 	a := newTemplateApp(t)
 	a.mode = "tun"
 	a.cfg.KillSwitch = true
-	a.tmpFile = filepath.Join(t.TempDir(), "xray_config.json")
 	var routed, killSwitched int
 	a.enableTunRouting = func(system.TunRouteConfig) error { routed++; return nil }
 	a.enableKillSwitch = func(system.KillSwitchConfig) error { killSwitched++; return nil }
@@ -92,9 +89,6 @@ func TestRunSession_DirectBindFailureStopsBeforeCore(t *testing.T) {
 	}
 	if a.runner != nil {
 		t.Error("a core runner was created after the lookup failed")
-	}
-	if _, err := os.Stat(a.tmpFile); !os.IsNotExist(err) {
-		t.Errorf("config written after the lookup failed (stat err = %v)", err)
 	}
 	if routed != 0 || killSwitched != 0 {
 		t.Errorf("routes enabled %d times, kill switch %d times, want neither", routed, killSwitched)

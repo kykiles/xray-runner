@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -60,10 +58,6 @@ type ProxyBenchmarker struct {
 	// that disagrees with what connects is diagnosed from the core's routing
 	// lines, and those were unreachable without rebuilding the app.
 	logLevel string
-	// runDir is the instance's runtime dir: the bench configs are read by the
-	// same core as the session's, so they get the same protection (11b). Empty in
-	// tests, which take the temp dir.
-	runDir string
 }
 
 // probeHosts turns the check URLs into routing targets for PrependProbeRule,
@@ -149,8 +143,8 @@ func buildProfileBenchConfig(p subscription.Profile, ports portPair, logLevel st
 // measureOne times one server and records why it failed. The column has room
 // for one word (see BenchmarkResult.String); the reason itself only exists here
 // and in the log, which is where a "timeout" everywhere is diagnosed from.
-func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.SubEntry, ports portPair, dir string) subscription.BenchmarkResult {
-	res := pb.measureEntry(ctx, entry, ports, dir)
+func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.SubEntry, ports portPair) subscription.BenchmarkResult {
+	res := pb.measureEntry(ctx, entry, ports)
 	switch {
 	case res.Error != nil && ctx.Err() == nil:
 		slog.Warn("ping failed", "server", entry.Remarks, "address", entry.Address, "verdict", res.String(), "error", res.Error)
@@ -163,7 +157,7 @@ func (pb *ProxyBenchmarker) measureOne(ctx context.Context, entry subscription.S
 	return res
 }
 
-func (pb *ProxyBenchmarker) measureEntry(ctx context.Context, entry subscription.SubEntry, ports portPair, dir string) subscription.BenchmarkResult {
+func (pb *ProxyBenchmarker) measureEntry(ctx context.Context, entry subscription.SubEntry, ports portPair) subscription.BenchmarkResult {
 	if err := entry.Validate(); err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
@@ -179,7 +173,7 @@ func (pb *ProxyBenchmarker) measureEntry(ctx context.Context, entry subscription
 		return subscription.BenchmarkResult{Error: err}
 	}
 	if usedProfile {
-		return pb.runAndMeasure(ctx, data, ports, dir)
+		return pb.runAndMeasure(ctx, data, ports)
 	}
 
 	entry.AllowInsecure = pb.allowInsecure
@@ -209,7 +203,7 @@ func (pb *ProxyBenchmarker) measureEntry(ctx context.Context, entry subscription
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
-	return pb.runAndMeasure(ctx, data, ports, dir)
+	return pb.runAndMeasure(ctx, data, ports)
 }
 
 // buildSingleBenchConfig builds the session's own config for one server, pinned
@@ -236,8 +230,8 @@ func (pb *ProxyBenchmarker) buildSingleBenchConfig(entry subscription.SubEntry, 
 }
 
 // measureProfile times the profile as a whole, through its own balancer.
-func (pb *ProxyBenchmarker) measureProfile(ctx context.Context, p subscription.Profile, ports portPair, dir string) subscription.BenchmarkResult {
-	res := pb.measureProfileEntry(ctx, p, ports, dir)
+func (pb *ProxyBenchmarker) measureProfile(ctx context.Context, p subscription.Profile, ports portPair) subscription.BenchmarkResult {
+	res := pb.measureProfileEntry(ctx, p, ports)
 	switch {
 	case res.Error != nil && ctx.Err() == nil:
 		slog.Warn("ping failed", "profile", p.Name, "verdict", res.String(), "error", res.Error)
@@ -247,26 +241,26 @@ func (pb *ProxyBenchmarker) measureProfile(ctx context.Context, p subscription.P
 	return res
 }
 
-func (pb *ProxyBenchmarker) measureProfileEntry(ctx context.Context, p subscription.Profile, ports portPair, dir string) subscription.BenchmarkResult {
+func (pb *ProxyBenchmarker) measureProfileEntry(ctx context.Context, p subscription.Profile, ports portPair) subscription.BenchmarkResult {
 	// A bare link carries no panel config: it is a single server wearing a
 	// profile's clothes, so measure it as one.
 	if len(p.Raw) == 0 {
 		if len(p.Entries) == 0 {
 			return subscription.BenchmarkResult{Error: fmt.Errorf("профиль без серверов")}
 		}
-		return pb.measureOne(ctx, p.Entries[0], ports, dir)
+		return pb.measureOne(ctx, p.Entries[0], ports)
 	}
 
 	data, err := buildProfileBenchConfig(p, ports, pb.logLevel, pb.probeHosts)
 	if err != nil {
 		return subscription.BenchmarkResult{Error: err}
 	}
-	return pb.runAndMeasure(ctx, data, ports, dir)
+	return pb.runAndMeasure(ctx, data, ports)
 }
 
 // runAndMeasure starts xray on the given config and times a single request
 // through its http inbound.
-func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, ports portPair, dir string) subscription.BenchmarkResult {
+func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, ports portPair) subscription.BenchmarkResult {
 	// A01, E03: whichever builder above produced the config, the core gets it
 	// only after the same final step as the session's.
 	cfgJSON, err := finalizeConfig(cfgJSON, pb.allowInsecure)
@@ -274,15 +268,9 @@ func (pb *ProxyBenchmarker) runAndMeasure(ctx context.Context, cfgJSON []byte, p
 		return subscription.BenchmarkResult{Error: err}
 	}
 
-	tmpFile := filepath.Join(dir, fmt.Sprintf("xray-bench-%d-%d.json", ports.socks, ports.http))
-	// H-2: bench configs carry the same secrets as the main config; keep them
-	// 0600 inside a private 0700 dir instead of world-readable /tmp.
-	if err := os.WriteFile(tmpFile, cfgJSON, 0600); err != nil {
-		return subscription.BenchmarkResult{Error: err}
-	}
-	defer func() { _ = os.Remove(tmpFile) }()
-
-	runner := xray.New(pb.xrayBinary, tmpFile)
+	// The config carries the same secrets as the session's and goes to the core
+	// the same way: on stdin, never through the disk (H01).
+	runner := xray.New(pb.xrayBinary, cfgJSON)
 	// P-1: propagate ctx so Ctrl+C tears down the xray instance mid-measure.
 	if err := runner.Start(ctx); err != nil {
 		return subscription.BenchmarkResult{Error: err}
@@ -406,26 +394,16 @@ func (pb *ProxyBenchmarker) RunProfiles(ctx context.Context, profiles []subscrip
 	return runBatch(ctx, pb, profiles, pb.measureProfile, onResult)
 }
 
-// runBatch measures items concurrently into a private temp dir. Servers and
-// profiles differ only in how one item is measured, so everything around that —
-// the temp dir, the worker pool, the result plumbing — is shared.
+// runBatch measures items concurrently. Servers and profiles differ only in
+// how one item is measured, so everything around that — the worker pool, the
+// result plumbing — is shared.
 func runBatch[T any](
 	ctx context.Context,
 	pb *ProxyBenchmarker,
 	items []T,
-	measure func(context.Context, T, portPair, string) subscription.BenchmarkResult,
+	measure func(context.Context, T, portPair) subscription.BenchmarkResult,
 	onResult func(subscription.BenchmarkResult),
 ) []subscription.BenchmarkResult {
-	dir, err := os.MkdirTemp(pb.runDir, "xray-bench-*")
-	if err != nil {
-		results := make([]subscription.BenchmarkResult, len(items))
-		for i := range results {
-			results[i] = subscription.BenchmarkResult{Index: i, Error: err}
-		}
-		return results
-	}
-	defer func() { _ = os.RemoveAll(dir) }()
-
 	results := make([]subscription.BenchmarkResult, len(items))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, pb.concurrency)
@@ -449,7 +427,7 @@ func runBatch[T any](
 				if err != nil {
 					result = subscription.BenchmarkResult{Error: err}
 				} else {
-					result = measure(ctx, items[idx], ports, dir)
+					result = measure(ctx, items[idx], ports)
 				}
 			}
 			result.Index = idx

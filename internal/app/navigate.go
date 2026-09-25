@@ -327,7 +327,6 @@ func (a *App) selectFromList(ctx context.Context) (*target, error) {
 	}
 
 	pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
-	pb.runDir = a.runDir
 	action, profIdx, entry, filter, err := tui.SelectList(
 		ctx, a.nav.profiles, lastAddress, lastPort, a.nav.profIdx, a.nav.filter,
 		a.nav.pings, a.nav.profPings, refresh, pb.Run, pb.RunProfiles,

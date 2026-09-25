@@ -2,6 +2,7 @@ package xray
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -19,8 +20,12 @@ import (
 )
 
 type Runner struct {
-	binary  string
-	config  string
+	binary string
+	// config is the core's config, handed to it on stdin (`-c stdin:`) at every
+	// start. It never touches the disk: a file of it was one more copy of the
+	// server's keys to protect, clean up after a crash, and keep out of reach
+	// of other users of the machine (H01).
+	config  []byte
 	mu      sync.Mutex
 	cmd     *exec.Cmd
 	restart bool // set by RequestRestart, consumed by RunWithRetry
@@ -32,9 +37,12 @@ type Runner struct {
 
 var osExecutable = os.Executable
 
-func New(binary, configPath string) *Runner {
-	return &Runner{binary: binary, config: configPath}
+func New(binary string, config []byte) *Runner {
+	return &Runner{binary: binary, config: config}
 }
+
+// stdinConfig is how the core is told to read its config from stdin.
+const stdinConfig = "stdin:"
 
 // FindBinary locates the xray executable next to our own binary, in bin/ beside
 // it, or on PATH. H-3: the current working directory is deliberately excluded so
@@ -121,7 +129,8 @@ func (r *Runner) Start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.cmd = exec.CommandContext(ctx, r.binary, "run", "-c", r.config) //nolint:gosec // G204: argument vector, no shell: the core on our own config
+	r.cmd = exec.CommandContext(ctx, r.binary, "run", "-c", stdinConfig) //nolint:gosec // G204: argument vector, no shell: the core on our own config
+	r.cmd.Stdin = bytes.NewReader(r.config)
 	prepareChild(r.cmd)
 
 	stdout, err := r.cmd.StdoutPipe()
@@ -211,7 +220,9 @@ func (r *Runner) takeRestart() bool {
 // TestConfig validates the config without starting the tunnel. A failure here
 // is a deterministic config error and must not be retried.
 func (r *Runner) TestConfig(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, r.binary, "run", "-test", "-c", r.config).CombinedOutput() //nolint:gosec // G204: argument vector, no shell: the core on our own config
+	cmd := exec.CommandContext(ctx, r.binary, "run", "-test", "-c", stdinConfig) //nolint:gosec // G204: argument vector, no shell: the core on our own config
+	cmd.Stdin = bytes.NewReader(r.config)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("config test failed: %w\n%s", err, lastLines(out, 10))
 	}

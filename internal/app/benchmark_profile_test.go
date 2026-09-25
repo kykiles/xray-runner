@@ -85,7 +85,7 @@ func TestBuildProfileBenchConfigKeepsBalancerAndRouting(t *testing.T) {
 // through the profile-merge path, which has no config to merge.
 func TestMeasureProfileWithoutRawRejectsEmptyProfile(t *testing.T) {
 	pb := NewProxyBenchmarker(nil, "", benchTestConfig(0))
-	r := pb.measureProfile(t.Context(), subscription.Profile{}, portPair{}, t.TempDir())
+	r := pb.measureProfile(t.Context(), subscription.Profile{}, portPair{})
 	if r.Error == nil {
 		t.Fatal("measureProfile() error = nil, want an error for a profile with no servers")
 	}

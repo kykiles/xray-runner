@@ -10,7 +10,5 @@
 //
 // They change the machine's routes and proxy settings while they run and put
 // both back; run them on a machine you can afford to lose the network on for a
-// minute, not on one you are working on remotely. If ordinary users can take
-// over the Windows temp dir (GitHub's images grant them full control), the
-// tests reset it to the Windows default and leave it so.
+// minute, not on one you are working on remotely.
 package e2e

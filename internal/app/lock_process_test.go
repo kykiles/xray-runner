@@ -21,33 +21,31 @@ const lockHelperEnv = "XRAY_RUNNER_LOCK_HELPER"
 
 // TestLockHelperProcess is not a test but one contender, started by the tests
 // below with its directory in lockHelperEnv. It waits on stdin for the start,
-// claims the install and says how it went on stdout. A winner writes its config,
-// names it, and holds the lock until stdin closes; a loser cleans up and exits.
+// takes the lock and says how it went on stdout. A winner leaves a file of its
+// own beside the lock, names it, and holds the lock until stdin closes; a loser
+// cleans up and exits.
 func TestLockHelperProcess(t *testing.T) {
 	dir := os.Getenv(lockHelperEnv)
 	if dir == "" {
 		t.Skip("helper process for the lock tests")
 	}
-	// The contender's runtime dir is the parent's concern no more than its own:
-	// a process of its own, it would take the machine's (an elevated run's is the
-	// system temp) and be refused by that, not by the lock.
-	isolateRuntime(t)
 	a := newLockApp(dir)
 	in := bufio.NewReader(os.Stdin)
 	fmt.Println("ready")
 	if _, err := in.ReadString('\n'); err != nil {
 		os.Exit(2)
 	}
-	if err := a.claimInstance(); err != nil {
+	if err := a.acquireLock(); err != nil {
 		fmt.Println("refused")
 		a.cleanup()
 		os.Exit(0)
 	}
-	if err := os.WriteFile(a.tmpFile, []byte(configOf(os.Getpid())), 0o600); err != nil {
+	own := filepath.Join(dir, "owner-"+strconv.Itoa(os.Getpid()))
+	if err := os.WriteFile(own, []byte(configOf(os.Getpid())), 0o600); err != nil {
 		fmt.Println("error", err)
 		os.Exit(2)
 	}
-	fmt.Println("won", a.tmpFile)
+	fmt.Println("won", own)
 	_, _ = io.Copy(io.Discard, in)
 	a.cleanup()
 	os.Exit(0)
@@ -126,11 +124,9 @@ func (c *contender) wait(t *testing.T) {
 }
 
 // Contenders started together on one install: exactly one owns the lock, the
-// others leave its config alone — once they are gone it is still where the
-// owner's core reads it on a restart. When the owner is killed, with no
-// cleanup, the next run gets the lock.
+// others leave its files alone. When the owner is killed, with no cleanup, the
+// next run gets the lock.
 func TestAcquireLock_ProcessesContend(t *testing.T) {
-	isolateRuntime(t)
 	dir := t.TempDir()
 	cs := make([]*contender, 8)
 	for i := range cs {
@@ -163,8 +159,6 @@ func TestAcquireLock_ProcessesContend(t *testing.T) {
 
 	_ = winner.cmd.Process.Kill()
 	_ = winner.cmd.Wait()
-	// Killed, the owner leaves its runtime dir behind.
-	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(config)) })
 
 	// Linux lets a dead process's lock go by the time Wait returns; Windows only
 	// promises to do it "depending on available system resources", so a refusal

@@ -29,6 +29,7 @@ func buildSessionXray(t *testing.T) string {
 	src := `package main
 
 import (
+	"io"
 	"os"
 	"time"
 )
@@ -44,7 +45,8 @@ func main() {
 		}
 	}
 	if rec := os.Getenv("MOCK_XRAY_RECORD"); rec != "" {
-		cfg, _ := os.ReadFile(os.Args[len(os.Args)-1])
+		// The config comes on stdin ("-c stdin:"), the way the real core reads it.
+		cfg, _ := io.ReadAll(os.Stdin)
 		_ = os.WriteFile(rec, cfg, 0600)
 	}
 	if os.Getenv("MOCK_XRAY_DIE") == "1" {
@@ -78,7 +80,6 @@ func newCoreSessionApp(t *testing.T, unrouted *int, healthUp chan<- struct{}) *A
 	a := newTemplateApp(t)
 	a.mode = "tun"
 	a.binary = buildSessionXray(t)
-	a.tmpFile = filepath.Join(t.TempDir(), "xray_config.json")
 	a.cfg.HealthCheckURLs = []string{"http://127.0.0.1:1/"}
 	a.interfaces = func() ([]net.Interface, error) {
 		return []net.Interface{{Name: "xray-tun", Flags: net.FlagUp}}, nil

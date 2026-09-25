@@ -66,7 +66,7 @@ func main() {
 	slog.SetDefault(slog.New(h))
 	t.Cleanup(func() { slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil))) })
 
-	r := New(binary, filepath.Join(dir, "config.json"))
+	r := New(binary, []byte("{}"))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := r.Start(ctx); err != nil {

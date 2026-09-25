@@ -48,10 +48,9 @@ func main() {
 
 func TestRunnerStartStop(t *testing.T) {
 	mockBinary := buildMockXray(t, 0, 1*time.Second)
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(configPath, []byte("{}"), 0644)
+	config := []byte("{}")
 
-	r := New(mockBinary, configPath)
+	r := New(mockBinary, config)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -76,10 +75,9 @@ func TestRunnerStopThenWaitReapsProcess(t *testing.T) {
 		t.Skip("process state is read from /proc")
 	}
 	mockBinary := buildMockXray(t, 0, 30*time.Second)
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(configPath, []byte("{}"), 0644)
+	config := []byte("{}")
 
-	r := New(mockBinary, configPath)
+	r := New(mockBinary, config)
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -114,10 +112,9 @@ func procState(pid int) (string, bool) {
 
 func TestRunnerRunWithRetry(t *testing.T) {
 	mockBinary := buildMockXray(t, 1, 100*time.Millisecond)
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(configPath, []byte("{}"), 0644)
+	config := []byte("{}")
 
-	r := New(mockBinary, configPath)
+	r := New(mockBinary, config)
 
 	// Should give up after 3 retries for a constantly crashing binary
 	err := r.RunWithRetry(context.Background(), 3)
@@ -130,10 +127,9 @@ func TestRunnerRunWithRetry(t *testing.T) {
 // for it left the status screen saying "connected" in front of nothing.
 func TestRunnerRunWithRetryImmediateCleanExitFails(t *testing.T) {
 	mockBinary := buildMockXray(t, 0, 500*time.Millisecond)
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(configPath, []byte("{}"), 0644)
+	config := []byte("{}")
 
-	r := New(mockBinary, configPath)
+	r := New(mockBinary, config)
 	if err := r.RunWithRetry(context.Background(), 3); err == nil {
 		t.Fatal("a core that exited 0 by itself was taken for a clean shutdown")
 	}
@@ -145,10 +141,9 @@ func TestRunnerRunWithRetryRestartsCleanExit(t *testing.T) {
 	counter := filepath.Join(t.TempDir(), "count")
 	t.Setenv("XRAY_COUNTER", counter)
 	mockBinary := buildCountingXray(t, 2100*time.Millisecond)
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(configPath, []byte("{}"), 0644)
+	config := []byte("{}")
 
-	r := New(mockBinary, configPath)
+	r := New(mockBinary, config)
 	err := r.RunWithRetry(context.Background(), 2)
 	if err == nil {
 		t.Fatal("RunWithRetry returned nil after the core kept exiting")
@@ -251,10 +246,9 @@ func TestRunnerRequestRestart(t *testing.T) {
 	counter := filepath.Join(t.TempDir(), "count")
 	t.Setenv("XRAY_COUNTER", counter)
 	mockBinary := buildSignalXray(t)
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(configPath, []byte("{}"), 0644)
+	config := []byte("{}")
 
-	r := New(mockBinary, configPath)
+	r := New(mockBinary, config)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -293,10 +287,9 @@ func waitFor(t *testing.T, cond func() bool) {
 // fatal and returns without burning through the retry backoff.
 func TestRunnerImmediateExitFatal(t *testing.T) {
 	mockBinary := buildMockXray(t, 1, 50*time.Millisecond)
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(configPath, []byte("{}"), 0644)
+	config := []byte("{}")
 
-	r := New(mockBinary, configPath)
+	r := New(mockBinary, config)
 	start := time.Now()
 	err := r.RunWithRetry(context.Background(), 5)
 	if err == nil {
@@ -308,16 +301,15 @@ func TestRunnerImmediateExitFatal(t *testing.T) {
 }
 
 func TestRunnerTestConfig(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(configPath, []byte("{}"), 0644)
+	config := []byte("{}")
 
 	okBinary := buildMockXray(t, 0, 0)
-	if err := New(okBinary, configPath).TestConfig(context.Background()); err != nil {
+	if err := New(okBinary, config).TestConfig(context.Background()); err != nil {
 		t.Fatalf("TestConfig ok binary: %v", err)
 	}
 
 	badBinary := buildMockXray(t, 1, 0)
-	if err := New(badBinary, configPath).TestConfig(context.Background()); err == nil {
+	if err := New(badBinary, config).TestConfig(context.Background()); err == nil {
 		t.Fatal("TestConfig expected error for failing binary")
 	}
 }
@@ -480,16 +472,13 @@ func (h *countingHandler) count() int {
 func TestRunnerDrainsOutputBeforeWaitReturns(t *testing.T) {
 	const lines = 4000
 	binary := buildChattyXray(t, lines)
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(configPath, []byte("{}"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	config := []byte("{}")
 
 	h := &countingHandler{}
 	slog.SetDefault(slog.New(h))
 	t.Cleanup(func() { slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil))) })
 
-	r := New(binary, configPath)
+	r := New(binary, config)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

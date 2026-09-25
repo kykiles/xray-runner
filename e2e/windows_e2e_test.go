@@ -53,7 +53,6 @@ func TestWindowsEndToEnd(t *testing.T) {
 	}
 	e := newEnv(t, coreDir)
 
-	t.Run("loose Windows Temp", e.testLooseWindowsTemp)
 	t.Run("proxy", e.testProxy)
 	t.Run("tun", e.testTun)
 	t.Run("killed app", e.testKilledApp)
@@ -83,55 +82,6 @@ func newEnv(t *testing.T, coreDir string) *env {
 	e.server = startServer(t, coreDir, logDir, alias)
 	e.link = fmt.Sprintf("vless://%s@%s:%d?type=tcp&security=none&encryption=none#e2e", serverUUID, serverAddr, e.server.port)
 	return e
-}
-
-// testLooseWindowsTemp: an elevated run keeps its config in the Windows temp
-// dir, and refuses one that ordinary users could rename out from under the
-// running core (F07). GitHub's images grant Users full control of it; on those
-// the refusal is checked for real. Either way the Windows default goes back on
-// afterwards — Users may add entries there, not take it over — so the rest can
-// run.
-func (e *env) testLooseWindowsTemp(t *testing.T) {
-	temp := filepath.Join(os.Getenv("SystemRoot"), "Temp")
-	defer restoreWindowsTempACL(t, temp)
-	t.Logf("ACL of %s:\n%s", temp, icacls(t, temp))
-
-	r := e.startApp(t, "loose-temp", "proxy")
-	if r.connectedOrExited(t, 90*time.Second) {
-		_ = r.stop(t)
-		t.Skipf("%s is not open to Users on this machine; nothing to refuse", temp)
-	}
-	if code := r.cmd.ProcessState.ExitCode(); code != 1 {
-		t.Errorf("exit code %d, want 1", code)
-	}
-	if log := tail(r.log, 20); !strings.Contains(log, "ненадёжен") {
-		t.Errorf("the app did not refuse %s as untrusted:\n%s", temp, log)
-	}
-}
-
-// restoreWindowsTempACL puts back the Windows default for Users on the Windows
-// temp dir: traverse, add files and folders, nothing more.
-func restoreWindowsTempACL(t *testing.T, temp string) {
-	t.Helper()
-	const users = "*S-1-5-32-545"
-	for _, args := range [][]string{
-		{temp, "/remove:g", users},
-		{temp, "/grant", users + ":(CI)(S,WD,AD,X)"},
-	} {
-		if out, err := exec.Command("icacls", args...).CombinedOutput(); err != nil {
-			t.Fatalf("icacls %v: %v\n%s", args, err, out)
-		}
-	}
-	t.Logf("ACL of %s now:\n%s", temp, icacls(t, temp))
-}
-
-func icacls(t *testing.T, path string) string {
-	t.Helper()
-	out, err := exec.Command("icacls", path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("icacls %s: %v\n%s", path, err, out)
-	}
-	return strings.TrimSpace(string(out))
 }
 
 // testProxy: the system proxy points at the app while the session is up,
@@ -301,25 +251,6 @@ func (r *appRun) exited() bool {
 		return true
 	default:
 		return false
-	}
-}
-
-// connectedOrExited waits until the session is up (true) or the app has
-// exited (false).
-func (r *appRun) connectedOrExited(t *testing.T, timeout time.Duration) bool {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		if data, err := os.ReadFile(r.log); err == nil && strings.Contains(string(data), "msg=connected") {
-			return true
-		}
-		if r.exited() {
-			return false
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s neither connected nor exited within %s", r.name, timeout)
-		}
-		time.Sleep(250 * time.Millisecond)
 	}
 }
 

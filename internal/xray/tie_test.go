@@ -52,7 +52,7 @@ func TestCoreDiesWithItsParent(t *testing.T) {
 
 // tieParent starts a core the way a session does and then waits to be killed.
 func tieParent() {
-	r := New(os.Getenv("XRAY_TIE_CORE"), "unused.json")
+	r := New(os.Getenv("XRAY_TIE_CORE"), []byte("{}"))
 	if err := r.Start(context.Background()); err != nil {
 		os.Exit(3)
 	}

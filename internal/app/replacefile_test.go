@@ -12,17 +12,25 @@ import (
 	"xray-runner/internal/subscription"
 )
 
-// A04: the config path is predictable, so a link can be waiting there before
-// the tool — possibly running as root — writes the config. The write replaces
-// the name itself: whatever sits on the other end of a link keeps its bytes.
+// A04: a file the tool writes under a predictable name — as root in TUN mode —
+// may have a link waiting there. replaceInRoot replaces the name itself:
+// whatever sits on the other end of a link keeps its bytes. saveConfig writes
+// through it; these drive it directly, by path.
 
-// prettyConfig is what writeConfigJSON stores for `{"log":{}}`.
-const prettyConfig = "{\n  \"log\": {}\n}"
+// replaceFile is replaceInRoot for a path, the way the tests drive it.
+func replaceFile(path string, data []byte) error {
+	r, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = r.Close() }()
+	return replaceInRoot(r, filepath.Base(path), data, nil)
+}
 
-func newConfigApp(t *testing.T) (*App, string) {
+func newReplacePath(t *testing.T) (path, dir string) {
 	t.Helper()
-	dir := t.TempDir()
-	return &App{tmpFile: filepath.Join(dir, "xray_config.json")}, dir
+	dir = t.TempDir()
+	return filepath.Join(dir, "config.json"), dir
 }
 
 // plantLink makes path a link of the given kind to victim, skipping where the
@@ -79,67 +87,54 @@ func assertDirHolds(t *testing.T, dir string, names ...string) {
 	}
 }
 
-func TestWriteConfigJSON_LinkedNameIsReplaced(t *testing.T) {
+func TestReplaceFile_LinkedNameIsReplaced(t *testing.T) {
 	for _, kind := range []string{"hardlink", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
-			a, dir := newConfigApp(t)
+			path, dir := newReplacePath(t)
 			victim := filepath.Join(dir, "victim")
 			if err := os.WriteFile(victim, []byte("original"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			plantLink(t, kind, victim, a.tmpFile)
+			plantLink(t, kind, victim, path)
 
-			if err := a.writeConfigJSON([]byte(`{"log":{}}`)); err != nil {
-				t.Fatalf("writeConfigJSON: %v", err)
+			if err := replaceFile(path, []byte("new")); err != nil {
+				t.Fatalf("replaceFile: %v", err)
 			}
-			assertReplaced(t, a.tmpFile, prettyConfig, victim)
-			assertDirHolds(t, dir, "victim", "xray_config.json")
+			assertReplaced(t, path, "new", victim)
+			assertDirHolds(t, dir, "victim", "config.json")
 		})
 	}
 }
 
-// 0600 used to apply only to a file WriteFile created; an older config left
+// 0600 used to apply only to a file WriteFile created; an older file left
 // readable by everyone kept its mode and got the new secrets written into it.
-func TestWriteConfigJSON_LooseModeBecomesOwnerOnly(t *testing.T) {
+func TestReplaceFile_LooseModeBecomesOwnerOnly(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mode bits are not Windows access control")
 	}
-	a, _ := newConfigApp(t)
-	if err := os.WriteFile(a.tmpFile, []byte("old-config"), 0o644); err != nil {
+	path, _ := newReplacePath(t)
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(a.tmpFile, 0o644); err != nil { // past the umask
+	if err := os.Chmod(path, 0o644); err != nil { // past the umask
 		t.Fatal(err)
 	}
 
-	if err := a.writeConfigJSON([]byte(`{"log":{}}`)); err != nil {
-		t.Fatalf("writeConfigJSON: %v", err)
+	if err := replaceFile(path, []byte("new")); err != nil {
+		t.Fatalf("replaceFile: %v", err)
 	}
-	fi, err := os.Stat(a.tmpFile)
+	fi, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if perm := fi.Mode().Perm(); perm != 0o600 {
-		t.Errorf("config mode = %v, want 0600", perm)
+		t.Errorf("mode = %v, want 0600", perm)
 	}
 }
 
-func TestWriteConfigJSON_InvalidJSONChangesNothing(t *testing.T) {
-	a, dir := newConfigApp(t)
-	if err := os.WriteFile(a.tmpFile, []byte("old-config"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := a.writeConfigJSON([]byte(`{"log":`)); err == nil {
-		t.Fatal("writeConfigJSON accepted broken JSON")
-	}
-	assertFileHolds(t, a.tmpFile, "old-config")
-	assertDirHolds(t, dir, "xray_config.json")
-}
-
-// A write that fails at any step leaves the previous config in place — the
-// running core rereads it on its next restart — and takes its temp with it.
-func TestWriteConfigJSON_FailedStepKeepsOldFile(t *testing.T) {
+// A write that fails at any step leaves the previous file in place and takes
+// its temp with it.
+func TestReplaceFile_FailedStepKeepsOldFile(t *testing.T) {
 	injected := errors.New("injected failure")
 	for _, c := range []struct {
 		step string
@@ -157,16 +152,15 @@ func TestWriteConfigJSON_FailedStepKeepsOldFile(t *testing.T) {
 			t.Cleanup(func() { stagedWrite, stagedSync, stagedClose, publishStaged = w, s, cl, p })
 			c.fail()
 
-			a, dir := newConfigApp(t)
-			if err := os.WriteFile(a.tmpFile, []byte("old-config"), 0o600); err != nil {
+			path, dir := newReplacePath(t)
+			if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			err := a.writeConfigJSON([]byte(`{"log":{}}`))
-			if !errors.Is(err, injected) {
+			if err := replaceFile(path, []byte("new")); !errors.Is(err, injected) {
 				t.Fatalf("err = %v, want the injected %s failure", err, c.step)
 			}
-			assertFileHolds(t, a.tmpFile, "old-config")
-			assertDirHolds(t, dir, "xray_config.json")
+			assertFileHolds(t, path, "old")
+			assertDirHolds(t, dir, "config.json")
 		})
 	}
 }

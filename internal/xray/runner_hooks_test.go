@@ -8,7 +8,6 @@ package xray
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -37,13 +36,10 @@ func (l *hookLog) get() []string {
 	return slices.Clone(l.events)
 }
 
-func writeConfig(t *testing.T) string {
+// writeConfig is the config the mock cores are started with; they ignore it.
+func writeConfig(t *testing.T) []byte {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(p, []byte("{}"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	return p
+	return []byte("{}")
 }
 
 // assertReaped fails when pid is still a process, running or a zombie nobody

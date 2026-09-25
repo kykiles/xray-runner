@@ -1,9 +1,7 @@
 package app
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -48,8 +46,6 @@ type App struct {
 	opts          Options
 	runner        *xray.Runner
 	proxy         *system.ProxyManager
-	tmpFile       string
-	runDir        string
 	lockFile      string
 	lock          *os.File // lockFile, open while this instance holds its lock
 	binary        string
@@ -140,9 +136,9 @@ type App struct {
 
 func New(cfg *config.Config, opts Options) *App {
 	proxy := system.New()
-	// The lock stays where 11a put it, beside where config.Path finds the config,
-	// so the runs of one install still meet at one lock. The config itself no
-	// longer lives there: claimInstance makes it a dir of its own.
+	// The lock stays where 11a put it, beside where config.Path once found the
+	// core's config, so the runs of one install still meet at one lock. The
+	// config itself is no file at all now: the core reads it on stdin (H01).
 	return &App{
 		cfg:               cfg,
 		opts:              opts,
@@ -206,7 +202,7 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	// R-3: refuse to start a second instance racing over the same ports.
-	if err := a.claimInstance(); err != nil {
+	if err := a.acquireLock(); err != nil {
 		return err
 	}
 
@@ -374,37 +370,13 @@ func (a *App) cleanup() {
 	// back here, before main prints its goodbye.
 	tui.ReleaseScreen()
 	a.releaseSession()
-	// The runtime dir goes whole: claimInstance made it for this instance, and
-	// no other run and no profile has its path (11b). The path goes with it, so a
-	// second cleanup has nothing to remove. Then the lock; its handle goes with
-	// it, so a second cleanup cannot free the next owner's. The lock file itself
-	// stays — see acquireLock.
-	if a.runDir != "" {
-		_ = os.RemoveAll(a.runDir)
-		a.runDir = ""
-	}
+	// Then the lock; its handle goes with it, so a second cleanup cannot free
+	// the next owner's. The lock file itself stays — see acquireLock.
 	if a.lock != nil {
 		_ = unlock(a.lock)
 		_ = a.lock.Close()
 		a.lock = nil
 	}
-}
-
-// claimInstance takes the install's lock, then makes this instance's runtime
-// dir, where the core reads its config for the whole run, restarts included
-// (11b). In that order: a run refused by the lock leaves nothing behind, and a
-// dir made after it is this instance's alone.
-func (a *App) claimInstance() error {
-	if err := a.acquireLock(); err != nil {
-		return err
-	}
-	dir, err := createRuntimeDir()
-	if err != nil {
-		return err
-	}
-	a.runDir = dir
-	a.tmpFile = filepath.Join(dir, "xray_config.json")
-	return nil
 }
 
 // errLockBusy is tryLock's answer when another open file holds the lock.
@@ -554,19 +526,4 @@ func resolveIPs(hosts []string, v6 bool) []string {
 		}
 	}
 	return ips
-}
-
-// writeConfigJSON stores the generated config for xray to read.
-func (a *App) writeConfigJSON(raw json.RawMessage) error {
-	var pretty bytes.Buffer
-	if err := json.Indent(&pretty, raw, "", "  "); err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-	// H-2: the config holds UUIDs, passwords and keys — keep it owner-only, and
-	// never write the full (unmasked) config to the log, only its path.
-	if err := replaceFile(a.tmpFile, pretty.Bytes()); err != nil {
-		return err
-	}
-	slog.Debug("generated xray config", "path", a.tmpFile)
-	return nil
 }

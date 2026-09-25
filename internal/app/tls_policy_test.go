@@ -207,13 +207,13 @@ func TestSecurityPolicy_AmbiguousValueStopsTheSession(t *testing.T) {
 
 type benchCase struct {
 	name     string
-	measure  func(pb *ProxyBenchmarker, ports portPair, dir string) subscription.BenchmarkResult
+	measure  func(pb *ProxyBenchmarker, ports portPair) subscription.BenchmarkResult
 	insecure int
 }
 
-func measureServer(e *subscription.SubEntry) func(*ProxyBenchmarker, portPair, string) subscription.BenchmarkResult {
-	return func(pb *ProxyBenchmarker, ports portPair, dir string) subscription.BenchmarkResult {
-		return pb.measureOne(context.Background(), *e, ports, dir)
+func measureServer(e *subscription.SubEntry) func(*ProxyBenchmarker, portPair) subscription.BenchmarkResult {
+	return func(pb *ProxyBenchmarker, ports portPair) subscription.BenchmarkResult {
+		return pb.measureOne(context.Background(), *e, ports)
 	}
 }
 
@@ -228,13 +228,13 @@ var benchCases = []benchCase{
 	{"outbound без профиля", measureServer(rawEntry(insecureRaw)), 1},
 	{"сервер из профиля", measureServer(profileServer(chainProxy2, insecureChain)), 2},
 	{"шаблон вместо профиля без routing", measureServer(profileServer(insecureRaw, noRoutingProfile)), 1},
-	{"профиль целиком", func(pb *ProxyBenchmarker, ports portPair, dir string) subscription.BenchmarkResult {
-		return pb.measureProfile(context.Background(), subscription.Profile{Name: "Chain", Raw: json.RawMessage(insecureChain)}, ports, dir)
+	{"профиль целиком", func(pb *ProxyBenchmarker, ports portPair) subscription.BenchmarkResult {
+		return pb.measureProfile(context.Background(), subscription.Profile{Name: "Chain", Raw: json.RawMessage(insecureChain)}, ports)
 	}, 2},
 }
 
-// The ping runs its own configs; what is checked is the file the core was
-// started with, not what a builder returned.
+// The ping runs its own configs; what is checked is the config the core was
+// handed, not what a builder returned.
 func TestSecurityPolicy_BenchmarkConfigReachesCore(t *testing.T) {
 	bin := buildSessionXray(t)
 	tc, err := xraycfg.LoadTemplate(filepath.Join(t.TempDir(), "absent.json"))
@@ -255,7 +255,7 @@ func TestSecurityPolicy_BenchmarkConfigReachesCore(t *testing.T) {
 				}
 
 				// The mock core never listens, so every measurement ends here.
-				res := c.measure(pb, ports, t.TempDir())
+				res := c.measure(pb, ports)
 				if !errors.Is(res.Error, subscription.ErrCoreNotReady) {
 					t.Fatalf("result = %v, want the core started and never ready", res.Error)
 				}
@@ -285,7 +285,7 @@ func TestSecurityPolicy_BenchmarkRefusesBeforeStart(t *testing.T) {
 		t.Fatalf("freePortPair: %v", err)
 	}
 	bad := `{"outbounds": [{"tag": "proxy", "streamSettings": {"security": "tls", "tlsSettings": {"allowInsecure": "true"}}}]}`
-	res := pb.runAndMeasure(context.Background(), []byte(bad), ports, t.TempDir())
+	res := pb.runAndMeasure(context.Background(), []byte(bad), ports)
 	if res.Error == nil || !strings.Contains(res.Error.Error(), "allowInsecure") {
 		t.Errorf("result = %v, want a refusal naming allowInsecure", res.Error)
 	}
@@ -319,7 +319,7 @@ func TestSecurityPolicy_CoreWithoutInsecureIsExplained(t *testing.T) {
 		if err != nil {
 			t.Fatalf("freePortPair: %v", err)
 		}
-		res := pb.runAndMeasure(context.Background(), []byte(`{}`), ports, t.TempDir())
+		res := pb.runAndMeasure(context.Background(), []byte(`{}`), ports)
 		if !errors.Is(res.Error, subscription.ErrConfigRejected) || res.String() != "config" {
 			t.Fatalf("result = %v (%q), want a rejected config", res.Error, res.String())
 		}
@@ -335,7 +335,7 @@ func TestSecurityPolicy_CoreWithoutInsecureIsExplained(t *testing.T) {
 		if err != nil {
 			t.Fatalf("freePortPair: %v", err)
 		}
-		res := pb.runAndMeasure(context.Background(), []byte(`{}`), ports, t.TempDir())
+		res := pb.runAndMeasure(context.Background(), []byte(`{}`), ports)
 		if res.Error == nil || strings.Contains(res.Error.Error(), insecureHint) {
 			t.Errorf("error = %v, want the refusal without the allowInsecure hint", res.Error)
 		}
