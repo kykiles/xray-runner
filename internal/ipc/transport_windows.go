@@ -230,7 +230,10 @@ func (l *pipeListener) admit(h windows.Handle) {
 		Refuse(f, why)
 		return
 	}
-	c := NewConn(f, peer)
+	c := conns.admit(f, peer)
+	if c == nil {
+		return
+	}
 	select {
 	case l.conns <- c:
 	case <-l.done:
@@ -391,9 +394,33 @@ type pipeConn struct {
 	mu      sync.RWMutex // held for reading by each operation, for writing by Close
 	closing atomic.Bool
 	closed  bool
+
+	// The deadlines as UnixNano, 0 for none. An operation takes its own when
+	// it starts: one set while it is under way holds for the next.
+	readDeadline, writeDeadline atomic.Int64
 }
 
 func newPipeConn(h windows.Handle) *pipeConn { return &pipeConn{h: h} }
+
+// SetReadDeadline and SetWriteDeadline are those of net.Conn, save that an
+// operation already under way keeps the deadline it started with. One that
+// runs past it is cancelled and fails with os.ErrDeadlineExceeded.
+func (p *pipeConn) SetReadDeadline(t time.Time) error {
+	p.readDeadline.Store(unixNano(t))
+	return nil
+}
+
+func (p *pipeConn) SetWriteDeadline(t time.Time) error {
+	p.writeDeadline.Store(unixNano(t))
+	return nil
+}
+
+func unixNano(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
+}
 
 func (p *pipeConn) Read(b []byte) (int, error) {
 	n, err := p.do(b, false)
@@ -421,6 +448,16 @@ func (p *pipeConn) do(b []byte, write bool) (int, error) {
 	if p.closed || p.closing.Load() {
 		return 0, os.ErrClosed
 	}
+	deadline := p.readDeadline.Load()
+	if write {
+		deadline = p.writeDeadline.Load()
+	}
+	var wait time.Duration
+	if deadline != 0 {
+		if wait = time.Until(time.Unix(0, deadline)); wait <= 0 {
+			return 0, os.ErrDeadlineExceeded
+		}
+	}
 	if len(b) == 0 {
 		return 0, nil
 	}
@@ -429,18 +466,39 @@ func (p *pipeConn) do(b []byte, write bool) (int, error) {
 		return 0, err
 	}
 	defer func() { _ = windows.CloseHandle(ev) }()
-	ov := windows.Overlapped{HEvent: ev}
+	// On the heap: the kernel writes to it until the operation is done, and
+	// a goroutine's stack may move meanwhile.
+	ov := &windows.Overlapped{HEvent: ev}
 	var n uint32
 	if write {
-		err = windows.WriteFile(p.h, b, &n, &ov)
+		err = windows.WriteFile(p.h, b, &n, ov)
 	} else {
-		err = windows.ReadFile(p.h, b, &n, &ov)
+		err = windows.ReadFile(p.h, b, &n, ov)
 	}
+	var expired atomic.Bool
 	if errors.Is(err, windows.ERROR_IO_PENDING) {
-		err = windows.GetOverlappedResult(p.h, &ov, &n, true)
+		var t *time.Timer
+		fired := make(chan struct{})
+		if wait > 0 {
+			// Only this operation is cancelled, and while it holds the lock,
+			// so the handle is still open.
+			t = time.AfterFunc(wait, func() {
+				expired.Store(true)
+				_ = windows.CancelIoEx(p.h, ov)
+				close(fired)
+			})
+		}
+		err = windows.GetOverlappedResult(p.h, ov, &n, true)
+		if t != nil && !t.Stop() {
+			<-fired
+		}
 	}
-	if err != nil && p.closing.Load() {
+	switch {
+	case err == nil:
+	case p.closing.Load():
 		err = os.ErrClosed
+	case expired.Load():
+		err = os.ErrDeadlineExceeded
 	}
 	return int(n), err
 }

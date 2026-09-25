@@ -5,11 +5,13 @@ package ipc
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -148,5 +150,93 @@ func TestListenActivatedFixesRuntimeDir(t *testing.T) {
 	}
 	if st.Mode().Perm() != 0o755 {
 		t.Fatalf("directory mode %v, want 0755", st.Mode().Perm())
+	}
+}
+
+// Over the real socket: a client that sends and stops reading fills the
+// socket's buffer; the write deadline drops it, and Close frees the handler
+// without waiting for that.
+func TestUnixConnClientThatDoesNotRead(t *testing.T) {
+	for _, name := range []string{"deadline", "close"} {
+		t.Run(name, func(t *testing.T) {
+			if name == "deadline" {
+				setFor(t, &writeWait, 200*time.Millisecond)
+			}
+			l := testListener(t, os.Getgid())
+			accepted := make(chan *Conn, 1)
+			go func() {
+				if c, err := l.Accept(); err == nil {
+					accepted <- c
+				}
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			rw, err := dial(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = rw.Close() }()
+			c := <-accepted
+			handled := make(chan struct{})
+			go func() {
+				serveLike(c)
+				close(handled)
+			}()
+			go func() {
+				for id := uint64(1); ; id++ {
+					if WriteMessage(rw, Message{ID: id, Type: TypeStatus}) != nil {
+						return
+					}
+				}
+			}()
+			if name == "close" {
+				time.Sleep(300 * time.Millisecond)
+				c.Close()
+			}
+			select {
+			case <-handled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the handler is held by a client that does not read")
+			}
+			select {
+			case <-c.wrote:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the writer is held by a client that does not read")
+			}
+		})
+	}
+}
+
+// A peer that connects and says nothing, or announces a large hello, is let
+// go without holding a handler.
+func TestUnixConnHello(t *testing.T) {
+	setFor(t, &helloWait, 200*time.Millisecond)
+	l := testListener(t, os.Getgid())
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			wg.Go(func() { serveLike(c) })
+		}
+	}()
+	for _, send := range [][]byte{nil, {0, 0x40, 0, 0}} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		rw, err := dial(ctx)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if send != nil {
+			_, _ = rw.Write(send)
+		}
+		_ = rw.(*net.UnixConn).SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := ReadMessage(rw); !errors.Is(err, io.EOF) {
+			t.Fatalf("hello %v: err = %v, want the connection closed", send, err)
+		}
+		_ = rw.Close()
 	}
 }

@@ -210,7 +210,9 @@ func (u *unixListener) Accept() (*Conn, error) {
 			Refuse(c, why)
 			continue
 		}
-		return NewConn(c, peer), nil
+		if conn := conns.admit(c, peer); conn != nil {
+			return conn, nil
+		}
 	}
 }
 
