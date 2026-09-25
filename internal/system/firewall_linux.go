@@ -3,6 +3,7 @@
 package system
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -20,6 +21,14 @@ var firewallBins = []string{"iptables", "ip6tables"}
 
 // fwCmd is overridable in tests.
 var fwCmd commander = execCommander{}
+
+// ipt runs one iptables/ip6tables command. -w waits for the xtables lock: the
+// legacy backend otherwise fails at once while docker, firewalld or fail2ban
+// hold it, and a kill switch that half went in, or would not come out, is
+// worse than one that waited a moment (G08).
+func ipt(bin string, args ...string) ([]byte, error) {
+	return fwCmd.run(bin, append([]string{"-w"}, args...)...)
+}
 
 func EnableKillSwitch(cfg KillSwitchConfig) error {
 	slog.Info("enabling kill switch via iptables/ip6tables", "endpoints", len(cfg.Endpoints))
@@ -45,7 +54,9 @@ func EnableKillSwitch(cfg KillSwitchConfig) error {
 		if err := applyKillSwitch(bin, cfg); err != nil {
 			// The caller treats a failed enable as "no kill switch" and never
 			// tears it down, so a stack that did go in must come out here.
-			_ = DisableKillSwitch()
+			if derr := DisableKillSwitch(); derr != nil {
+				err = errors.Join(err, derr)
+			}
 			return err
 		}
 	}
@@ -54,7 +65,7 @@ func EnableKillSwitch(cfg KillSwitchConfig) error {
 }
 
 func applyKillSwitch(bin string, cfg KillSwitchConfig) error {
-	if out, err := fwCmd.run(bin, "-N", killSwitchChain); err != nil {
+	if out, err := ipt(bin, "-N", killSwitchChain); err != nil {
 		if !strings.Contains(string(out), "already exists") {
 			return fmt.Errorf("%s create chain: %w\n%s", bin, err, out)
 		}
@@ -101,7 +112,7 @@ func applyKillSwitch(bin string, cfg KillSwitchConfig) error {
 	)
 
 	for _, rule := range rules {
-		if out, err := fwCmd.run(bin, rule...); err != nil {
+		if out, err := ipt(bin, rule...); err != nil {
 			return fmt.Errorf("%s %s: %w\n%s", bin, rule, err, out)
 		}
 	}
@@ -133,9 +144,15 @@ func serverAcceptRule(bin string, e Endpoint) []string {
 	return []string{"-A", killSwitchChain, "-d", e.IP, "-p", proto, "--dport", strconv.Itoa(e.Port), "-j", "ACCEPT"}
 }
 
+// DisableKillSwitch takes the chain and every OUTPUT jump to it out of both
+// stacks, and fails when the chain is still there afterwards. It used to
+// report success whatever happened, so a kill switch that would not come out
+// left the machine without a network and the session none the wiser (G08).
+// Nothing there to begin with is success.
 func DisableKillSwitch() error {
 	slog.Info("disabling kill switch iptables/ip6tables rules")
 
+	var errs []error
 	for _, bin := range firewallBins {
 		if err := fwCmd.lookPath(bin); err != nil {
 			continue
@@ -143,13 +160,17 @@ func DisableKillSwitch() error {
 		// Remove every OUTPUT jump: older buggy runs could have appended the
 		// jump multiple times, so loop until the delete fails.
 		for {
-			if _, err := fwCmd.run(bin, "-D", "OUTPUT", "-j", killSwitchChain); err != nil {
+			if _, err := ipt(bin, "-D", "OUTPUT", "-j", killSwitchChain); err != nil {
 				break
 			}
 		}
-		_, _ = fwCmd.run(bin, "-F", killSwitchChain)
-		_, _ = fwCmd.run(bin, "-X", killSwitchChain)
+		_, _ = ipt(bin, "-F", killSwitchChain)
+		_, _ = ipt(bin, "-X", killSwitchChain)
+		// The deletes above fail both when there is nothing to delete and when
+		// something went wrong; only the chain's absence tells the two apart.
+		if _, err := ipt(bin, "-S", killSwitchChain); err == nil {
+			errs = append(errs, fmt.Errorf("%s: цепочка %s осталась после снятия kill switch", bin, killSwitchChain))
+		}
 	}
-
-	return nil
+	return errors.Join(errs...)
 }

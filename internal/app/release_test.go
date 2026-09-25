@@ -5,6 +5,7 @@ package app
 // so keying the teardown off a.mode leaves the other mode's setup behind.
 
 import (
+	"errors"
 	"testing"
 
 	"xray-runner/internal/system"
@@ -98,5 +99,30 @@ func TestRestoreSystemProxyRunsOnce(t *testing.T) {
 	}
 	if a.proxyTouched {
 		t.Error("proxyTouched still set after teardown")
+	}
+}
+
+// A kill switch that would not come out stays the session's: the teardown at
+// exit tries again instead of forgetting a DROP chain still in place (G08).
+func TestReleaseSession_KeepsKillSwitchItFailedToRemove(t *testing.T) {
+	calls := 0
+	a := &App{
+		killSwitchOn: true,
+		disableKillSwitch: func() error {
+			calls++
+			if calls == 1 {
+				return errors.New("iptables: цепочка XRAY_KILL осталась")
+			}
+			return nil
+		},
+	}
+
+	a.releaseSession()
+	if !a.killSwitchOn {
+		t.Fatal("killSwitchOn dropped although the chain is still in")
+	}
+	a.releaseSession()
+	if calls != 2 || a.killSwitchOn {
+		t.Errorf("after a second teardown: %d removals, killSwitchOn = %v; want 2, false", calls, a.killSwitchOn)
 	}
 }

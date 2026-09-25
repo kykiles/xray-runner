@@ -33,8 +33,11 @@ type fakeIPTables struct {
 	// failArgs makes a binary's command fail when its arguments contain the
 	// fragment, to walk a fault through every step of the enable.
 	failArgs map[string]string
-	// calls is every command run, in order, as "bin args…".
+	// calls is every command run, in order, as "bin args…", without the -w.
 	calls []string
+	// unwaited lists the commands run without -w, which the legacy backend
+	// fails at once while another program holds the xtables lock.
+	unwaited []string
 }
 
 func newFakeIPTables(bins ...string) *fakeIPTables {
@@ -59,6 +62,11 @@ func (f *fakeIPTables) lookPath(bin string) error {
 }
 
 func (f *fakeIPTables) run(bin string, args ...string) ([]byte, error) {
+	if len(args) > 0 && args[0] == "-w" {
+		args = args[1:]
+	} else {
+		f.unwaited = append(f.unwaited, bin+" "+strings.Join(args, " "))
+	}
 	cmd := strings.Join(args, " ")
 	f.calls = append(f.calls, bin+" "+cmd)
 	if frag, ok := f.failArgs[bin]; ok && strings.Contains(cmd, frag) {
@@ -113,6 +121,10 @@ func (f *fakeIPTables) run(bin string, args ...string) ([]byte, error) {
 		c.rules = nil
 	case args[0] == "-X":
 		c.exists = false
+	case args[0] == "-S":
+		if !c.exists {
+			return []byte("iptables: No chain/target/match by that name."), fmt.Errorf("exit status 1")
+		}
 	}
 	return nil, nil
 }
@@ -445,5 +457,50 @@ func TestEnableKillSwitchAcceptsEveryEndpointBeforeDropping(t *testing.T) {
 	}
 	if idx := ruleIndex(rules, "-d 203.0.113.6", "-p udp", "--dport 8443"); idx < 0 {
 		t.Errorf("hysteria2 sibling did not get a udp rule: %v", rules)
+	}
+}
+
+// Every command waits for the xtables lock: without -w the legacy backend fails
+// at once while docker or firewalld hold it (G08).
+func TestKillSwitchWaitsForTheXtablesLock(t *testing.T) {
+	f := newFakeIPTables("iptables", "ip6tables")
+	withFakeFirewall(t, f)
+
+	if err := EnableKillSwitch(ipv4Cfg); err != nil {
+		t.Fatalf("EnableKillSwitch: %v", err)
+	}
+	if err := DisableKillSwitch(); err != nil {
+		t.Fatalf("DisableKillSwitch: %v", err)
+	}
+	if len(f.unwaited) != 0 {
+		t.Errorf("commands run without -w: %q", f.unwaited)
+	}
+}
+
+// A chain that would not come out is an error: its DROP is still in OUTPUT's
+// path, and reporting success left the machine offline with nothing said (G08).
+func TestDisableKillSwitchReportsAChainLeftBehind(t *testing.T) {
+	f := newFakeIPTables("iptables", "ip6tables")
+	withFakeFirewall(t, f)
+	if err := EnableKillSwitch(ipv4Cfg); err != nil {
+		t.Fatalf("EnableKillSwitch: %v", err)
+	}
+	f.failArgs = map[string]string{"iptables": "-X"}
+
+	err := DisableKillSwitch()
+	if err == nil || !strings.Contains(err.Error(), "iptables") {
+		t.Fatalf("DisableKillSwitch err = %v, want the iptables chain reported", err)
+	}
+	if !f.chains["iptables"].exists {
+		t.Fatal("fake: the chain was expected to stay")
+	}
+}
+
+// Nothing there to begin with is not a failure: that is the clean slate
+// EnableKillSwitch starts from.
+func TestDisableKillSwitchOnACleanHost(t *testing.T) {
+	withFakeFirewall(t, newFakeIPTables("iptables", "ip6tables"))
+	if err := DisableKillSwitch(); err != nil {
+		t.Fatalf("DisableKillSwitch on a clean host: %v", err)
 	}
 }

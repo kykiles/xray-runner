@@ -1074,9 +1074,11 @@ func (a *App) releaseSession() {
 	// already names the *next* session's mode.
 	if a.killSwitchOn {
 		if err := a.disableKillSwitch(); err != nil {
+			// Still marked on, so the teardown at exit tries again.
 			slog.Warn("failed to disable kill switch", "error", err)
+		} else {
+			a.killSwitchOn = false
 		}
-		a.killSwitchOn = false
 	}
 	a.restoreSystemProxy()
 	if a.splitState() {
