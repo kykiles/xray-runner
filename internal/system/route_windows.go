@@ -28,6 +28,10 @@ var splitDefault = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/1"), netip.Must
 // the existing ::/0 on prefix length without deleting it.
 var splitDefault6 = []netip.Prefix{netip.MustParsePrefix("::/1"), netip.MustParsePrefix("8000::/1")}
 
+// HasIPv6Stack is always true here: Windows cannot run without the IPv6
+// stack, only with it unbound from an adapter.
+func HasIPv6Stack() bool { return true }
+
 // ipCmd is overridable in tests.
 var ipCmd commander = execCommander{}
 

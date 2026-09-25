@@ -436,6 +436,10 @@ var writeLockPID = func(f *os.File) error {
 	return err
 }
 
+// hasIPv6Stack decides whether a tun session gives its interface a v6 address
+// and claims IPv6; a var so tests of both answers need no such kernel.
+var hasIPv6Stack = system.HasIPv6Stack
+
 // restoreLockOwner hands the lock file back to the sudo user; a var so a test
 // can see it called without being root.
 var restoreLockOwner = system.RestoreSudoOwnerFile

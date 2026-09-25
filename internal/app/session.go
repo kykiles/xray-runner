@@ -494,7 +494,7 @@ func (a *App) buildModeSource(t *target) (json.RawMessage, sessionPorts, error) 
 		if err != nil {
 			return nil, sessionPorts{}, fmt.Errorf("найти порт для проверки связи: %w", err)
 		}
-		inbounds = []xraycfg.Inbound{xraycfg.BuildTUNInbound(), xraycfg.BuildProbeInbound(pp.http)}
+		inbounds = []xraycfg.Inbound{xraycfg.BuildTUNInbound(hasIPv6Stack()), xraycfg.BuildProbeInbound(pp.http)}
 	} else if a.split {
 		// The listeners the split-tunnel nft rules redirect into. They are added,
 		// not substituted: the SOCKS/HTTP pair still serves the system proxy, and
@@ -946,14 +946,17 @@ func (l *tunLifecycle) setUp(ctx context.Context) error {
 	// reads packets off it, but never touches the routing table, so until the
 	// routes below exist the tunnel receives no traffic at all.
 	// Every tun session claims IPv6 (A11): left alone, a v6-capable app on a
-	// dual-stack network goes around the tunnel with its real address.
+	// dual-stack network goes around the tunnel with its real address. A kernel
+	// without IPv6 has none to claim, and its interface took no v6 address.
 	if l.route == nil {
 		routeCfg := system.TunRouteConfig{
 			Iface:      xraycfg.TunInterfaceName,
 			Addr:       xraycfg.TunAddr,
 			ServerIPs:  resolveAllIPs(l.t.serverHosts()),
-			Addr6:      xraycfg.TunAddr6,
 			ServerIPs6: resolveAllIPs6(l.t.serverHosts()),
+		}
+		if hasIPv6Stack() {
+			routeCfg.Addr6 = xraycfg.TunAddr6
 		}
 		if len(routeCfg.ServerIPs) == 0 {
 			return fmt.Errorf("не удалось определить IP VPN-сервера — без него маршрутизация TUN оставит машину без сети")

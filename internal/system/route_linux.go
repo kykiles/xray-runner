@@ -50,9 +50,11 @@ var blockDefault6 = []string{"::/1", "8000::/1"}
 // without IPv6 at all. Overridable in tests.
 var ifInet6 = "/proc/net/if_inet6"
 
-// hasIPv6Stack reports whether the kernel has IPv6: without it there is nothing
-// to leak and no table to write the block into.
-func hasIPv6Stack() bool {
+// HasIPv6Stack reports whether the kernel has IPv6. A kernel booted with
+// ipv6.disable=1 has none: nothing to leak, no table to write the block into,
+// and no address the tun interface could take — the core fails to come up on
+// one it is given.
+func HasIPv6Stack() bool {
 	_, err := os.Stat(ifInet6)
 	return err == nil
 }
@@ -177,7 +179,7 @@ func EnableTunRouting(cfg TunRouteConfig) error {
 	// The device and metric are the kernel's own and spelled out for the
 	// teardown: an IPv6 delete ignores the route type, so `del unreachable ::/1`
 	// alone would remove whatever route holds that prefix.
-	if cfg.Addr6 != "" && hasIPv6Stack() {
+	if cfg.Addr6 != "" && HasIPv6Stack() {
 		for _, half := range blockDefault6 {
 			want = append(want, tunEntry{what: "закрыть IPv6 мимо туннеля",
 				v6: true, typ: "unreachable", prefix: netip.MustParsePrefix(half), dev: "lo", metric: 1024})

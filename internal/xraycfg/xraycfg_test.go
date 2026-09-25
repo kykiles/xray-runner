@@ -434,7 +434,7 @@ func TestBuildTUNInboundInterfaceName(t *testing.T) {
 	var settings struct {
 		Name string `json:"name"`
 	}
-	if err := json.Unmarshal(BuildTUNInbound().Settings, &settings); err != nil {
+	if err := json.Unmarshal(BuildTUNInbound(true).Settings, &settings); err != nil {
 		t.Fatalf("unmarshal tun settings: %v", err)
 	}
 	if settings.Name != TunInterfaceName {
@@ -446,7 +446,7 @@ func TestBuildTUNInboundInterfaceName(t *testing.T) {
 // from the TUNSettings struct instead of a format string) cannot drift.
 func TestBuildTUNInboundSettings(t *testing.T) {
 	var got TUNSettings
-	if err := json.Unmarshal(BuildTUNInbound().Settings, &got); err != nil {
+	if err := json.Unmarshal(BuildTUNInbound(true).Settings, &got); err != nil {
 		t.Fatalf("unmarshal tun settings: %v", err)
 	}
 	want := TUNSettings{
@@ -460,14 +460,22 @@ func TestBuildTUNInboundSettings(t *testing.T) {
 }
 
 // Tun claims IPv6 too (split and plain alike), which the interface can only do
-// with a v6 address of its own.
+// with a v6 address of its own. A kernel without IPv6 refuses that address and
+// the core never comes up, so there the interface takes IPv4 alone.
 func TestBuildTUNInboundIPv6(t *testing.T) {
-	var got TUNSettings
-	if err := json.Unmarshal(BuildTUNInbound().Settings, &got); err != nil {
-		t.Fatalf("unmarshal tun settings: %v", err)
-	}
-	want := []string{TunAddr + "/24", TunAddr6 + "/126"}
-	if !reflect.DeepEqual(got.Gateway, want) {
-		t.Errorf("tun gateway = %v, want %v", got.Gateway, want)
+	for _, tc := range []struct {
+		ipv6 bool
+		want []string
+	}{
+		{true, []string{TunAddr + "/24", TunAddr6 + "/126"}},
+		{false, []string{TunAddr + "/24"}},
+	} {
+		var got TUNSettings
+		if err := json.Unmarshal(BuildTUNInbound(tc.ipv6).Settings, &got); err != nil {
+			t.Fatalf("unmarshal tun settings: %v", err)
+		}
+		if !reflect.DeepEqual(got.Gateway, tc.want) {
+			t.Errorf("ipv6=%v: tun gateway = %v, want %v", tc.ipv6, got.Gateway, tc.want)
+		}
 	}
 }

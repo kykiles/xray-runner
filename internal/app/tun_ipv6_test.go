@@ -16,7 +16,16 @@ import (
 	"xray-runner/internal/xraycfg"
 )
 
+// withIPv6Stack answers hasIPv6Stack for the test.
+func withIPv6Stack(t *testing.T, present bool) {
+	t.Helper()
+	orig := hasIPv6Stack
+	hasIPv6Stack = func() bool { return present }
+	t.Cleanup(func() { hasIPv6Stack = orig })
+}
+
 func TestBringUpTun_ClaimsIPv6OutsideSplit(t *testing.T) {
+	withIPv6Stack(t, true)
 	var spy killSwitchSpy
 	a := newKillSwitchApp(&spy, nil)
 	a.cfg.KillSwitch = false
@@ -37,6 +46,7 @@ func TestBringUpTun_ClaimsIPv6OutsideSplit(t *testing.T) {
 }
 
 func TestBuildSessionConfig_TunInboundHasIPv6Gateway(t *testing.T) {
+	withIPv6Stack(t, true)
 	a := newTemplateApp(t)
 	a.mode = "tun"
 
@@ -44,6 +54,14 @@ func TestBuildSessionConfig_TunInboundHasIPv6Gateway(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSessionConfig: %v", err)
 	}
+	if gw := tunGateway(t, raw); !slices.Contains(gw, xraycfg.TunAddr6+"/126") {
+		t.Errorf("tun gateway = %v outside split, want the v6 address too", gw)
+	}
+}
+
+// tunGateway is the addresses the config gives the tun interface.
+func tunGateway(t *testing.T, raw []byte) []string {
+	t.Helper()
 	var cfg struct {
 		Inbounds []struct {
 			Tag      string `json:"tag"`
@@ -57,11 +75,43 @@ func TestBuildSessionConfig_TunInboundHasIPv6Gateway(t *testing.T) {
 	}
 	for _, in := range cfg.Inbounds {
 		if in.Tag == "tun" {
-			if !slices.Contains(in.Settings.Gateway, xraycfg.TunAddr6+"/126") {
-				t.Errorf("tun gateway = %v outside split, want the v6 address too", in.Settings.Gateway)
-			}
-			return
+			return in.Settings.Gateway
 		}
 	}
-	t.Error("no tun inbound")
+	t.Fatal("no tun inbound")
+	return nil
+}
+
+// A kernel booted with ipv6.disable=1 has no IPv6 to claim, and refuses the v6
+// address: the core used to fail on it and the tun session never came up. The
+// interface then takes IPv4 alone, and the routes claim nothing of IPv6.
+func TestTun_WithoutIPv6Stack(t *testing.T) {
+	withIPv6Stack(t, false)
+
+	a := newTemplateApp(t)
+	a.mode = "tun"
+	raw, _, err := a.buildSessionConfig(splitTarget())
+	if err != nil {
+		t.Fatalf("buildSessionConfig: %v", err)
+	}
+	if gw := tunGateway(t, raw); !slices.Equal(gw, []string{xraycfg.TunAddr + "/24"}) {
+		t.Errorf("tun gateway = %v without an IPv6 stack, want IPv4 alone", gw)
+	}
+
+	var spy killSwitchSpy
+	b := newKillSwitchApp(&spy, nil)
+	b.cfg.KillSwitch = false
+	b.cfg.HealthCheckURLs = []string{"http://127.0.0.1:1/"}
+	var got system.TunRouteConfig
+	b.enableTunRouting = func(c system.TunRouteConfig) error { got = c; return nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	l := b.newTunLifecycle(killSwitchTarget(), sessionPorts{}, false)
+	if err := l.afterStart(ctx); err != nil {
+		t.Fatalf("tun setup: %v", err)
+	}
+	defer l.afterStop()
+	if got.Addr6 != "" {
+		t.Errorf("Addr6 = %q without an IPv6 stack, want none", got.Addr6)
+	}
 }

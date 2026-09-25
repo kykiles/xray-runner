@@ -208,10 +208,15 @@ type TUNSettings struct {
 	InterfaceName string   `json:"name"`
 }
 
-// BuildTUNInbound builds the tun inbound. The interface takes a v6 address as
-// well, which is what lets the routing layer claim IPv6 for the tunnel.
-func BuildTUNInbound() Inbound {
-	gateway := []string{TunAddr + "/24", TunAddr6 + "/126"}
+// BuildTUNInbound builds the tun inbound. With ipv6 the interface takes a v6
+// address as well, which is what lets the routing layer claim IPv6 for the
+// tunnel. Without it — a kernel with no IPv6 stack — the core would fail to
+// assign that address and never come up, and there is no IPv6 to claim.
+func BuildTUNInbound(ipv6 bool) Inbound {
+	gateway := []string{TunAddr + "/24"}
+	if ipv6 {
+		gateway = append(gateway, TunAddr6+"/126")
+	}
 	// The settings are a fixed struct, so marshalling cannot fail.
 	settings, _ := json.Marshal(TUNSettings{
 		MTU:           1500,
