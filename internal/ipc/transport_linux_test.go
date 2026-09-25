@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,5 +74,30 @@ func TestDialRefusesForeignServer(t *testing.T) {
 	defer cancel()
 	if _, err := dial(ctx); err == nil {
 		t.Fatal("dial trusted a socket held by another uid")
+	}
+}
+
+// A peer turned away hears why even when its hello comes late: the refusal
+// answers the hello instead of racing it.
+func TestRefusalAnswersLateHello(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root is always let in")
+	}
+	l := testListener(t, -1)
+	go func() { _, _ = l.Accept() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rw, err := dial(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rw.Close() }()
+	time.Sleep(200 * time.Millisecond)
+	if err := WriteMessage(rw, Message{ID: 1, Type: TypeHello, Body: []byte(`{"version":1}`)}); err != nil {
+		t.Fatalf("hello not sent: %v", err)
+	}
+	m, err := ReadMessage(rw)
+	if err != nil || m.ID != 1 || !strings.Contains(m.Error, Group) {
+		t.Fatalf("reply %+v, %v", m, err)
 	}
 }

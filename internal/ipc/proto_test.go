@@ -67,19 +67,27 @@ func TestClientCallsAndEvents(t *testing.T) {
 	conn := NewConn(srv, Peer{Key: "k"})
 	defer conn.Close()
 
+	// Both requests are read before either is answered, and the answers go
+	// back in the other order than the requests came.
 	go func() {
 		m1, _ := conn.Read()
 		m2, _ := conn.Read()
 		conn.Event(Event{Kind: EventStatus, Note: "hi"})
-		conn.Reply(m2.ID, StatusReply{Kind: "second"}, nil)
-		conn.Reply(m1.ID, nil, errors.New("refused"))
+		answer := func(m Message) {
+			if m.Type == TypeStatus {
+				conn.Reply(m.ID, StatusReply{Kind: "second"}, nil)
+			} else {
+				conn.Reply(m.ID, nil, errors.New("refused"))
+			}
+		}
+		answer(m2)
+		answer(m1)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	errc := make(chan error, 1)
 	go func() { errc <- c.Call(ctx, TypeStop, struct{}{}, nil) }()
-	time.Sleep(50 * time.Millisecond) // the first call is sent first
 	var st StatusReply
 	if err := c.Call(ctx, TypeStatus, struct{}{}, &st); err != nil || st.Kind != "second" {
 		t.Fatalf("second call: %+v, %v", st, err)

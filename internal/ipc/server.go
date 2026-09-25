@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 // Peer is who is on the other end of a connection, as the operating system
@@ -141,10 +142,28 @@ func (c *Conn) Close() {
 func (c *Conn) Closed() <-chan struct{} { return c.closed }
 
 // Refuse tells a peer why it is turned away and closes the connection. The
-// refusal is a reply to a hello it has not sent yet: the client's first call
-// is its hello, id 1.
+// refusal answers the peer's hello, read first: a connection closed before
+// the client got its hello out fails that write, and the client would never
+// read why. A peer that says nothing gets its answer after a moment anyway.
+// It returns at once; the waiting is done on the side.
 func Refuse(rw io.ReadWriteCloser, why string) {
-	_ = WriteMessage(rw, Message{ID: 1, Type: TypeReply, Error: why})
-	_ = rw.Close()
 	slog.Warn("ipc: подключение отклонено", "reason", why)
+	go func() {
+		defer func() { _ = rw.Close() }()
+		hello := make(chan uint64, 1)
+		go func() {
+			if m, err := ReadMessage(rw); err == nil {
+				hello <- m.ID
+			}
+		}()
+		id := uint64(1) // the client's first call is its hello
+		select {
+		case id = <-hello:
+		case <-time.After(refuseWait):
+		}
+		_ = WriteMessage(rw, Message{ID: id, Type: TypeReply, Error: why})
+	}()
 }
+
+// refuseWait is how long Refuse waits for the hello it answers.
+const refuseWait = 2 * time.Second

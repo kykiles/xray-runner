@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -55,7 +56,7 @@ func dial(ctx context.Context) (io.ReadWriteCloser, error) {
 				_ = windows.CloseHandle(h)
 				return nil, err
 			}
-			return os.NewFile(uintptr(h), pipeName), nil
+			return newPipeConn(h), nil
 		}
 		// Every instance taken: the service creates the next one at once.
 		if !errors.Is(err, windows.ERROR_PIPE_BUSY) {
@@ -175,7 +176,7 @@ func (l *pipeListener) Accept() (*Conn, error) {
 		l.pending = next
 		l.mu.Unlock()
 
-		f := os.NewFile(uintptr(h), pipeName)
+		f := newPipeConn(h)
 		peer, why := authorize(h)
 		if why != "" {
 			Refuse(f, why)
@@ -254,4 +255,83 @@ func (l *pipeListener) Close() error {
 	l.closed = true
 	_ = windows.CancelIoEx(l.pending, nil)
 	return windows.CloseHandle(l.pending)
+}
+
+// pipeConn is one end of a pipe instance opened for overlapped I/O. A read
+// and a write may be under way at once, each on its own OVERLAPPED — which
+// is what a synchronous handle does not allow, and what os.File, keeping a
+// file offset, does not expect of a handle.
+type pipeConn struct {
+	h       windows.Handle
+	mu      sync.RWMutex // held for reading by each operation, for writing by Close
+	closing atomic.Bool
+	closed  bool
+}
+
+func newPipeConn(h windows.Handle) *pipeConn { return &pipeConn{h: h} }
+
+func (p *pipeConn) Read(b []byte) (int, error) {
+	n, err := p.do(b, false)
+	if errors.Is(err, windows.ERROR_BROKEN_PIPE) || errors.Is(err, windows.ERROR_PIPE_NOT_CONNECTED) {
+		return n, io.EOF
+	}
+	return n, err
+}
+
+func (p *pipeConn) Write(b []byte) (int, error) {
+	written := 0
+	for written < len(b) {
+		n, err := p.do(b[written:], true)
+		written += n
+		if err != nil {
+			return written, err
+		}
+	}
+	return written, nil
+}
+
+func (p *pipeConn) do(b []byte, write bool) (int, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.closed || p.closing.Load() {
+		return 0, os.ErrClosed
+	}
+	if len(b) == 0 {
+		return 0, nil
+	}
+	ev, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = windows.CloseHandle(ev) }()
+	ov := windows.Overlapped{HEvent: ev}
+	var n uint32
+	if write {
+		err = windows.WriteFile(p.h, b, &n, &ov)
+	} else {
+		err = windows.ReadFile(p.h, b, &n, &ov)
+	}
+	if errors.Is(err, windows.ERROR_IO_PENDING) {
+		err = windows.GetOverlappedResult(p.h, &ov, &n, true)
+	}
+	if err != nil && p.closing.Load() {
+		err = os.ErrClosed
+	}
+	return int(n), err
+}
+
+// Close cancels what is under way and closes the handle once nothing uses
+// it. An operation that slipped in between the flag and the cancel is
+// cancelled on the next round.
+func (p *pipeConn) Close() error {
+	if p.closing.Swap(true) {
+		return nil
+	}
+	for !p.mu.TryLock() {
+		_ = windows.CancelIoEx(p.h, nil)
+		time.Sleep(time.Millisecond)
+	}
+	defer p.mu.Unlock()
+	p.closed = true
+	return windows.CloseHandle(p.h)
 }
