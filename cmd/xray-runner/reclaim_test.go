@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -40,5 +42,65 @@ func TestReclaimWalksOnlyOwnDirs(t *testing.T) {
 		case filepath.IsAbs(dir) || dir == "." || strings.Contains(dir, ".."):
 			t.Errorf("reclaimedDirs contains %q, which is not the app's own directory", dir)
 		}
+	}
+}
+
+// recordChowns makes reclaimDir report the names it hands over instead of
+// changing owners, so the walk can be checked without root.
+func recordChowns(t *testing.T) *[]string {
+	t.Helper()
+	var got []string
+	orig := rootLchown
+	rootLchown = func(_ *os.Root, name string, _, _ int) error {
+		got = append(got, name)
+		return nil
+	}
+	t.Cleanup(func() { rootLchown = orig })
+	return &got
+}
+
+// The walk hands over what is in the directory, a symlink as itself, and
+// nothing that lives outside it (G03).
+func TestReclaimDir_StaysInsideTheDir(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "other"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "configs", "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "configs", "sub", "s.json"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	got := recordChowns(t)
+
+	reclaimDir(dir, 1000, 1000)
+
+	want := []string{".", "configs", "configs/sub", "configs/sub/s.json", "link"}
+	if !slices.Equal(*got, want) {
+		t.Errorf("handed over %q, want %q", *got, want)
+	}
+}
+
+// A directory that is itself a symlink is not walked at all.
+func TestReclaimDir_SkipsASymlinkedDir(t *testing.T) {
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "f"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "configs")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	got := recordChowns(t)
+
+	reclaimDir(link, 1000, 1000)
+
+	if len(*got) != 0 {
+		t.Errorf("walked a symlinked dir: %q", *got)
 	}
 }

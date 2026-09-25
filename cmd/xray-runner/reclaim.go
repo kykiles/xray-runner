@@ -3,7 +3,6 @@ package main
 import (
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strconv"
 
 	"xray-runner/internal/config"
@@ -65,20 +64,44 @@ func reclaimFiles() {
 		return
 	}
 	for _, name := range reclaimedFiles {
-		// Lchown, not Chown: a symlink here should change hands itself rather
-		// than redirect the call at whatever it points to.
-		_ = os.Lchown(config.Path(name), uid, gid)
+		// Only a file in the working directory is handed over by name: a bare
+		// name has no directory in its path to be swapped. One in the data dir
+		// is covered by the walk below, which stays inside that dir. Lchown, not
+		// Chown: a symlink here changes hands itself rather than redirecting the
+		// call at whatever it points to.
+		if path := config.Path(name); path == name {
+			_ = os.Lchown(path, uid, gid)
+		}
 	}
 	for _, dir := range reclaimedDirs() {
-		if dir == "" {
-			continue
+		if dir != "" {
+			reclaimDir(dir, uid, gid)
 		}
-		_ = filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			_ = os.Lchown(path, uid, gid)
-			return nil
-		})
 	}
+}
+
+// rootLchown is (*os.Root).Lchown; a var so a test can see which names are
+// handed over without being root.
+var rootLchown = (*os.Root).Lchown
+
+// reclaimDir hands dir and everything under it to uid:gid. The walk and every
+// chown go through an os.Root opened on dir, so no name met inside it — a
+// symlink, or a directory renamed while the walk runs — can take a chown to a
+// file outside dir (G03). A dir that is itself a symlink is left alone.
+func reclaimDir(dir string, uid, gid int) {
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+		return
+	}
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		return
+	}
+	defer func() { _ = r.Close() }()
+	_ = fs.WalkDir(r.FS(), ".", func(path string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		_ = rootLchown(r, path, uid, gid)
+		return nil
+	})
 }
