@@ -36,6 +36,34 @@ func TestHasBypassRules(t *testing.T) {
 			want: false,
 		},
 		{
+			// The tag is the panel's to choose; the protocol says what it is.
+			name: "freedom under its own tag",
+			raw:  `{"outbounds":[{"tag":"proxy","protocol":"vless"},{"tag":"bypass","protocol":"freedom"}],"routing":{"rules":[{"outboundTag":"bypass","domain":["geosite:ru"]}]}}`,
+			want: true,
+		},
+		{
+			name: "blackhole under its own tag",
+			raw:  `{"outbounds":[{"tag":"proxy","protocol":"vless"},{"tag":"adblock","protocol":"blackhole"}],"routing":{"rules":[{"outboundTag":"adblock","domain":["geosite:category-ads"]}]}}`,
+			want: true,
+		},
+		{
+			// A declared outbound is judged by its protocol, not its name.
+			name: "a server called direct",
+			raw:  `{"outbounds":[{"tag":"direct","protocol":"vless"}],"routing":{"rules":[{"outboundTag":"direct"}]}}`,
+			want: false,
+		},
+		{
+			// Everything no rule matches goes to the first outbound.
+			name: "direct first outbound",
+			raw:  `{"outbounds":[{"tag":"direct","protocol":"freedom"},{"tag":"proxy","protocol":"vless"}],"routing":{"rules":[{"outboundTag":"proxy","domain":["geosite:google"]}]}}`,
+			want: true,
+		},
+		{
+			name: "proxy first, rules to proxy only",
+			raw:  `{"outbounds":[{"tag":"proxy","protocol":"vless"},{"tag":"direct","protocol":"freedom"}],"routing":{"rules":[{"outboundTag":"proxy","domain":["geosite:google"]}]}}`,
+			want: false,
+		},
+		{
 			name: "no routing section",
 			raw:  `{"inbounds":[]}`,
 			want: false,
