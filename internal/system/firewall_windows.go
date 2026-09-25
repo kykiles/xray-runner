@@ -261,8 +261,17 @@ func wfpClose(h windows.Handle) error {
 
 // wfpAppID asks WFP for the key its ALE layers know a program by: the file's
 // NT device path. It is allocated by WFP and freed with wfpFree.
+//
+// The path is made long first. WFP turns the name it is given into the key
+// as it stands, while the key a connection carries is always the long name, so
+// a core under C:\Users\RUNNER~1\… — which is how %TEMP% often reads — would
+// never match its own permit.
 func wfpAppID(path string) (*fwpByteBlob, error) {
-	p, err := windows.UTF16PtrFromString(path)
+	long, err := longPath(path)
+	if err != nil {
+		return nil, fmt.Errorf("полный путь к %s: %w", path, err)
+	}
+	p, err := windows.UTF16PtrFromString(long)
 	if err != nil {
 		return nil, err
 	}
@@ -276,6 +285,22 @@ func wfpAppID(path string) (*fwpByteBlob, error) {
 
 // wfpFree releases what WFP allocated. FwpmFreeMemory0 takes the address of
 // the pointer, and clears it.
+func longPath(path string) (string, error) {
+	short, err := windows.UTF16FromString(path)
+	if err != nil {
+		return "", err
+	}
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n, err := windows.GetLongPathName(&short[0], &buf[0], uint32(len(buf)))
+	if err != nil {
+		return "", err
+	}
+	if n > uint32(len(buf)) {
+		return "", errors.New("путь слишком длинный")
+	}
+	return windows.UTF16ToString(buf[:n]), nil
+}
+
 func wfpFree(p *fwpByteBlob) {
 	_, _, _ = procFwpmFreeMemory0.Call(uintptr(unsafe.Pointer(&p))) //nolint:gosec // G103: a pointer argument, converted in the call so it stays put
 }
