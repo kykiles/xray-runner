@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/nftables"
 	"github.com/vishvananda/netlink"
@@ -68,6 +69,30 @@ func liveHost(t *testing.T) {
 		_ = netlink.LinkDel(tun)
 		_ = netlink.LinkDel(wan)
 	})
+	settle(t)
+}
+
+// settle waits for the kernel's own routes to stop changing. A link that just
+// came up gets its IPv6 link-local and multicast routes a moment later, by
+// address autoconfiguration; a snapshot taken before them is not the state the
+// teardown is compared against.
+func settle(t *testing.T) {
+	t.Helper()
+	prev4, prev6, _ := hostState(t)
+	stable := 0
+	for range 50 {
+		time.Sleep(100 * time.Millisecond)
+		cur4, cur6, _ := hostState(t)
+		if slices.Equal(prev4, cur4) && slices.Equal(prev6, cur6) {
+			if stable++; stable == 5 {
+				return
+			}
+		} else {
+			stable = 0
+		}
+		prev4, prev6 = cur4, cur6
+	}
+	t.Fatal("the routing table did not settle in 5s")
 }
 
 // addDummy adds an interface that is up with a carrier: one end of a veth pair,

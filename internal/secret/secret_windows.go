@@ -3,6 +3,7 @@
 package secret
 
 import (
+	"errors"
 	"fmt"
 	"unsafe"
 
@@ -23,8 +24,13 @@ func (dpapi) Name() string { return "DPAPI" }
 // cannot open it with a bare CryptUnprotectData.
 var entropy = []byte("xray-runner subscriptions")
 
+// dpapiVersion goes in front of the data before it is sealed. DPAPI refuses an
+// empty input ("the parameter is incorrect"), and an empty list — the last
+// subscription removed — is a list like any other.
+const dpapiVersion = 1
+
 func (dpapi) Seal(data []byte) ([]byte, error) {
-	out, err := dpapiCall(data, true)
+	out, err := dpapiCall(append([]byte{dpapiVersion}, data...), true)
 	if err != nil {
 		return nil, fmt.Errorf("DPAPI: зашифровать: %w", err)
 	}
@@ -40,7 +46,10 @@ func (dpapi) Open(blob []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("DPAPI: расшифровать (файл создан другим пользователем Windows или на другом компьютере?): %w", err)
 	}
-	return out, nil
+	if len(out) == 0 || out[0] != dpapiVersion {
+		return nil, errors.New("DPAPI: неизвестный формат файла")
+	}
+	return out[1:], nil
 }
 
 func dpapiCall(in []byte, protect bool) ([]byte, error) {
