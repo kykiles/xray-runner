@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	"xray-runner/internal/config"
@@ -33,13 +32,15 @@ func TestSudoOwnerAbsentWithoutSudo(t *testing.T) {
 
 // The regression this guards: reclaim used to walk the working directory, which
 // under sudo hands over whatever tree the user launched from — /etc for a binary
-// on PATH. Nothing outside the app's own data dir may be walked.
+// on PATH. Only the app's own directories may be walked: the data dir, its
+// configs/ next to the program, and keys/ that -dump-links makes.
 func TestReclaimWalksOnlyOwnDirs(t *testing.T) {
 	data := config.DataDir()
+	programConfigs := filepath.Join(config.ProgramDir(), "configs")
 	for _, dir := range reclaimedDirs() {
 		switch {
-		case dir == "" || dir == data:
-		case filepath.IsAbs(dir) || dir == "." || strings.Contains(dir, ".."):
+		case dir == "" || dir == data || dir == programConfigs || dir == "keys":
+		default:
 			t.Errorf("reclaimedDirs contains %q, which is not the app's own directory", dir)
 		}
 	}

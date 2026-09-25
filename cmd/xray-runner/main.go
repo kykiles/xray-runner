@@ -30,7 +30,7 @@ func main() {
 // sudo (G10).
 func run() int {
 	flagVersion := flag.Bool("version", false, "show version")
-	flagConfig := flag.String("config", ".env", "path to .env file")
+	flagConfig := flag.String("config", "", "path to .env file (default: .env next to the program)")
 	// U-2: scripted/non-interactive selection.
 	flagServer := flag.String("server", "", "server to use: 1-based index or name (skips the menu)")
 	flagLast := flag.Bool("last", false, "reuse the last selected subscription/server")
@@ -48,7 +48,13 @@ func run() int {
 	reclaimFiles()
 	defer reclaimFiles()
 
-	cfg, err := config.Load(*flagConfig)
+	// .env next to the program unless -config says otherwise: not the working
+	// directory, which under sudo is the user's to choose (H02).
+	envFile := *flagConfig
+	if envFile == "" {
+		envFile = config.EnvFile()
+	}
+	cfg, err := config.Load(envFile)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

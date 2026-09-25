@@ -39,6 +39,7 @@ func isolateHWID(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Chdir(dir)
+	placeProgram(t)
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("AppData", dir)
 	return dir
@@ -214,7 +215,7 @@ func TestGetOrCreateHWID_GenerateAndReuse(t *testing.T) {
 
 func TestGetOrCreateHWID_Persistence(t *testing.T) {
 	isolateHWID(t)
-	if err := os.WriteFile(hwidFile, []byte("persistent-hwid-value"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(ProgramDir(), hwidFile), []byte("persistent-hwid-value"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -297,12 +298,13 @@ func TestLoad_KillSwitchRefusedOnWindows(t *testing.T) {
 // M-2: the HWID goes straight into an x-hwid request header, where a stray
 // newline makes net/http reject the whole request ("invalid header field value")
 // — every subscription stops loading with an error that names neither hwid.txt
-// nor the newline. The legacy ./hwid.txt path is where such a newline shows up.
+// nor the newline. The legacy hwid.txt next to the program is where such a
+// newline shows up.
 func TestGetOrCreateHWID_TrimsWhitespace(t *testing.T) {
 	for _, stored := range []string{"abc123def456\n", "  abc123def456  ", "abc123def456\r\n"} {
 		t.Run(strconv.Quote(stored), func(t *testing.T) {
-			t.Chdir(t.TempDir())
-			if err := os.WriteFile("hwid.txt", []byte(stored), 0600); err != nil {
+			prog := placeProgram(t)
+			if err := os.WriteFile(filepath.Join(prog, "hwid.txt"), []byte(stored), 0600); err != nil {
 				t.Fatal(err)
 			}
 			if got := GetOrCreateHWID(""); got != "abc123def456" {

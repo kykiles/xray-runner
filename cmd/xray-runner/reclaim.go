@@ -3,6 +3,7 @@ package main
 import (
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"xray-runner/internal/config"
@@ -43,10 +44,15 @@ var reclaimedFiles = []string{
 }
 
 // reclaimedDirs are the directories the app creates whole, walked recursively.
-// The data dir is ours by construction; configs/ and keys/ are written into the
-// working directory by the config viewer and by -dump-links.
+// The data dir is ours by construction; configs/ next to the program is where
+// an older install keeps the config viewer's files, and keys/ is what
+// -dump-links writes into the working directory.
 func reclaimedDirs() []string {
-	return []string{config.DataDir(), "configs", "keys"}
+	dirs := []string{config.DataDir(), "keys"}
+	if dir := config.ProgramDir(); dir != "" {
+		dirs = append(dirs, filepath.Join(dir, "configs"))
+	}
+	return dirs
 }
 
 // reclaimFiles restores ownership of the app's own files to the sudo user.
@@ -64,12 +70,13 @@ func reclaimFiles() {
 		return
 	}
 	for _, name := range reclaimedFiles {
-		// Only a file in the working directory is handed over by name: a bare
-		// name has no directory in its path to be swapped. One in the data dir
-		// is covered by the walk below, which stays inside that dir. Lchown, not
-		// Chown: a symlink here changes hands itself rather than redirecting the
-		// call at whatever it points to.
-		if path := config.Path(name); path == name {
+		// Only a file next to the program is handed over by name; one in the data
+		// dir is covered by the walk below, which stays inside that dir. The
+		// program's directory is trusted as far as the program is: whoever can
+		// swap it can swap the binary root runs. Lchown, not Chown: a symlink here
+		// changes hands itself rather than redirecting the call at whatever it
+		// points to.
+		if path := config.Path(name); filepath.Dir(path) == config.ProgramDir() {
 			_ = os.Lchown(path, uid, gid)
 		}
 	}

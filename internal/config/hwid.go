@@ -18,13 +18,16 @@ func GetOrCreateHWID(override string) string {
 		return override
 	}
 
-	// Backward compatibility: an existing ./hwid.txt from older versions wins,
-	// so a device keeps its identity and the panel doesn't see it as new.
+	// Backward compatibility: an existing hwid.txt next to the program, from
+	// older versions, wins, so a device keeps its identity and the panel doesn't
+	// see it as new.
 	// Trimmed because the HWID goes into the x-hwid request header, and a stray
 	// newline makes net/http reject the whole request — every subscription then
 	// fails with an error naming neither this file nor the newline.
-	if hwid := readHWID(hwidFile); hwid != "" {
-		return hwid
+	if dir := ProgramDir(); dir != "" {
+		if hwid := readHWID(filepath.Join(dir, hwidFile)); hwid != "" {
+			return hwid
+		}
 	}
 
 	path := hwidPath()
@@ -51,12 +54,12 @@ func readHWID(path string) string {
 }
 
 // hwidPath returns the preferred HWID location in the data dir, falling back to
-// CWD when it is unavailable. Under sudo the data dir belongs to the invoking
+// the program's directory when it is unavailable. Under sudo the data dir belongs to the invoking
 // user, so a TUN run and a proxy run report the same device to the panel.
 func hwidPath() string {
 	dir := DataDir()
 	if dir == "" {
-		return hwidFile
+		return filepath.Join(ProgramDir(), hwidFile)
 	}
 	return filepath.Join(dir, "hwid")
 }

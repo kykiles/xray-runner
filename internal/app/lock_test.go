@@ -296,29 +296,32 @@ func TestAcquireLock_HandsLockFileBackToSudoUser(t *testing.T) {
 }
 
 // The lock stays where 11a put it, beside where config.Path once found the
-// core's config, so the runs of one install keep meeting at one lock; a stray
-// lock file in the working directory still does not pull it there.
+// core's config, so the runs of one install keep meeting at one lock: next to
+// the program for an install that keeps its config there, in the data dir
+// otherwise. A file in the working directory pulls it nowhere (H02).
 func TestNew_LockStaysWhereTheConfigWas(t *testing.T) {
 	for name, tc := range map[string]struct {
-		plant string
-		inCWD bool // a legacy config keeps the lock in the working directory
+		plant     string
+		inProgram bool // plant next to the program rather than in the working directory
 	}{
-		"fresh":                {"", false},
-		"stray lock in cwd":    {"xray_config.json.lock", false},
-		"legacy config in cwd": {"xray_config.json", true},
+		"fresh":                        {"", false},
+		"stray lock in cwd":            {"xray_config.json.lock", false},
+		"legacy config in cwd":         {"xray_config.json", false},
+		"legacy config beside program": {"xray_config.json", true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			isolateState(t)
-			if tc.plant != "" {
+			want := filepath.Join(config.DataDir(), "xray_config.json.lock")
+			switch {
+			case tc.plant != "" && tc.inProgram:
+				writeFile(t, filepath.Join(config.ProgramDir(), tc.plant), "")
+				want = filepath.Join(config.ProgramDir(), "xray_config.json.lock")
+			case tc.plant != "":
 				writeFile(t, tc.plant, "")
 			}
 
 			a := New(&config.Config{}, Options{})
 
-			want := filepath.Join(config.DataDir(), "xray_config.json.lock")
-			if tc.inCWD {
-				want = "xray_config.json.lock"
-			}
 			if a.lockFile != want {
 				t.Errorf("lock at %q, want %q", a.lockFile, want)
 			}

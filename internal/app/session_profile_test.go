@@ -328,7 +328,7 @@ func TestResolveScriptedTarget_KeepsPanelRouting(t *testing.T) {
 		t.Fatalf("load template: %v", err)
 	}
 	isolateState(t)
-	if err := os.WriteFile("subscriptions.txt", []byte(srv.URL+"\n"), 0600); err != nil {
+	if err := os.WriteFile(config.Path("subscriptions.txt"), []byte(srv.URL+"\n"), 0600); err != nil {
 		t.Fatalf("write subscriptions: %v", err)
 	}
 

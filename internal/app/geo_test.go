@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"xray-runner/internal/config"
 	"xray-runner/internal/subscription"
 	"xray-runner/internal/xraycfg"
 )
@@ -20,7 +21,7 @@ func TestPruneGeoDirs(t *testing.T) {
 	isolateState(t)
 	kept := "https://panel.example/kept"
 	opened := "https://panel.example/opened" // not in the file, e.g. from the env
-	if err := os.WriteFile("subscriptions.txt", []byte(kept+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(config.Path("subscriptions.txt"), []byte(kept+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
