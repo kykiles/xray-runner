@@ -36,6 +36,9 @@ func (a *App) runSession(ctx context.Context, t *target) (tui.StatusAction, erro
 	if err != nil {
 		slog.Warn("apps list not read", "file", appsPath, "error", err)
 	}
+	// A system proxy the last session could not put back is tried again first:
+	// left as it is, it names a port nothing listens on.
+	a.restoreSystemProxy()
 	// Before the split is resolved: without the service, split and TUN are
 	// judged by this process's own rights again.
 	lost := a.redialService(ctx)
@@ -696,7 +699,11 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 
 	// One snapshot governs both ends: Enable refuses to touch settings this
 	// snapshot could not restore, and teardown restores from the very same one.
-	a.originalProxy = system.ReadProxyState()
+	// A restore still owed from the last session keeps its snapshot: the
+	// settings on the machine are ours, the user's are the ones saved then.
+	if !a.proxyTouched {
+		a.originalProxy = system.ReadProxyState()
+	}
 	if err := a.proxy.Enable(ports.http, a.originalProxy); err != nil {
 		slog.Warn("failed to enable system proxy", "error", err)
 		// The user has to hear this from the screen, not from the log: otherwise
@@ -705,6 +712,7 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 		return nil
 	}
 	a.proxyTouched = true
+	a.proxyAddr = ourProxyAddr(ports.http)
 	slog.Info("system proxy enabled", "port", ports.http)
 
 	// Only whether the OS took the setting: whether anything answers through the
@@ -1168,14 +1176,41 @@ func (a *App) releaseSession() {
 // it. Split out of releaseSession because teardown runs it early, on its own:
 // see the comment there. Doing nothing when there is nothing to undo makes the
 // second call a no-op.
+//
+// A restore that fails leaves the setting marked as ours, so the next call —
+// releaseSession, the teardown at exit, the next session's start — tries again
+// instead of leaving the machine on a port nothing listens on. Before a retry
+// the settings are read: one somebody changed after us is theirs now.
 func (a *App) restoreSystemProxy() {
 	if !a.proxyTouched {
 		return
 	}
+	if a.proxyRestoreFailed && !a.proxyStillOurs() {
+		slog.Warn("системный прокси изменён после нас — повторно не восстанавливаю")
+		a.proxyTouched, a.proxyRestoreFailed = false, false
+		return
+	}
 	if err := a.restoreProxy(a.originalProxy); err != nil {
 		slog.Warn("failed to restore proxy", "error", err)
+		a.proxyRestoreFailed = true
+		return
 	}
-	a.proxyTouched = false
+	a.proxyTouched, a.proxyRestoreFailed = false, false
+}
+
+// proxyStillOurs reports whether the settings are as a failed restore left
+// them: still naming our address, or switched off by the fallback that ran
+// after it (ProxyManager.Restore). Either way putting the user's back is ours
+// to do. Anything else was set after us.
+func (a *App) proxyStillOurs() bool {
+	if a.readProxyState == nil {
+		return true
+	}
+	cur := a.readProxyState()
+	if !cur.Enabled {
+		return true
+	}
+	return slices.Contains(proxyAddrs(cur.Server), a.proxyAddr)
 }
 
 // setEndpoint records the selected server so the kill switch can allow xray's
