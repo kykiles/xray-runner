@@ -46,24 +46,28 @@ func TestApplySplitRoutingKeepsLocalRulesAndAimsAtBalancer(t *testing.T) {
 		t.Fatalf("ApplySplitRouting: %v", err)
 	}
 	rules := rulesOf(t, raw)
-	if len(rules) != 4 {
-		t.Fatalf("got %d rules, want 4: %v", len(rules), rules)
+	if len(rules) != 5 {
+		t.Fatalf("got %d rules, want 5: %v", len(rules), rules)
 	}
 	if rules[0]["outboundTag"] != "block" || rules[1]["outboundTag"] != "direct" {
 		t.Errorf("panel's local rules not kept in order: %v", rules[:2])
 	}
 
-	// The process rule follows them, pointing where the panel's catch-all did.
+	// The panel's catch-all follows them, narrowed to the listed process.
 	procs, ok := rules[2]["process"].([]any)
 	if !ok || len(procs) != 1 || procs[0] != "Telegram.exe" {
 		t.Fatalf("process rule = %v, want the listed process", rules[2])
 	}
-	if rules[2]["balancerTag"] != "balancer" {
-		t.Errorf("process rule aims at %v, want the panel's balancer", rules[2])
+	if rules[2]["balancerTag"] != "balancer" || rules[2]["network"] != "tcp,udp" {
+		t.Errorf("process rule = %v, want the panel's catch-all into the balancer", rules[2])
+	}
+	// Then the listed process's default: the first outbound.
+	if rules[3]["outboundTag"] != "proxy-a" || rules[3]["process"] == nil {
+		t.Errorf("default rule = %v, want the listed process to proxy-a", rules[3])
 	}
 
 	// And everything unmatched — every process outside the list — goes direct.
-	last := rules[3]
+	last := rules[4]
 	if last["outboundTag"] != "direct" || last["network"] != "tcp,udp" {
 		t.Errorf("catch-all = %v, want tcp,udp to direct", last)
 	}
@@ -101,14 +105,17 @@ func TestApplySplitRoutingAimsAtOutboundTag(t *testing.T) {
 		t.Fatalf("ApplySplitRouting: %v", err)
 	}
 	rules := rulesOf(t, raw)
-	if len(rules) != 2 {
-		t.Fatalf("got %d rules, want the process rule and the catch-all: %v", len(rules), rules)
+	if len(rules) != 3 {
+		t.Fatalf("got %d rules, want the narrowed rule, the default and the catch-all: %v", len(rules), rules)
 	}
 	if rules[0]["outboundTag"] != "proxy" || len(rules[0]["process"].([]any)) != 2 {
 		t.Errorf("process rule = %v, want both processes routed to proxy", rules[0])
 	}
-	if rules[1]["outboundTag"] != "direct" {
-		t.Errorf("catch-all = %v, want direct", rules[1])
+	if rules[1]["outboundTag"] != "proxy" || len(rules[1]["process"].([]any)) != 2 {
+		t.Errorf("default rule = %v, want both processes routed to proxy", rules[1])
+	}
+	if rules[2]["outboundTag"] != "direct" {
+		t.Errorf("catch-all = %v, want direct", rules[2])
 	}
 }
 
@@ -171,5 +178,174 @@ func TestApplySplitRoutingWithUntaggedRule(t *testing.T) {
 func TestApplySplitRoutingWithoutProcesses(t *testing.T) {
 	if _, err := ApplySplitRouting(json.RawMessage(panelConfig), nil); err == nil {
 		t.Fatal("an empty process list must be refused: it would tunnel nothing")
+	}
+}
+
+// ruleWith finds the first rule whose key holds value, failing the test when
+// there is none.
+func ruleWith(t *testing.T, rules []map[string]any, key, value string) map[string]any {
+	t.Helper()
+	for _, r := range rules {
+		if r[key] == value {
+			return r
+		}
+	}
+	t.Fatalf("no rule with %s=%s in %v", key, value, rules)
+	return nil
+}
+
+// A second freedom outbound under its own tag is as local as the first: a rule
+// into it is kept for everyone and never becomes where the listed processes go.
+func TestApplySplitRoutingSecondFreedomIsLocal(t *testing.T) {
+	cfg := `{
+      "outbounds": [
+        {"tag": "proxy", "protocol": "vless"},
+        {"tag": "direct", "protocol": "freedom"},
+        {"tag": "bypass", "protocol": "freedom"}
+      ],
+      "routing": {"rules": [
+        {"domain": ["example.com"], "outboundTag": "proxy"},
+        {"network": "tcp,udp", "outboundTag": "bypass"}
+      ]}
+    }`
+	raw, err := ApplySplitRouting(json.RawMessage(cfg), []string{"Telegram.exe"})
+	if err != nil {
+		t.Fatalf("ApplySplitRouting: %v", err)
+	}
+	rules := rulesOf(t, raw)
+	if rules[0]["outboundTag"] != "proxy" || rules[0]["process"] == nil {
+		t.Errorf("rule 0 = %v, want example.com to proxy for the listed process", rules[0])
+	}
+	if rules[1]["outboundTag"] != "bypass" || rules[1]["process"] != nil {
+		t.Errorf("rule 1 = %v, want the panel's bypass rule kept as it was", rules[1])
+	}
+	for _, r := range rules {
+		if r["process"] != nil && r["outboundTag"] == "bypass" {
+			t.Errorf("listed processes sent to the second freedom outbound: %v", r)
+		}
+	}
+}
+
+// Same for a second blackhole: aiming the listed processes at it would cut them
+// off altogether.
+func TestApplySplitRoutingSecondBlackholeIsLocal(t *testing.T) {
+	cfg := `{
+      "outbounds": [
+        {"tag": "proxy", "protocol": "vless"},
+        {"tag": "direct", "protocol": "freedom"},
+        {"tag": "block", "protocol": "blackhole"},
+        {"tag": "adblock", "protocol": "blackhole"}
+      ],
+      "routing": {"rules": [
+        {"network": "tcp,udp", "outboundTag": "proxy"},
+        {"domain": ["geosite:category-ads"], "outboundTag": "adblock"}
+      ]}
+    }`
+	raw, err := ApplySplitRouting(json.RawMessage(cfg), []string{"Telegram.exe"})
+	if err != nil {
+		t.Fatalf("ApplySplitRouting: %v", err)
+	}
+	for _, r := range rulesOf(t, raw) {
+		if r["process"] != nil && r["outboundTag"] == "adblock" {
+			t.Errorf("listed processes sent to the second blackhole: %v", r)
+		}
+	}
+}
+
+// Two balancers for two sets of domains: each set keeps its balancer, in the
+// panel's order, and the panel's direct rule stays behind them.
+func TestApplySplitRoutingKeepsEveryBalancerRule(t *testing.T) {
+	cfg := `{
+      "outbounds": [
+        {"tag": "us1", "protocol": "vless"},
+        {"tag": "de1", "protocol": "vless"},
+        {"tag": "direct", "protocol": "freedom"}
+      ],
+      "routing": {
+        "balancers": [{"tag": "US", "selector": ["us"]}, {"tag": "DE", "selector": ["de"]}],
+        "rules": [
+          {"domain": ["netflix.com"], "balancerTag": "US"},
+          {"domain": ["spiegel.de"], "balancerTag": "DE"},
+          {"domain": ["geosite:ru"], "outboundTag": "direct"}
+        ]
+      }
+    }`
+	raw, err := ApplySplitRouting(json.RawMessage(cfg), []string{"Telegram.exe"})
+	if err != nil {
+		t.Fatalf("ApplySplitRouting: %v", err)
+	}
+	rules := rulesOf(t, raw)
+	if len(rules) != 5 {
+		t.Fatalf("got %d rules, want 5: %v", len(rules), rules)
+	}
+	want := []struct{ key, tag, domain string }{
+		{"balancerTag", "US", "netflix.com"},
+		{"balancerTag", "DE", "spiegel.de"},
+		{"outboundTag", "direct", "geosite:ru"},
+	}
+	for i, w := range want {
+		r := rules[i]
+		d, _ := r["domain"].([]any)
+		if r[w.key] != w.tag || len(d) != 1 || d[0] != w.domain {
+			t.Errorf("rule %d = %v, want %s → %s", i, r, w.domain, w.tag)
+		}
+		if (w.key == "balancerTag") != (r["process"] != nil) {
+			t.Errorf("rule %d = %v: only the tunnel rules are narrowed to the process", i, r)
+		}
+	}
+	if rules[3]["outboundTag"] != "us1" || rules[3]["process"] == nil {
+		t.Errorf("default rule = %v, want the listed process to the first outbound", rules[3])
+	}
+	if rules[4]["outboundTag"] != "direct" || rules[4]["process"] != nil {
+		t.Errorf("catch-all = %v, want everything else direct", rules[4])
+	}
+}
+
+// A panel with no rule into the tunnel relies on the first outbound: the
+// listed processes go there instead of the whole thing being refused.
+func TestApplySplitRoutingDefaultsToFirstOutbound(t *testing.T) {
+	cfg := `{
+      "outbounds": [
+        {"tag": "proxy", "protocol": "vless"},
+        {"tag": "direct", "protocol": "freedom"}
+      ],
+      "routing": {"rules": [{"domain": ["geosite:ru"], "outboundTag": "direct"}]}
+    }`
+	raw, err := ApplySplitRouting(json.RawMessage(cfg), []string{"Telegram.exe"})
+	if err != nil {
+		t.Fatalf("ApplySplitRouting: %v", err)
+	}
+	r := ruleWith(t, rulesOf(t, raw), "outboundTag", "proxy")
+	if r["process"] == nil {
+		t.Errorf("default rule = %v, want it narrowed to the listed process", r)
+	}
+}
+
+// A panel rule naming processes of its own keeps only the listed ones, and
+// goes when none of them is listed.
+func TestApplySplitRoutingIntersectsRuleProcesses(t *testing.T) {
+	cfg := `{
+      "outbounds": [
+        {"tag": "proxy", "protocol": "vless"},
+        {"tag": "direct", "protocol": "freedom"}
+      ],
+      "routing": {"rules": [
+        {"process": ["Telegram.exe", "chrome.exe"], "domain": ["a.example"], "outboundTag": "proxy"},
+        {"process": ["firefox.exe"], "domain": ["b.example"], "outboundTag": "proxy"}
+      ]}
+    }`
+	raw, err := ApplySplitRouting(json.RawMessage(cfg), []string{"telegram.exe"})
+	if err != nil {
+		t.Fatalf("ApplySplitRouting: %v", err)
+	}
+	rules := rulesOf(t, raw)
+	procs, _ := rules[0]["process"].([]any)
+	if len(procs) != 1 || procs[0] != "Telegram.exe" {
+		t.Errorf("rule 0 = %v, want its process list cut to Telegram.exe", rules[0])
+	}
+	for _, r := range rules {
+		if d, _ := r["domain"].([]any); len(d) == 1 && d[0] == "b.example" {
+			t.Errorf("a rule for unlisted processes only survived: %v", r)
+		}
 	}
 }
