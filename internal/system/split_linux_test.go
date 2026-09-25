@@ -415,6 +415,8 @@ func TestEnableSplitWithNoNamesClearsStaleRules(t *testing.T) {
 // An unprivileged run puts the cgroup under the delegated user@<uid>.service,
 // four levels down. The nft match has to follow it: "level 1" there names
 // user.slice and would capture the whole session instead of the listed apps.
+// And the path is spelled from the hierarchy root, which is how nft resolves
+// it: the last component alone names no cgroup at all (G05).
 func TestEnableSplitMatchesDelegatedCgroupLevel(t *testing.T) {
 	stub := withFakes(t, map[string]string{"42": "code"})
 	splitCgroup = filepath.Join(cgroupRoot, "user.slice", "user-1000.slice", "user@1000.service", "xray-split")
@@ -428,7 +430,7 @@ func TestEnableSplitMatchesDelegatedCgroupLevel(t *testing.T) {
 		if !strings.Contains(line, "add rule") {
 			continue
 		}
-		if !strings.Contains(line, `socket cgroupv2 level 4 "xray-split"`) {
+		if !strings.Contains(line, `socket cgroupv2 level 4 "user.slice/user-1000.slice/user@1000.service/xray-split"`) {
 			t.Errorf("rule = %q, want level 4 for the delegated cgroup", line)
 		}
 	}

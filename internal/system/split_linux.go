@@ -241,8 +241,11 @@ func installSplitRules(tcpPort, dnsPort int) error {
 	_, _ = nftCmd.run("nft", "delete", "table", "ip6", splitTable)
 
 	// The socket expression is the cgroup v2 match; meta cgroup is the v1
-	// net_cls classid and does not see this hierarchy.
-	match := []string{"socket", "cgroupv2", "level", strconv.Itoa(splitLevel()), `"` + filepath.Base(splitCgroup) + `"`}
+	// net_cls classid and does not see this hierarchy. nft resolves the string
+	// as a path under /sys/fs/cgroup when it loads the rule, so it names the
+	// cgroup from the hierarchy root, not by its last component: for the
+	// delegated one, "xray-split" alone is a cgroup that does not exist (G05).
+	match := []string{"socket", "cgroupv2", "level", strconv.Itoa(splitLevel()), `"` + strings.TrimPrefix(splitRel(), "/") + `"`}
 	rule := func(family, chain string, tail ...string) []string {
 		return append(append([]string{"add", "rule", family, splitTable, chain}, match...), tail...)
 	}
