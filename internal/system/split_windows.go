@@ -56,4 +56,12 @@ func EnableSplit(names []string, tcpPort, dnsPort int) (SplitScan, error) { retu
 
 func RefreshSplit(names []string) (SplitScan, error) { return SplitScan{}, nil }
 
+// EnableSplitFor is EnableSplit: nothing to do here.
+func EnableSplitFor(names []string, tcpPort, dnsPort, uid int) (SplitScan, error) {
+	return SplitScan{}, nil
+}
+
+// RefreshSplitFor is RefreshSplit: nothing to do here.
+func RefreshSplitFor(names []string, uid int) (SplitScan, error) { return SplitScan{}, nil }
+
 func DisableSplit() error { return nil }

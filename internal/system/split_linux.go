@@ -3,7 +3,9 @@
 package system
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"net"
@@ -179,6 +181,47 @@ func ListProcesses() ([]Process, error) {
 	return out, nil
 }
 
+// ownedBy reports whether user uid runs the process, by its real and
+// effective ids both: a setuid program the user started is not the user's.
+func ownedBy(pid string, uid int) bool {
+	data, err := os.ReadFile(filepath.Join(procRoot, pid, "status"))
+	if err != nil {
+		return false
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if v, ok := strings.CutPrefix(line, "Uid:"); ok {
+			f := strings.Fields(v)
+			return len(f) >= 2 && f[0] == strconv.Itoa(uid) && f[1] == strconv.Itoa(uid)
+		}
+	}
+	return false
+}
+
+// commLen is how much of a name /proc/<pid>/comm keeps.
+const commLen = 15
+
+// listedName matches a process name against the list, returning the list's
+// spelling. A name cut to comm's 15 characters matches the listed name it
+// begins: that is all a process of another user shows when the exe link is
+// not readable, as for the service, which has no right to read it.
+func listedName(name string, want map[string]string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	l := strings.ToLower(name)
+	if n, ok := want[l]; ok {
+		return n, true
+	}
+	if len(l) == commLen {
+		for k, n := range want {
+			if strings.HasPrefix(k, l) {
+				return n, true
+			}
+		}
+	}
+	return "", false
+}
+
 // procName is the process name for a pid, or "" for a kernel thread. The exe
 // link is what tells them apart, and its basename is usually the better name of
 // the two: /proc/<pid>/comm is truncated at 15 characters.
@@ -191,6 +234,16 @@ func ListProcesses() ([]Process, error) {
 // loses to the full "telegram-desktop").
 func procName(pid string) string {
 	exe, err := os.Readlink(filepath.Join(procRoot, pid, "exe"))
+	if errors.Is(err, fs.ErrPermission) {
+		// Somebody else's process, seen without the right to follow its exe
+		// link: comm is all there is. A kernel thread has no exe at all, and
+		// says ENOENT.
+		comm, cerr := os.ReadFile(filepath.Join(procRoot, pid, "comm"))
+		if cerr != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(comm))
+	}
 	if err != nil {
 		return ""
 	}
@@ -216,6 +269,13 @@ func procName(pid string) string {
 // The rules are installed even when nothing matched, so the caller can move
 // late-starting processes in without rebuilding the ruleset.
 func EnableSplit(names []string, tcpPort, dnsPort int) (SplitScan, error) {
+	return EnableSplitFor(names, tcpPort, dnsPort, -1)
+}
+
+// EnableSplitFor is EnableSplit that moves only the processes of user uid, or
+// anyone's for -1. The service runs the split for the user who asked (H10):
+// another user's processes are not theirs to send into the tunnel.
+func EnableSplitFor(names []string, tcpPort, dnsPort, uid int) (SplitScan, error) {
 	if len(names) == 0 {
 		// A run killed before its teardown (SIGKILL, power loss) leaves the table
 		// and a populated cgroup behind, and those processes keep redirecting
@@ -240,7 +300,7 @@ func EnableSplit(names []string, tcpPort, dnsPort int) (SplitScan, error) {
 		return SplitScan{}, err
 	}
 
-	scan, err := moveIntoSplit(names)
+	scan, err := moveIntoSplit(names, uid)
 	if err != nil {
 		_ = DisableSplit()
 		return SplitScan{}, err
@@ -336,20 +396,26 @@ func splitRuleset(tcpPort, dnsPort int) []nftChain {
 //
 // It is a no-op when the split tunnel is not up: no cgroup, nothing to join.
 func RefreshSplit(names []string) (SplitScan, error) {
+	return RefreshSplitFor(names, -1)
+}
+
+// RefreshSplitFor is RefreshSplit for the processes of user uid (-1: anyone).
+func RefreshSplitFor(names []string, uid int) (SplitScan, error) {
 	if len(names) == 0 || !fileExists(splitCgroup) {
 		return SplitScan{}, nil
 	}
-	return moveIntoSplit(names)
+	return moveIntoSplit(names, uid)
 }
 
-// moveIntoSplit puts every PID whose name is in the list into the split cgroup.
-func moveIntoSplit(names []string) (SplitScan, error) {
+// moveIntoSplit puts every PID whose name is in the list into the split cgroup;
+// with uid >= 0, only the processes that user runs.
+func moveIntoSplit(names []string, uid int) (SplitScan, error) {
 	splitMu.Lock()
 	defer splitMu.Unlock()
 
-	want := map[string]bool{}
+	want := map[string]string{}
 	for _, n := range names {
-		want[strings.ToLower(n)] = true
+		want[strings.ToLower(n)] = n
 	}
 
 	entries, err := os.ReadDir(procRoot)
@@ -365,8 +431,11 @@ func moveIntoSplit(names []string) (SplitScan, error) {
 		if _, err := strconv.Atoi(e.Name()); err != nil {
 			continue
 		}
-		name := procName(e.Name())
-		if name == "" || !want[strings.ToLower(name)] {
+		if uid >= 0 && !ownedBy(e.Name(), uid) {
+			continue
+		}
+		name, ok := listedName(procName(e.Name()), want)
+		if !ok {
 			continue
 		}
 		// Remember where the process lived before teardown puts it back: under
