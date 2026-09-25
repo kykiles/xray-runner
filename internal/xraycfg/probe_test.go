@@ -168,3 +168,31 @@ func TestPrependProbeRuleRefusesZonedIPv6(t *testing.T) {
 		t.Errorf("error does not name the zone: %v", err)
 	}
 }
+
+// A panel may put its direct outbound first and reach the server by rules: the
+// probe must still go to the server, not out direct.
+func TestPrependProbeRuleSkipsLocalFirstOutbound(t *testing.T) {
+	raw := json.RawMessage(`{
+		"outbounds": [{"tag": "direct", "protocol": "freedom"}, {"tag": "block", "protocol": "blackhole"}, {"tag": "proxy", "protocol": "vless"}],
+		"routing": {"rules": [{"network": "tcp,udp", "outboundTag": "proxy"}]}
+	}`)
+	out, err := PrependProbeRule(raw, []string{"full:www.google.com"})
+	if err != nil {
+		t.Fatalf("PrependProbeRule() = %v, want nil", err)
+	}
+	if got := rules(t, out); got[0]["outboundTag"] != "proxy" {
+		t.Errorf("probe rule = %v, want it aimed at proxy", got[0])
+	}
+}
+
+// Nothing but local outbounds: there is no tunnel to aim at, so no rule.
+func TestPrependProbeRuleLeavesLocalOnlyConfigAlone(t *testing.T) {
+	raw := json.RawMessage(`{"outbounds": [{"tag": "direct", "protocol": "freedom"}]}`)
+	out, err := PrependProbeRule(raw, []string{"full:www.google.com"})
+	if err != nil {
+		t.Fatalf("PrependProbeRule() = %v, want nil", err)
+	}
+	if string(out) != string(raw) {
+		t.Errorf("config = %s, want it unchanged", out)
+	}
+}
