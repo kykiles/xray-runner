@@ -532,7 +532,7 @@ func (a *App) buildModeSource(t *target) (json.RawMessage, sessionPorts, error) 
 		// The health check must travel the tunnel it reports on: the panel's own
 		// rules send the check hosts out direct, which is how the screen showed
 		// "ок" while nothing was going through the proxy (ADR-0002).
-		raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs()))
+		raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs()), a.probeInbounds()...)
 		if err != nil {
 			return nil, sessionPorts{}, err
 		}
@@ -574,11 +574,24 @@ func (a *App) buildModeSource(t *target) (json.RawMessage, sessionPorts, error) 
 	// and in tun, where the probe inbound's traffic goes through them. Without
 	// this rule the check could go direct and report the tunnel healthy while
 	// nothing at all goes through it (ADR-0002, A10).
-	if raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs())); err != nil {
+	if raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs()), a.probeInbounds()...); err != nil {
 		return nil, sessionPorts{}, err
 	}
 	ports, err := portsFromInbounds(inbounds, a.tunMode())
 	return raw, ports, err
+}
+
+// probeInbounds is where the probe rules apply. A tun session's probes go
+// through the probe inbound (A10), and only there: every process's traffic
+// comes in through the tun inbound, and a probe rule without this limit would
+// send any program's connection to a probe host into the tunnel — in split, an
+// unlisted one's too. In proxy mode the probe shares the http inbound with the
+// user's own traffic, so there is nothing to limit the rules to.
+func (a *App) probeInbounds() []string {
+	if a.tunMode() {
+		return []string{xraycfg.ProbeInboundTag}
+	}
+	return nil
 }
 
 // withSplitRouting rewrites a finished config so that only the processes from
@@ -612,7 +625,7 @@ func (a *App) singleServerFromProfile(t *target, inbounds []xraycfg.Inbound) (ra
 		raw, err = a.withSplitRouting(raw)
 	}
 	if err == nil {
-		raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs()))
+		raw, err = xraycfg.PrependProbeRule(raw, probeHosts(a.cfg.CheckURLs()), a.probeInbounds()...)
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("правила профиля не применить к серверу: %w", err)

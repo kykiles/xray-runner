@@ -27,7 +27,13 @@ import (
 // ip fields are alternatives the request has to satisfy together, and a request
 // carries a name or an address, never both — so an IP target gets a rule of its
 // own aimed at the same place (F04).
-func PrependProbeRule(raw json.RawMessage, hosts []string) (json.RawMessage, error) {
+//
+// inbounds, when given, limits the probe rules to the traffic of those inbounds.
+// A tun session passes its probe inbound: every process's traffic arrives
+// through the tun inbound, and a rule matching the probe hosts from any inbound
+// would send an unlisted browser's www.google.com through the tunnel, ahead of
+// the split's process rules and the panel's own direct ones.
+func PrependProbeRule(raw json.RawMessage, hosts []string, inbounds ...string) (json.RawMessage, error) {
 	if len(hosts) == 0 {
 		return raw, nil
 	}
@@ -50,6 +56,10 @@ func PrependProbeRule(raw json.RawMessage, hosts []string) (json.RawMessage, err
 		// Nothing to aim at — leave the config as it is rather than write a rule
 		// pointing at a tag that does not exist, which xray refuses to start on.
 		return raw, nil
+	}
+
+	if len(inbounds) > 0 {
+		aim["inboundTag"] = inbounds
 	}
 
 	// One rule per kind, and none at all for a kind with nothing in it: a rule

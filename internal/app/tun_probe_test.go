@@ -81,3 +81,60 @@ func TestTunProbe_FailsWithoutInbound(t *testing.T) {
 		t.Error("probe passed with the inbound down — it went around the tunnel")
 	}
 }
+
+// probeRules returns the rules aimed at the probe hosts of the default check
+// URLs.
+func probeRules(t *testing.T, raw json.RawMessage) []map[string]any {
+	t.Helper()
+	var cfg struct {
+		Routing struct {
+			Rules []map[string]any `json:"rules"`
+		} `json:"routing"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("config is not valid JSON: %v", err)
+	}
+	var out []map[string]any
+	for _, r := range cfg.Routing.Rules {
+		d, _ := r["domain"].([]any)
+		if len(d) > 0 && d[0] == "full:www.google.com" {
+			out = append(out, r)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("no probe rule in %v", cfg.Routing.Rules)
+	}
+	return out
+}
+
+// In tun the probe rules apply to the probe inbound only: on the tun inbound
+// they would catch every program's connection to a probe host.
+func TestBuildSessionConfig_TunProbeRuleOnProbeInbound(t *testing.T) {
+	a := newTemplateApp(t)
+	a.mode = "tun"
+	raw, _, err := a.buildSessionConfig(splitTarget())
+	if err != nil {
+		t.Fatalf("buildSessionConfig: %v", err)
+	}
+	for _, r := range probeRules(t, raw) {
+		in, _ := r["inboundTag"].([]any)
+		if len(in) != 1 || in[0] != "probe" {
+			t.Errorf("probe rule = %v, want inboundTag [probe]", r)
+		}
+	}
+}
+
+// In proxy mode the probe comes in through the http inbound like everything
+// else, so its rule stays unlimited.
+func TestBuildSessionConfig_ProxyProbeRuleUnlimited(t *testing.T) {
+	a := newTemplateApp(t)
+	raw, _, err := a.buildSessionConfig(splitTarget())
+	if err != nil {
+		t.Fatalf("buildSessionConfig: %v", err)
+	}
+	for _, r := range probeRules(t, raw) {
+		if r["inboundTag"] != nil {
+			t.Errorf("probe rule = %v, want no inboundTag in proxy mode", r)
+		}
+	}
+}
