@@ -146,12 +146,33 @@ func (r *Runner) Start(ctx context.Context) error {
 	return nil
 }
 
+// maxLogLine bounds one logged line of the core's output; a longer one is
+// logged in pieces of this size.
+const maxLogLine = 64 << 10
+
+// logPipe logs the core's output line by line until the core closes it. The
+// pipe is drained to the end whatever happens: a reader that stopped early —
+// bufio.Scanner does, on a line past its 64 KiB default — closed it, and the
+// core's next write then died on SIGPIPE, taking the session with it (G12).
 func logPipe(rc io.ReadCloser, level slog.Level) {
 	defer rc.Close()
 	scanner := bufio.NewScanner(rc)
+	scanner.Buffer(nil, maxLogLine)
+	scanner.Split(splitLinesCapped)
 	for scanner.Scan() {
 		slog.Log(context.Background(), level, scanner.Text())
 	}
+	_, _ = io.Copy(io.Discard, rc)
+}
+
+// splitLinesCapped is bufio.ScanLines that hands out a line longer than
+// maxLogLine in pieces instead of failing on it.
+func splitLinesCapped(data []byte, atEOF bool) (int, []byte, error) {
+	advance, token, err := bufio.ScanLines(data, atEOF)
+	if advance == 0 && token == nil && err == nil && len(data) >= maxLogLine {
+		return maxLogLine, data[:maxLogLine], nil
+	}
+	return advance, token, err
 }
 
 func (r *Runner) Stop() error {
