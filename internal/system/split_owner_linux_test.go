@@ -74,3 +74,82 @@ func TestListedName(t *testing.T) {
 		}
 	}
 }
+
+// For one user the scan does not close anything itself — the service cannot
+// tell whose sockets are whose — but names the processes it moved in, so the
+// user can list their connections and have them closed.
+func TestEnableSplitForHandsMovedToCaller(t *testing.T) {
+	stub := withFakes(t, map[string]string{"42": "code"})
+	writeStatus(t, "42", "1000\t1000\t1000\t1000")
+	scan, err := EnableSplitFor([]string{"code"}, 10810, 10853, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.Moved["42"] != "code" || len(scan.Unclosed) != 0 {
+		t.Fatalf("scan %+v", scan)
+	}
+	for _, c := range stub.calls {
+		if len(c) > 1 && c[0] == "ss" {
+			t.Fatalf("ss run by the service's scan: %v", c)
+		}
+	}
+	// A rescan that finds it already moved hands nothing over again.
+	if err := os.WriteFile(filepath.Join(procRoot, "42", "cgroup"), []byte("0::"+splitRel()+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scan, err = RefreshSplitFor([]string{"code"}, 1000)
+	if err != nil || len(scan.Moved) != 0 {
+		t.Fatalf("rescan %+v %v", scan, err)
+	}
+}
+
+// Only the user's own sockets are closed, and only those the split would
+// have redirected; the rest are reported open and left alone.
+func TestCloseConnsChecksOwner(t *testing.T) {
+	stub := withFakes(t, nil)
+	stub.killed = true
+	mine := Conn{Src: "192.168.1.5:40000", Dst: "160.79.104.10:443"}
+	lan := Conn{Src: "192.168.1.5:40001", Dst: "192.168.1.1:443"}
+	bad := Conn{Src: "x; rm", Dst: "160.79.104.10:443"}
+
+	stub.sockUID = "1000"
+	if open := CloseConns([]Conn{mine, lan, bad}, 1000); len(open) != 2 || open[0] != lan || open[1] != bad {
+		t.Fatalf("open %v", open)
+	}
+	kills := 0
+	for _, c := range stub.calls {
+		if c[0] == "ss" && c[1] == "-K" {
+			kills++
+		}
+	}
+	if kills != 1 {
+		t.Fatalf("%d kills, want 1", kills)
+	}
+
+	stub.sockUID = "1001"
+	if open := CloseConns([]Conn{mine}, 1000); len(open) != 1 {
+		t.Fatal("another user's connection closed")
+	}
+	stub.sockUID = ""
+	if open := CloseConns([]Conn{mine}, 1000); len(open) != 1 {
+		t.Fatal("root's connection closed for a user")
+	}
+	if open := CloseConns([]Conn{mine}, 0); len(open) != 0 {
+		t.Fatal("root's own connection not closed")
+	}
+}
+
+func TestConnsOf(t *testing.T) {
+	stub := withFakes(t, nil)
+	stub.ssOut = `0 0 192.168.1.5:40000 160.79.104.10:443 users:(("code",pid=42,fd=20),("code",pid=43,fd=20))
+0 0 127.0.0.1:5000 127.0.0.1:6000 users:(("code",pid=42,fd=21))
+0 0 192.168.1.5:40002 1.1.1.1:443 users:(("sshd",pid=99,fd=3))`
+	conns, err := ConnsOf(map[string]bool{"42": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Conn{Src: "192.168.1.5:40000", Dst: "160.79.104.10:443"}
+	if len(conns) != 1 || len(conns[want]) != 1 || conns[want][0] != "42" {
+		t.Fatalf("conns %v", conns)
+	}
+}

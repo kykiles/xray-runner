@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +27,10 @@ type fakeService struct {
 	hello   ipc.HelloReply
 	stopped chan struct{}
 	once    sync.Once
+	// split
+	moved    map[string]string
+	open     []system.Conn
+	closeReq ipc.CloseConns
 }
 
 func newFakeService() *fakeService {
@@ -55,7 +61,17 @@ func (f *fakeService) Call(ctx context.Context, typ string, req, reply any) erro
 	case ipc.TypeStop:
 		f.once.Do(func() { close(f.stopped) })
 	case ipc.TypeEnableSplit, ipc.TypeRefreshSplit:
-		*reply.(*ipc.SplitReply) = ipc.SplitReply{Matched: req.(ipc.SplitRequest).Names}
+		f.mu.Lock()
+		moved := f.moved
+		f.moved = nil
+		f.mu.Unlock()
+		*reply.(*ipc.SplitReply) = ipc.SplitReply{Matched: req.(ipc.SplitRequest).Names, Moved: moved}
+	case ipc.TypeCloseConns:
+		f.mu.Lock()
+		f.closeReq = req.(ipc.CloseConns)
+		open := f.open
+		f.mu.Unlock()
+		*reply.(*ipc.CloseConnsReply) = ipc.CloseConnsReply{Open: open}
 	}
 	return nil
 }
@@ -217,5 +233,54 @@ func TestUseServiceRoutesSplit(t *testing.T) {
 	want := []string{ipc.TypeEnableSplit, ipc.TypeRefreshSplit, ipc.TypeDisableSplit}
 	if got := f.callList(); !slices.Equal(got, want) {
 		t.Fatalf("calls %v, want %v", got, want)
+	}
+}
+
+// Processes the service moved into the split had connections from before the
+// move: the interface lists them, the service closes them, and one that stays
+// open keeps its process listed as unclosed while it runs.
+func TestServiceSplitClosesOldConnections(t *testing.T) {
+	if system.SplitOverTUN {
+		t.Skip("the split rides on the tunnel here")
+	}
+	a := newTemplateApp(t)
+	f := newFakeService()
+	a.attachService(f)
+	self := strconv.Itoa(os.Getpid())
+	gone := "999999999"
+	c1 := system.Conn{Src: "192.168.1.5:1", Dst: "1.1.1.1:443"}
+	c2 := system.Conn{Src: "192.168.1.5:2", Dst: "1.1.1.1:443"}
+	old := connsOf
+	connsOf = func(pids map[string]bool) (map[system.Conn][]string, error) {
+		if !pids[self] || !pids[gone] {
+			t.Errorf("pids %v", pids)
+		}
+		return map[system.Conn][]string{c1: {self}, c2: {gone}}, nil
+	}
+	t.Cleanup(func() { connsOf = old })
+	f.moved = map[string]string{self: "code", gone: "curl"}
+	f.open = []system.Conn{c1, c2}
+
+	scan, err := a.serviceEnableSplit([]string{"code", "curl"}, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.closeReq.Conns) != 2 {
+		t.Fatalf("close request %v", f.closeReq)
+	}
+	// curl's process is gone, and its connection with it.
+	if !slices.Equal(scan.Unclosed, []string{"code"}) {
+		t.Fatalf("unclosed %v", scan.Unclosed)
+	}
+	// Still listed on the next scan, which moves nothing new.
+	f.open = nil
+	scan, err = a.serviceRefreshSplit([]string{"code"})
+	if err != nil || !slices.Equal(scan.Unclosed, []string{"code"}) {
+		t.Fatalf("rescan unclosed %v %v", scan.Unclosed, err)
+	}
+	_ = a.serviceDisableSplit()
+	scan, _ = a.serviceRefreshSplit([]string{"code"})
+	if len(scan.Unclosed) != 0 {
+		t.Fatalf("unclosed after disable %v", scan.Unclosed)
 	}
 }

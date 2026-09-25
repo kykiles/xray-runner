@@ -65,3 +65,9 @@ func EnableSplitFor(names []string, tcpPort, dnsPort, uid int) (SplitScan, error
 func RefreshSplitFor(names []string, uid int) (SplitScan, error) { return SplitScan{}, nil }
 
 func DisableSplit() error { return nil }
+
+// CloseConns has nothing to close here: the split is built on the tunnel.
+func CloseConns(conns []Conn, uid int) []Conn { return nil }
+
+// ConnsOf has nothing to list here.
+func ConnsOf(pids map[string]bool) (map[Conn][]string, error) { return nil, nil }

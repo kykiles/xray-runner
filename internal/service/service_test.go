@@ -48,6 +48,7 @@ type fakeMachine struct {
 	splitCall int
 	lastSpec  app.ServiceTun
 	listener  int // uid on the redirect port; -1 for none
+	closeUID  int
 }
 
 func (m *fakeMachine) deps() Deps {
@@ -74,6 +75,12 @@ func (m *fakeMachine) deps() Deps {
 		},
 		RefreshSplit: func(names []string, uid int) (system.SplitScan, error) {
 			return system.SplitScan{Matched: names}, nil
+		},
+		CloseConns: func(conns []system.Conn, uid int) []system.Conn {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			m.closeUID = uid
+			return conns[1:]
 		},
 		DisableSplit: func() error {
 			m.mu.Lock()
@@ -403,5 +410,57 @@ func TestServeEndsSession(t *testing.T) {
 	}
 	if _, down := r.m.counts(); down != 1 {
 		t.Fatal("session left up")
+	}
+}
+
+// A client that reconnects before the service has noticed its old connection
+// drop still gets its session back: the token is proof enough, and the old
+// connection is dropped from the session.
+func TestResumeBeforeDropNoticed(t *testing.T) {
+	r := newRig(t)
+	c := r.connect(alice, "")
+	token := start(t, c)
+	c2 := r.connect(alice, token) // the old connection is still open
+	if err := c.Call(ctxT(t), ipc.TypeStop, struct{}{}, nil); err == nil {
+		t.Fatal("the replaced connection still controls the session")
+	}
+	_ = c.Close()
+	time.Sleep(400 * time.Millisecond) // past the grace period
+	if _, down := r.m.counts(); down != 0 {
+		t.Fatal("the old connection's drop took the resumed session down")
+	}
+	if err := c2.Call(ctxT(t), ipc.TypeStop, struct{}{}, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Old connections are closed only for the split's own connection, and as the
+// asking user: the service checks each socket against that uid.
+func TestCloseConns(t *testing.T) {
+	if system.SplitOverTUN {
+		t.Skip("the split is built on the tunnel here")
+	}
+	r := newRig(t)
+	c := r.connect(alice, "")
+	req := ipc.CloseConns{Conns: []system.Conn{{Src: "a:1", Dst: "b:2"}, {Src: "c:3", Dst: "d:4"}}}
+	if err := c.Call(ctxT(t), ipc.TypeCloseConns, req, nil); err == nil {
+		t.Fatal("closed connections without a split")
+	}
+	if err := c.Call(ctxT(t), ipc.TypeEnableSplit, ipc.SplitRequest{Names: []string{"curl"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	other := r.connect(alice, "")
+	if err := other.Call(ctxT(t), ipc.TypeCloseConns, req, nil); err == nil {
+		t.Fatal("another connection closed the split's connections")
+	}
+	var rep ipc.CloseConnsReply
+	if err := c.Call(ctxT(t), ipc.TypeCloseConns, req, &rep); err != nil {
+		t.Fatal(err)
+	}
+	r.m.mu.Lock()
+	uid := r.m.closeUID
+	r.m.mu.Unlock()
+	if uid != alice.UID || len(rep.Open) != 1 || rep.Open[0].Src != "c:3" {
+		t.Fatalf("uid %d, open %v", uid, rep.Open)
 	}
 }

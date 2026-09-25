@@ -37,6 +37,7 @@ type Deps struct {
 	EnableSplit  func(names []string, uid int) (system.SplitScan, error)
 	RefreshSplit func(names []string, uid int) (system.SplitScan, error)
 	DisableSplit func() error
+	CloseConns   func(conns []system.Conn, uid int) []system.Conn
 	// ListenerUID is the owner of the local TCP listener on port, false when
 	// nothing listens there.
 	ListenerUID func(port int) (int, bool)
@@ -177,6 +178,9 @@ func (s *Service) handle(c *ipc.Conn) {
 			c.Reply(m.ID, reply, err)
 		case ipc.TypeDisableSplit:
 			c.Reply(m.ID, nil, s.disableSplit(c))
+		case ipc.TypeCloseConns:
+			reply, err := s.closeConns(c, m)
+			c.Reply(m.ID, reply, err)
 		default:
 			c.Reply(m.ID, nil, fmt.Errorf("неизвестный запрос %q", m.Type))
 		}
@@ -184,18 +188,24 @@ func (s *Service) handle(c *ipc.Conn) {
 }
 
 // resume hands the session named by token back to the same user's new
-// connection, if it waits for one.
+// connection. The old connection may not have been seen to drop yet — a
+// client reconnects as soon as it notices, and the service can notice later —
+// so it is taken over whether it waits in its grace period or not: the token
+// went to that one connection only, and whoever holds it is its client.
 func (s *Service) resume(c *ipc.Conn, token string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess := s.sess
-	if sess == nil || sess.conn != nil || sess.owner != c.Peer.Key ||
+	if sess == nil || sess.owner != c.Peer.Key ||
 		subtle.ConstantTimeCompare([]byte(sess.token), []byte(token)) != 1 {
 		return false
 	}
 	if sess.grace != nil {
 		sess.grace.Stop()
 		sess.grace = nil
+	}
+	if old := sess.conn; old != nil {
+		old.Close()
 	}
 	sess.conn = c
 	slog.Info("служба: сессия возвращена интерфейсу", "user", c.Peer.Name, "kind", sess.kind)
@@ -493,7 +503,7 @@ func (s *Service) split(c *ipc.Conn, m ipc.Message) (*ipc.SplitReply, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &ipc.SplitReply{Token: cur.token, Matched: scan.Matched, Unclosed: scan.Unclosed}, nil
+		return &ipc.SplitReply{Token: cur.token, Matched: scan.Matched, Unclosed: scan.Unclosed, Moved: scan.Moved}, nil
 	}
 
 	if len(req.Names) == 0 {
@@ -524,7 +534,33 @@ func (s *Service) split(c *ipc.Conn, m ipc.Message) (*ipc.SplitReply, error) {
 		return nil, err
 	}
 	sess.names = req.Names
-	return &ipc.SplitReply{Token: sess.token, Matched: scan.Matched, Unclosed: scan.Unclosed}, nil
+	return &ipc.SplitReply{Token: sess.token, Matched: scan.Matched, Unclosed: scan.Unclosed, Moved: scan.Moved}, nil
+}
+
+// maxConns bounds a close_conns request.
+const maxConns = 4096
+
+// closeConns closes connections of the split's owner that predate the move
+// of their process; each is checked to be the owner's socket (system.CloseConns).
+func (s *Service) closeConns(c *ipc.Conn, m ipc.Message) (*ipc.CloseConnsReply, error) {
+	s.mu.Lock()
+	sess := s.sess
+	s.mu.Unlock()
+	if sess == nil || sess.kind != "split" || sess.conn != c {
+		return nil, errors.New("нет раздельной маршрутизации этого подключения")
+	}
+	var req ipc.CloseConns
+	if err := json.Unmarshal(m.Body, &req); err != nil {
+		return nil, fmt.Errorf("запрос не разобран: %w", err)
+	}
+	if len(req.Conns) > maxConns {
+		return nil, errors.New("слишком много соединений в запросе")
+	}
+	uid := c.Peer.UID
+	if uid == 0 {
+		uid = -1
+	}
+	return &ipc.CloseConnsReply{Open: s.d.CloseConns(req.Conns, uid)}, nil
 }
 
 func (s *Service) disableSplit(c *ipc.Conn) error {

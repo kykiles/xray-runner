@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 
+	"xray-runner/internal/system"
 	"xray-runner/internal/xraycfg"
 )
 
@@ -42,6 +43,7 @@ const (
 	TypeEnableSplit  = "enable_split"
 	TypeRefreshSplit = "refresh_split"
 	TypeDisableSplit = "disable_split"
+	TypeCloseConns   = "close_conns"
 	TypeReply        = "reply"
 	TypeEvent        = "event"
 )
@@ -114,6 +116,23 @@ type SplitReply struct {
 	Token    string   `json:"token,omitempty"`
 	Matched  []string `json:"matched"`
 	Unclosed []string `json:"unclosed,omitempty"`
+	// Moved names the processes just moved in, pid → name. Their
+	// connections from before the move still go past the tunnel; the
+	// service cannot see which sockets are theirs, the user can, and asks
+	// for them to be closed with CloseConns.
+	Moved map[string]string `json:"moved,omitempty"`
+}
+
+// CloseConns asks the service to close connections of the caller's that
+// went past the tunnel before their process joined the split. Each one is
+// checked to be the caller's socket before it is closed.
+type CloseConns struct {
+	Conns []system.Conn `json:"conns"`
+}
+
+// CloseConnsReply lists the connections still open afterwards.
+type CloseConnsReply struct {
+	Open []system.Conn `json:"open,omitempty"`
 }
 
 // StatusReply describes the service's session, if any.

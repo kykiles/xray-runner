@@ -59,6 +59,7 @@ type stubNft struct {
 	killOut string // what "ss -K" prints
 	killed  bool   // "ss -K" closes the connection it is given
 	gone    bool   // the connection ends on its own before "ss -K" gets to it
+	sockUID string // the uid "ss -tnHe" shows on the socket, "" for root's
 }
 
 func (s *stubNft) lookPath(string) error {
@@ -82,6 +83,14 @@ func (s *stubNft) run(bin string, args ...string) ([]byte, error) {
 	if bin == "ss" && len(args) > 0 && args[0] == "-K" {
 		// Like the real one, ss -K exits 0 whether it closed anything or not.
 		return []byte(s.killOut), nil
+	}
+	if bin == "ss" && len(args) > 0 && args[0] == "-tnHe" {
+		src, dst := args[slices.Index(args, "src")+1], args[slices.Index(args, "dst")+1]
+		line := "0 0 " + src + " " + dst + " ino:1 sk:2"
+		if s.sockUID != "" {
+			line += " uid:" + s.sockUID
+		}
+		return []byte(line + "\n"), nil
 	}
 	if bin == "ss" && len(args) > 0 && args[0] == "-tnH" {
 		// Is the connection from src to dst still up?

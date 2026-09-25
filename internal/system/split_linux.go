@@ -467,7 +467,18 @@ func moveIntoSplit(names []string, uid int) (SplitScan, error) {
 		home := maps.Clone(splitHome)
 		note(func(j *journal) { j.SplitHome = home })
 	}
-	maps.Copy(splitUnclosed, killLeaked(moved))
+	var handed map[string]string
+	if uid >= 0 {
+		// The service cannot tell which sockets are whose: another user's fd
+		// links are not its to read. The user can, and closes them through
+		// CloseConns, which checks each socket is theirs.
+		handed = map[string]string{}
+		for pid := range moved {
+			handed[pid] = seen[pid]
+		}
+	} else {
+		maps.Copy(splitUnclosed, killLeaked(moved))
+	}
 	unclosed := map[string]bool{}
 	for pid := range splitUnclosed {
 		name, ok := seen[pid]
@@ -484,7 +495,7 @@ func moveIntoSplit(names []string, uid int) (SplitScan, error) {
 		out = append(out, n)
 	}
 	sort.Strings(out)
-	return SplitScan{Matched: out, Unclosed: slices.Sorted(maps.Keys(unclosed))}, nil
+	return SplitScan{Matched: out, Unclosed: slices.Sorted(maps.Keys(unclosed)), Moved: handed}, nil
 }
 
 // killLeaked closes the TCP connections the given processes had open before they
@@ -506,19 +517,42 @@ func killLeaked(pids map[string]bool) map[string]bool {
 	if len(pids) == 0 {
 		return nil
 	}
-	unclosed := map[string]bool{}
-	// ss prints the process next to each socket, which saves mapping inode
-	// numbers out of /proc/<pid>/fd ourselves.
-	out, err := ssCmd.run("ss", "-tnHp", "state", "established")
+	conns, err := ConnsOf(pids)
 	if err != nil {
 		// Without the list nothing was closed, and nothing says there was
 		// nothing to close.
 		slog.Warn("split: old connections not closed, they bypass the tunnel", "pids", slices.Sorted(maps.Keys(pids)), "error", err)
+		unclosed := map[string]bool{}
 		for pid := range pids {
 			unclosed[pid] = true
 		}
 		return unclosed
 	}
+	var list []Conn
+	for c := range conns {
+		list = append(list, c)
+	}
+	unclosed := map[string]bool{}
+	for _, c := range closeConns(list, -1) {
+		for _, pid := range conns[c] {
+			unclosed[pid] = true
+		}
+	}
+	return unclosed
+}
+
+// ConnsOf lists the established connections of the given processes that the
+// split would have redirected, each with the processes holding it. Run as the
+// processes' user, it needs no privilege: ss names the owner of the user's
+// own sockets.
+func ConnsOf(pids map[string]bool) (map[Conn][]string, error) {
+	// ss prints the process next to each socket, which saves mapping inode
+	// numbers out of /proc/<pid>/fd ourselves.
+	out, err := ssCmd.run("ss", "-tnHp", "state", "established")
+	if err != nil {
+		return nil, err
+	}
+	conns := map[Conn][]string{}
 	for line := range strings.SplitSeq(string(out), "\n") {
 		f := strings.Fields(line)
 		if len(f) < 3 || !strings.HasPrefix(f[len(f)-1], "users:") {
@@ -529,22 +563,86 @@ func killLeaked(pids map[string]bool) map[string]bool {
 		if len(owners) == 0 || !routable(peer) {
 			continue
 		}
+		c := Conn{Src: local, Dst: peer}
+		conns[c] = append(conns[c], owners...)
+	}
+	return conns, nil
+}
+
+// CloseConns closes the connections that belong to user uid and returns those
+// still open afterwards. A connection that is not uid's — or not one the split
+// would redirect — is left alone and counts as open. The service runs it for
+// the user who moved the processes (H10).
+func CloseConns(conns []Conn, uid int) []Conn {
+	return closeConns(conns, uid)
+}
+
+func closeConns(conns []Conn, uid int) []Conn {
+	var open []Conn
+	for _, c := range conns {
+		if !routable(c.Dst) || !validAddr(c.Src) {
+			open = append(open, c)
+			continue
+		}
+		if uid >= 0 && !connOwnedBy(c, uid) {
+			open = append(open, c)
+			continue
+		}
 		// ss -K is no answer on its own: it exits 0 when the kernel refuses (no
 		// CAP_NET_ADMIN, no CONFIG_INET_DIAG_DESTROY) and prints nothing then —
 		// nor when the connection ended by itself meanwhile, which is no leak.
 		// Whether the connection is still up afterwards is the answer.
-		res, err := ssCmd.run("ss", "-K", "state", "established", "src", local, "dst", peer)
-		if !stillOpen(local, peer) {
-			slog.Debug("split: closed pre-existing connection", "src", local, "dst", peer)
+		res, err := ssCmd.run("ss", "-K", "state", "established", "src", c.Src, "dst", c.Dst)
+		if !stillOpen(c.Src, c.Dst) {
+			slog.Debug("split: closed pre-existing connection", "src", c.Src, "dst", c.Dst)
 			continue
 		}
 		slog.Warn("split: old connection not closed, it bypasses the tunnel",
-			"pids", owners, "src", local, "dst", peer, "error", err, "ss", strings.TrimSpace(string(res)))
-		for _, pid := range owners {
-			unclosed[pid] = true
-		}
+			"src", c.Src, "dst", c.Dst, "error", err, "ss", strings.TrimSpace(string(res)))
+		open = append(open, c)
 	}
-	return unclosed
+	return open
+}
+
+// validAddr is an address ss can take as a filter: host:port, nothing else.
+func validAddr(addr string) bool {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return false
+	}
+	_, err = netip.ParseAddr(host)
+	return err == nil
+}
+
+// connOwnedBy reports whether the socket local → peer is user uid's, by the
+// uid the kernel keeps on it (ss -e). ss leaves uid out for root's.
+func connOwnedBy(c Conn, uid int) bool {
+	out, err := ssCmd.run("ss", "-tnHe", "state", "established", "src", c.Src, "dst", c.Dst)
+	if err != nil {
+		return false
+	}
+	want := "uid:" + strconv.Itoa(uid)
+	found := false
+	for line := range strings.SplitSeq(string(out), "\n") {
+		f := strings.Fields(line)
+		if !slices.Contains(f, c.Src) || !slices.Contains(f, c.Dst) {
+			continue
+		}
+		owner := ""
+		for _, x := range f {
+			if strings.HasPrefix(x, "uid:") {
+				owner = x
+			}
+		}
+		if owner != want && !(uid == 0 && owner == "") {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 // stillOpen reports whether ss still lists the connection local → peer. A

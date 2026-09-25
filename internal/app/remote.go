@@ -9,7 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
+	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -50,6 +53,10 @@ type remoteState struct {
 	token string
 	// ended receives why the service ended the session on its own.
 	ended chan error
+	// unclosed are the split's moved processes, pid → name, whose
+	// connections from before the move could not be closed; they stay listed
+	// until the process exits, as system's own bookkeeping keeps them (14b).
+	unclosed map[string]string
 }
 
 // useService connects to the service when there is one. Without it — none
@@ -361,15 +368,80 @@ func (a *App) serviceSplit(typ string, names []string) (system.SplitScan, error)
 	if err := c.Call(ctx, typ, ipc.SplitRequest{Names: names}, &r); err != nil {
 		return system.SplitScan{}, err
 	}
+	failed := a.closeMovedConns(ctx, c, r.Moved)
+
 	a.remote.mu.Lock()
+	defer a.remote.mu.Unlock()
 	if r.Token != "" {
 		a.remote.token = r.Token
 	}
-	a.remote.mu.Unlock()
-	return system.SplitScan{Matched: r.Matched, Unclosed: r.Unclosed}, nil
+	if a.remote.unclosed == nil {
+		a.remote.unclosed = map[string]string{}
+	}
+	for pid, name := range failed {
+		a.remote.unclosed[pid] = name
+	}
+	unclosed := map[string]bool{}
+	for _, n := range r.Unclosed {
+		unclosed[n] = true
+	}
+	for pid, name := range a.remote.unclosed {
+		if n, err := strconv.Atoi(pid); err != nil || !processAlive(n) {
+			// The process exited, and its sockets with it.
+			delete(a.remote.unclosed, pid)
+			continue
+		}
+		unclosed[name] = true
+	}
+	return system.SplitScan{Matched: r.Matched, Unclosed: slices.Sorted(maps.Keys(unclosed))}, nil
 }
 
+// closeMovedConns closes the connections the processes just moved into the
+// split had open from before: those go past the tunnel, which only a close
+// cures. This process lists them — they are its user's own sockets, which
+// the service may not map to processes — and the service closes each after
+// checking it is this user's. It returns the processes left with one open.
+func (a *App) closeMovedConns(ctx context.Context, c serviceConn, moved map[string]string) map[string]string {
+	if len(moved) == 0 {
+		return nil
+	}
+	pids := map[string]bool{}
+	for pid := range moved {
+		pids[pid] = true
+	}
+	failed := map[string]string{}
+	conns, err := connsOf(pids)
+	if err != nil {
+		slog.Warn("split: old connections not listed, they bypass the tunnel", "error", err)
+		return moved
+	}
+	if len(conns) == 0 {
+		return nil
+	}
+	req := ipc.CloseConns{}
+	for conn := range conns {
+		req.Conns = append(req.Conns, conn)
+	}
+	var rep ipc.CloseConnsReply
+	if err := c.Call(ctx, ipc.TypeCloseConns, req, &rep); err != nil {
+		slog.Warn("split: old connections not closed, they bypass the tunnel", "error", err)
+		return moved
+	}
+	for _, conn := range rep.Open {
+		for _, pid := range conns[conn] {
+			failed[pid] = moved[pid]
+		}
+	}
+	return failed
+}
+
+// connsOf lists the processes' connections; a variable so tests need no ss.
+var connsOf = system.ConnsOf
+
 func (a *App) serviceDisableSplit() error {
+	a.remote.mu.Lock()
+	a.remote.unclosed = nil
+	a.remote.mu.Unlock()
 	c := a.service()
 	if c == nil {
 		return nil

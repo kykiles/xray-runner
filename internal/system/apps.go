@@ -26,6 +26,16 @@ type Process struct {
 type SplitScan struct {
 	Matched  []string
 	Unclosed []string
+	// Moved names the processes this scan moved in from outside, pid → name,
+	// when their connections from before the move are the caller's to close
+	// (EnableSplitFor for one user: see CloseConns).
+	Moved map[string]string
+}
+
+// Conn is one established TCP connection, as ss spells its ends.
+type Conn struct {
+	Src string `json:"src"`
+	Dst string `json:"dst"`
 }
 
 // LoadApps reads the process names to route through the proxy. Blank lines and

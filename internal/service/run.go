@@ -90,6 +90,7 @@ func setUp(version string) (*Service, ipc.Listener, error) {
 		},
 		RefreshSplit: system.RefreshSplitFor,
 		DisableSplit: system.DisableSplit,
+		CloseConns:   system.CloseConns,
 		ListenerUID:  listenerUID,
 		Binary:       binary,
 		CoreVersion:  strings.TrimSpace(firstLine(coreVer)),
