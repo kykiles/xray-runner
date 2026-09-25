@@ -36,6 +36,7 @@ func sudoOwner() (uid, gid int, ok bool) {
 var reclaimedFiles = []string{
 	system.AppsFile,
 	"subscriptions.txt",
+	"subscriptions.enc",
 	"last_server.json",
 	"hwid.txt",
 	"xray_config.json",

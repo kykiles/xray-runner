@@ -6,11 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"xray-runner/internal/config"
 	"xray-runner/internal/safefile"
+	"xray-runner/internal/secret"
 )
 
 type NamedSubscription struct {
@@ -19,19 +23,130 @@ type NamedSubscription struct {
 }
 
 // subscriptionsFile overrides where the list lives; empty means "resolve it",
-// which is what every run does. Tests set it to a temp file.
+// which is what every run does. Tests set it to a temp file, and the sealed
+// copy then sits beside it.
 var subscriptionsFile = ""
 
-// subsPath is the resolved location of the subscription list.
-func subsPath() string {
+// sealer is where the sealing key comes from. Overridable in tests.
+var sealer = secret.Default
+
+const (
+	plainName  = "subscriptions.txt"
+	sealedName = "subscriptions.enc"
+)
+
+// store is where the list lives. The subscription URLs carry the panel's
+// access tokens, so the list is sealed with a key the OS keeps for the user
+// (package secret): subscriptions.enc in the data dir. Two cases stay plain:
+//
+//   - portable: a subscriptions.txt with something in it next to the program.
+//     A key the OS keeps is bound to this user on this machine, and a list
+//     that travels on a flash drive would not open on the next one. Moving
+//     the file into the data dir seals it on the next start;
+//   - no key store: a headless server without a Secret Service. The file is
+//     kept 0600 as before, and StorageNote says so.
+//
+// A plain list found in the data dir — every install before this — is sealed
+// the first time it is read, and the plain copy removed once the sealed one
+// is written.
+type store struct {
+	plain, sealed string
+	portable      bool
+}
+
+func locate() store {
 	if subscriptionsFile != "" {
-		return subscriptionsFile
+		return store{plain: subscriptionsFile, sealed: filepath.Join(filepath.Dir(subscriptionsFile), sealedName)}
 	}
-	return config.Path("subscriptions.txt")
+	if dir := config.ProgramDir(); dir != "" {
+		p := filepath.Join(dir, plainName)
+		if fi, err := os.Stat(p); err == nil && fi.Size() > 0 {
+			return store{plain: p, portable: true}
+		}
+	}
+	dir := config.DataDir()
+	if dir == "" {
+		// Nowhere of the user's own: next to the program, as before.
+		p := config.Path(plainName)
+		return store{plain: p, portable: true}
+	}
+	return store{plain: filepath.Join(dir, plainName), sealed: filepath.Join(dir, sealedName)}
+}
+
+// readSubs returns the list as text, from whichever form it is kept in.
+func readSubs() ([]byte, error) {
+	st := locate()
+	if st.portable {
+		return safefile.ReadFile(st.plain)
+	}
+	blob, err := safefile.ReadFile(st.sealed)
+	if err == nil {
+		s, err := sealer()
+		if err != nil {
+			return nil, fmt.Errorf("подписки зашифрованы (%s), но ключ недоступен: %w", st.sealed, err)
+		}
+		data, err := s.Open(blob)
+		if err != nil {
+			return nil, fmt.Errorf("подписки %s (%s): %w", st.sealed, s.Name(), err)
+		}
+		return data, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	data, err := safefile.ReadFile(st.plain)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := sealer(); err == nil && len(bytes.TrimSpace(data)) > 0 {
+		// Best-effort: the list is read either way.
+		if err := writeSubs(data); err != nil {
+			slog.Warn("subscriptions not sealed", "error", err)
+		}
+	}
+	return data, nil
+}
+
+// writeSubs replaces the list, sealed unless the store says otherwise.
+func writeSubs(data []byte) error {
+	st := locate()
+	if st.portable {
+		return writeFileAtomic(st.plain, data)
+	}
+	s, err := sealer()
+	if err != nil {
+		return writeFileAtomic(st.plain, data)
+	}
+	blob, err := s.Seal(data)
+	if err != nil {
+		return fmt.Errorf("write subscriptions: %w", err)
+	}
+	if err := writeFileAtomic(st.sealed, blob); err != nil {
+		return err
+	}
+	// Only once the sealed copy is on disk; a plain one left behind would still
+	// hand the tokens to whoever reads it.
+	if err := os.Remove(st.plain); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("зашифрованная копия записана, открытая не удалена: %w", err)
+	}
+	return nil
+}
+
+// StorageNote says how the list is kept when it is not sealed, and why — for
+// the screen once per start — and is empty when it is sealed.
+func StorageNote() string {
+	st := locate()
+	if st.portable {
+		return ""
+	}
+	if _, err := sealer(); err != nil {
+		return "Подписки хранятся без шифрования, в файле с доступом только для вас: " + err.Error() + "."
+	}
+	return ""
 }
 
 func LoadSubscriptions() ([]NamedSubscription, error) {
-	data, err := safefile.ReadFile(subsPath())
+	data, err := readSubs()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -72,7 +187,7 @@ func LoadSubscriptions() ([]NamedSubscription, error) {
 }
 
 func RemoveSubscription(index int) error {
-	data, err := safefile.ReadFile(subsPath())
+	data, err := readSubs()
 	if err != nil {
 		return fmt.Errorf("read subscriptions: %w", err)
 	}
@@ -114,7 +229,7 @@ func RemoveSubscription(index int) error {
 		sb.WriteString(e.url + "\n")
 	}
 
-	return writeFileAtomic(subsPath(), []byte(sb.String()))
+	return writeSubs([]byte(sb.String()))
 }
 
 // writeFileAtomic replaces the list through a temp file (safefile.WriteFile),
@@ -138,7 +253,7 @@ func NameSubscription(rawURL, name string) error {
 		return nil
 	}
 
-	data, err := safefile.ReadFile(subsPath())
+	data, err := readSubs()
 	if err != nil {
 		return fmt.Errorf("read subscriptions: %w", err)
 	}
@@ -162,7 +277,7 @@ func NameSubscription(rawURL, name string) error {
 	if !named {
 		return nil
 	}
-	return writeFileAtomic(subsPath(), []byte(strings.Join(out, "\n")+"\n"))
+	return writeSubs([]byte(strings.Join(out, "\n") + "\n"))
 }
 
 // SaveSubscription adds rawURL to the list unless it is already there. The
@@ -180,7 +295,7 @@ func SaveSubscription(rawURL string) error {
 		}
 	}
 
-	data, err := safefile.ReadFile(subsPath())
+	data, err := readSubs()
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("save subscription: %w", err)
 	}
@@ -188,5 +303,5 @@ func SaveSubscription(rawURL string) error {
 		data = append(data, '\n')
 	}
 	data = append(data, rawURL+"\n"...)
-	return writeFileAtomic(subsPath(), data)
+	return writeSubs(data)
 }

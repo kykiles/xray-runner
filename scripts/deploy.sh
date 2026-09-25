@@ -81,9 +81,10 @@ cp LICENSE "$BIN_DIR/"
 [ "$GOOS" = "windows" ] && cp LICENSE-wintun.txt "$BIN_DIR/"
 
 # Ship the config from the tracked template, never the working .env — the local
-# .env / subscriptions.txt hold real tokens and must not leak into a bundle.
+# .env and subscriptions hold real tokens and must not leak into a bundle. No
+# subscriptions.txt either: one next to the program is the portable, unsealed
+# list, and a bundle starts with the sealed one in the data dir.
 cp .env.example "$DEPLOY_DIR/.env"
-: > "$DEPLOY_DIR/subscriptions.txt"
 
 echo "==> Deploy folder: $DEPLOY_DIR"
 ls -la "$DEPLOY_DIR/" "$BIN_DIR/"

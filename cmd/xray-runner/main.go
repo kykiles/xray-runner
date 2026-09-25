@@ -13,6 +13,7 @@ import (
 	"xray-runner/internal/app"
 	"xray-runner/internal/config"
 	applog "xray-runner/internal/log"
+	"xray-runner/internal/secret"
 	"xray-runner/internal/tui"
 	"xray-runner/internal/ui"
 )
@@ -29,6 +30,12 @@ func main() {
 // sudo run used to leave its state files root-owned for the next run without
 // sudo (G10).
 func run() int {
+	// The key helper a sudo run starts as the invoking user (package secret):
+	// before flags, config and the log, none of which it has any use for.
+	if len(os.Args) == 2 && os.Args[1] == secret.HelperArg {
+		return secret.HelperMain()
+	}
+
 	flagVersion := flag.Bool("version", false, "show version")
 	flagConfig := flag.String("config", "", "path to .env file (default: .env next to the program)")
 	// U-2: scripted/non-interactive selection.

@@ -46,10 +46,11 @@ jobs:
 
           # The licenses travel with the binaries they cover; the config comes
           # from the tracked template, never a working .env with real tokens.
+          # No subscriptions.txt: one next to the program is the portable,
+          # unsealed list, and a bundle starts with the sealed one.
           cp LICENSE LICENSE-wintun.txt "$dir/bin/"
           cp README.md "$dir/"
           cp .env.example "$dir/.env"
-          : > "$dir/subscriptions.txt"
           cp scripts/windows-test-checklist.md "$dir/CHECKLIST.md"
 
           echo "BUNDLE=$name" >> "$GITHUB_ENV"

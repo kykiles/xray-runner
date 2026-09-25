@@ -16,6 +16,7 @@ import (
 	"golang.org/x/term"
 
 	"xray-runner/internal/config"
+	"xray-runner/internal/subscription"
 	"xray-runner/internal/system"
 	"xray-runner/internal/tui"
 	"xray-runner/internal/ui"
@@ -211,6 +212,7 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	a.recoverLeftovers()
+	a.noteSubscriptionStorage()
 
 	// U-2: scripted selection runs exactly one session and never shows a menu.
 	if a.opts.Server != "" || a.opts.UseLast || a.opts.NonInteractive {
@@ -294,6 +296,21 @@ func (a *App) tunReady() error {
 		return fmt.Errorf("нужен xray-core %s или новее, установлен %s", xray.MinVersion, parseCoreVersion(a.coreVer))
 	}
 	return nil
+}
+
+// noteSubscriptionStorage says once, on the first status screen, that the
+// subscription list is kept unsealed and why: no Secret Service on this
+// machine, typically a headless server.
+func (a *App) noteSubscriptionStorage() {
+	note := subscription.StorageNote()
+	if note == "" {
+		return
+	}
+	slog.Warn("subscriptions stored unsealed", "reason", note)
+	if a.pendingNote != "" {
+		note = a.pendingNote + " " + note
+	}
+	a.pendingNote = note
 }
 
 // splitOff drops back to plain proxy and says why — on screen once, in the log

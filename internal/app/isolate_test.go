@@ -22,6 +22,10 @@ func isolateState(t *testing.T) {
 	cache := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", cache)
 	t.Setenv("LocalAppData", cache)
+	// No Secret Service: the subscriptions of a test stay plain, and a test run
+	// on a desktop leaves its keyring alone. DPAPI on Windows needs no such
+	// care — it keeps nothing but the sealed file itself.
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
 	placeProgram(t)
 }
 
