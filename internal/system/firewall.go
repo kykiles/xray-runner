@@ -19,4 +19,9 @@ type Endpoint struct {
 // blackhole. Empty → no server exception at all.
 type KillSwitchConfig struct {
 	Endpoints []Endpoint
+	// Core is the path of the xray binary the session runs. Windows lets the
+	// program itself through, which is how traffic the panel routes `direct`
+	// leaves the physical adapter; Linux lets it through by its socket mark
+	// instead and ignores this.
+	Core string
 }

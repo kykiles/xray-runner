@@ -121,12 +121,6 @@ func Load(filenames ...string) (*Config, error) {
 	if !ValidMode(cfg.Mode) {
 		return nil, fmt.Errorf("MODE must be 'proxy' or 'tun', got %q", cfg.Mode)
 	}
-	// A02: the netsh kill switch blocked xray itself and a WFP one does not exist
-	// yet. Refused at start, so no mode — not even one the m key reaches later —
-	// runs while the user believes they are protected.
-	if cfg.KillSwitch && goos == "windows" {
-		errs = append(errs, errors.New("KILL_SWITCH: kill switch на Windows не поддерживается — уберите KILL_SWITCH=true из .env"))
-	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}

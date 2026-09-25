@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,6 +56,7 @@ func TestWindowsEndToEnd(t *testing.T) {
 
 	t.Run("proxy", e.testProxy)
 	t.Run("tun", e.testTun)
+	t.Run("kill switch", e.testKillSwitch)
 	t.Run("killed app", e.testKilledApp)
 	t.Run("killed tun app", e.testKilledTunApp)
 }
@@ -66,6 +68,7 @@ type env struct {
 	logDir string
 	link   string
 	server *server
+	alias  string // the physical adapter
 }
 
 func newEnv(t *testing.T, coreDir string) *env {
@@ -78,9 +81,13 @@ func newEnv(t *testing.T, coreDir string) *env {
 	}
 	e := &env{appDir: t.TempDir(), logDir: logDir}
 	buildApp(t, coreDir, e.appDir)
-	alias := physicalAlias(t)
-	t.Logf("physical adapter: %s", alias)
-	e.server = startServer(t, coreDir, logDir, alias)
+	e.alias = physicalAlias(t)
+	t.Logf("physical adapter: %s", e.alias)
+	// The server runs the app's own core, not the release's copy: its freedom
+	// outbound leaves by the physical adapter, which the kill switch opens to
+	// the session's core alone — by path. A real server sits on another
+	// machine, out of the kill switch's reach.
+	e.server = startServer(t, filepath.Join(e.appDir, "bin"), logDir, e.alias)
 	e.link = fmt.Sprintf("vless://%s@%s:%d?type=tcp&security=none&encryption=none#e2e", serverUUID, serverAddr, e.server.port)
 	return e
 }
@@ -135,6 +142,101 @@ func (e *env) testTun(t *testing.T) {
 		}
 	}
 	waitExit(t, core, 15*time.Second, "the core outlived its session")
+}
+
+// testKillSwitch: with KILL_SWITCH=true the tunnel still carries traffic, and
+// a connection that leaves by the physical adapter the way a direct one would
+// is refused — until the app is killed outright, when the filters go with its
+// WFP session and nothing is left to take down (H08).
+func (e *env) testKillSwitch(t *testing.T) {
+	// The bypass must work without the kill switch, or its failure below would
+	// prove nothing.
+	if err := dialPhysical(e.alias); err != nil {
+		t.Fatalf("a connection past the tunnel fails before the session: %v", err)
+	}
+
+	r := e.startApp(t, "kill-switch", "tun", "KILL_SWITCH=true")
+	r.waitLog(t, "msg=connected", 120*time.Second)
+	r.waitLog(t, "kill switch enabled", 5*time.Second)
+	if !wfpFiltersPresent(t) {
+		t.Errorf("no kill switch filter in WFP during the session")
+	}
+
+	mark := e.server.mark()
+	get(t, nil)
+	e.server.waitAccess(t, mark, targetLog)
+	if err := dialPhysical(e.alias); err == nil {
+		t.Errorf("a connection by the physical adapter went through with the kill switch on")
+	} else {
+		t.Logf("past the tunnel, as expected: %v", err)
+	}
+
+	core := r.corePID(t)
+	r.kill(t)
+	waitExit(t, core, 15*time.Second, "the core outlived an app killed outright")
+	if wfpFiltersPresent(t) {
+		t.Errorf("kill switch filters outlived the app that set them")
+	}
+	if err := dialPhysical(e.alias); err != nil {
+		t.Errorf("a connection past the tunnel still fails after the app was killed: %v", err)
+	}
+}
+
+// dialPhysical connects to target by the physical adapter, whatever the
+// routing table says — the way the core sends direct traffic (IP_UNICAST_IF).
+func dialPhysical(alias string) error {
+	ifi, err := net.InterfaceByName(alias)
+	if err != nil {
+		return err
+	}
+	d := net.Dialer{
+		Timeout: 10 * time.Second,
+		Control: func(_, _ string, c syscall.RawConn) error {
+			var serr error
+			err := c.Control(func(fd uintptr) {
+				// IP_UNICAST_IF takes the index in network byte order.
+				idx := uint32(ifi.Index)
+				be := idx>>24 | idx>>8&0xff00 | idx<<8&0xff0000 | idx<<24
+				serr = windows.SetsockoptInt(windows.Handle(fd), windows.IPPROTO_IP, ipUnicastIf, int(be))
+			})
+			if err != nil {
+				return err
+			}
+			return serr
+		},
+	}
+	c, err := d.Dial("tcp4", net.JoinHostPort(target, "80"))
+	if err != nil {
+		return err
+	}
+	return c.Close()
+}
+
+// ipUnicastIf is IP_UNICAST_IF from ws2ipdef.h.
+const ipUnicastIf = 31
+
+// wfpFiltersPresent reports whether any filter of the app's kill switch is in
+// WFP, by the display name it gives them.
+func wfpFiltersPresent(t *testing.T) bool {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "filters.xml")
+	if out, err := exec.Command("netsh", "wfp", "show", "filters", "file="+file).CombinedOutput(); err != nil {
+		t.Fatalf("netsh wfp show filters: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const name = "xray-runner kill switch"
+	if strings.Contains(string(data), name) {
+		return true
+	}
+	// The file may come out in UTF-16.
+	wide := make([]byte, 0, 2*len(name))
+	for _, c := range []byte(name) {
+		wide = append(wide, c, 0)
+	}
+	return bytes.Contains(data, wide)
 }
 
 // testKilledApp: an app killed outright runs no teardown. Its core must go with
@@ -242,7 +344,7 @@ type appRun struct {
 // startApp runs one scripted session (--server 1) in mode, without a terminal,
 // in a process group of its own so a Ctrl+Break can be sent to it alone. The
 // data dir is fresh for each run.
-func (e *env) startApp(t *testing.T, name, mode string) *appRun {
+func (e *env) startApp(t *testing.T, name, mode string, env ...string) *appRun {
 	t.Helper()
 	r := &appRun{
 		name: name,
@@ -267,6 +369,8 @@ func (e *env) startApp(t *testing.T, name, mode string) *appRun {
 		"PROXY_SYSTEM=true",
 		"KILL_SWITCH=false",
 	)
+	// Later entries win: exec keeps the last value of a repeated variable.
+	r.cmd.Env = append(r.cmd.Env, env...)
 	r.cmd.Stdout, r.cmd.Stderr = out, out
 	r.cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
 	if err := r.cmd.Start(); err != nil {

@@ -83,6 +83,25 @@ func TestBringUpTun_KillSwitchWithoutEndpointsFailsSession(t *testing.T) {
 	}
 }
 
+// H08: the Windows kill switch lets the session's own core through — that is
+// how direct traffic leaves — so the core's path has to reach it.
+func TestBringUpTun_KillSwitchNamesCore(t *testing.T) {
+	var spy killSwitchSpy
+	var got system.KillSwitchConfig
+	a := newKillSwitchApp(&spy, func(c system.KillSwitchConfig) error { got = c; return nil })
+	a.serverHost, a.serverPort = "203.0.113.5", 443
+	a.binary = "/opt/xray-runner/bin/xray"
+
+	l := a.newTunLifecycle(killSwitchTarget(), sessionPorts{}, false)
+	if err := l.afterStart(context.Background()); err != nil {
+		t.Fatalf("tun setup: %v", err)
+	}
+	defer l.afterStop()
+	if got.Core != a.binary {
+		t.Errorf("kill switch core = %q, want %q", got.Core, a.binary)
+	}
+}
+
 // Split over the tunnel (Windows) is set up as tun, minus the kill switch: it
 // would cut everything the split sends past the tunnel on purpose (ADR-0003).
 func TestBringUpTun_SplitSkipsKillSwitch(t *testing.T) {

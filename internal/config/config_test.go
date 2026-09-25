@@ -282,20 +282,18 @@ func TestLoad_AcceptsValidBool(t *testing.T) {
 	}
 }
 
-// A02: the netsh kill switch blocked xray itself, so Windows refuses the setting
-// at start instead of promising a protection it does not deliver.
-func TestLoad_KillSwitchRefusedOnWindows(t *testing.T) {
+// H08: Windows has a kill switch of its own now (WFP), so the setting is taken
+// there as it is on Linux rather than refused at start.
+func TestLoad_KillSwitchOnWindows(t *testing.T) {
 	withGOOS(t, "windows")
 
 	t.Setenv("KILL_SWITCH", "true")
-	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "не поддерживается") {
-		t.Fatalf("KILL_SWITCH=true on Windows: err = %v, want a refusal", err)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("KILL_SWITCH=true on Windows: %v", err)
 	}
-
-	t.Setenv("KILL_SWITCH", "false")
-	if _, err := Load(); err != nil {
-		t.Fatalf("KILL_SWITCH=false on Windows: %v", err)
+	if !cfg.KillSwitch {
+		t.Fatalf("KILL_SWITCH=true on Windows left the kill switch off")
 	}
 }
 

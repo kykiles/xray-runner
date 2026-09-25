@@ -1026,7 +1026,7 @@ func (a *App) enableTunKillSwitch(t *target, split bool) error {
 			// An empty whitelist would cut xray's own uplink along with the leak.
 			return fmt.Errorf("kill switch не включён: не удалось определить IP серверов")
 		}
-		if err := a.enableKillSwitch(system.KillSwitchConfig{Endpoints: endpoints}); err != nil {
+		if err := a.enableKillSwitch(system.KillSwitchConfig{Endpoints: endpoints, Core: a.binary}); err != nil {
 			return fmt.Errorf("kill switch не включился: %w", err)
 		}
 		a.killSwitchOn = true
