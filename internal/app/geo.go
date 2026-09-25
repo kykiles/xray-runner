@@ -17,8 +17,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"xray-runner/internal/config"
 	"xray-runner/internal/subscription"
 	"xray-runner/internal/updater"
+	"xray-runner/internal/xray"
 	"xray-runner/internal/xraycfg"
 )
 
@@ -46,11 +48,20 @@ func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
 		slog.Info("geo databases in use", "dir", dir)
 	}()
 
+	a.dropLegacyGeoDir()
 	if src.GeoEmpty() {
 		return
 	}
 
-	root := filepath.Join(filepath.Dir(a.binary), "geo")
+	// In the user's cache, not beside the core (H03): a core found on PATH sits
+	// among somebody else's files. Made the way the data dir is, so a run
+	// without sudo can read and replace what a sudo run downloaded.
+	root, err := config.CacheSubdir("geo")
+	if err != nil {
+		slog.Warn("гео-базы подписки не установлены", "error", err)
+		note = fmt.Sprintf("Гео-базы панели не скачаны (%v) — используются базы ядра.", err)
+		return
+	}
 	pruneGeoDirs(root, subURL)
 
 	panelDir := filepath.Join(root, subKey(subURL))
@@ -58,7 +69,7 @@ func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
 		dir = panelDir
 		return
 	}
-	if err := os.MkdirAll(panelDir, 0o750); err != nil {
+	if panelDir, err = config.CacheSubdir("geo", subKey(subURL)); err != nil {
 		slog.Warn("гео-базы подписки не установлены", "error", err)
 		note = fmt.Sprintf("Гео-базы панели не скачаны (%v) — используются базы ядра.", err)
 		return
@@ -86,6 +97,25 @@ func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
 	}
 	slog.Info("panel geo databases installed", "dir", panelDir)
 	dir = panelDir
+}
+
+// dropLegacyGeoDir removes the geo/ directory earlier versions kept the panel's
+// databases in, beside the core. Only beside the program's own core: that
+// directory is the program's; beside a core found on PATH nothing is touched.
+// What was there is downloaded again into the cache on the next open.
+func (a *App) dropLegacyGeoDir() {
+	if !xray.Bundled(a.binary, config.ProgramDir()) {
+		return
+	}
+	old := filepath.Join(filepath.Dir(a.binary), "geo")
+	if _, err := os.Lstat(old); err != nil {
+		return
+	}
+	if err := os.RemoveAll(old); err != nil {
+		slog.Warn("старые гео-базы рядом с ядром не удалены", "dir", old, "error", err)
+		return
+	}
+	slog.Info("old geo databases beside the core removed, the cache holds them now", "dir", old)
 }
 
 // noteGeoDatabases puts the note of a failed panel geo update on the screen the

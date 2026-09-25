@@ -32,14 +32,14 @@ func TestSudoOwnerAbsentWithoutSudo(t *testing.T) {
 
 // The regression this guards: reclaim used to walk the working directory, which
 // under sudo hands over whatever tree the user launched from — /etc for a binary
-// on PATH. Only the app's own directories may be walked: the data dir, its
-// configs/ next to the program, and keys/ that -dump-links makes.
+// on PATH. Only the app's own directories may be walked: the data dir, the
+// cache, configs/ next to the program, and keys/ that -dump-links makes.
 func TestReclaimWalksOnlyOwnDirs(t *testing.T) {
-	data := config.DataDir()
+	data, cache := config.DataDir(), config.CacheDir()
 	programConfigs := filepath.Join(config.ProgramDir(), "configs")
 	for _, dir := range reclaimedDirs() {
 		switch {
-		case dir == "" || dir == data || dir == programConfigs || dir == "keys":
+		case dir == "" || dir == data || dir == cache || dir == programConfigs || dir == "keys":
 		default:
 			t.Errorf("reclaimedDirs contains %q, which is not the app's own directory", dir)
 		}

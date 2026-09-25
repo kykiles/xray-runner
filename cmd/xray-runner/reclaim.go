@@ -44,11 +44,12 @@ var reclaimedFiles = []string{
 }
 
 // reclaimedDirs are the directories the app creates whole, walked recursively.
-// The data dir is ours by construction; configs/ next to the program is where
+// The data dir and the cache are ours by construction; configs/ next to the
+// program is where
 // an older install keeps the config viewer's files, and keys/ is what
 // -dump-links writes into the working directory.
 func reclaimedDirs() []string {
-	dirs := []string{config.DataDir(), "keys"}
+	dirs := []string{config.DataDir(), config.CacheDir(), "keys"}
 	if dir := config.ProgramDir(); dir != "" {
 		dirs = append(dirs, filepath.Join(dir, "configs"))
 	}

@@ -211,6 +211,7 @@ func (e *env) startApp(t *testing.T, name, mode string) *appRun {
 		"SUBSCRIPTION_URL="+e.link,
 		"MODE="+mode,
 		"APPDATA="+t.TempDir(),
+		"LOCALAPPDATA="+t.TempDir(),
 		"LOG_FILE="+r.log,
 		"LOG_LEVEL=debug",
 		"XRAY_LOG_LEVEL=info",

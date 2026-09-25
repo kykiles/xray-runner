@@ -304,7 +304,7 @@ cp .env.example .env
 | `MODE` | `proxy` | `proxy` (HTTP+SOCKS5) или `tun` (VPN). Маршрутизация по процессам включается сама в режиме `proxy`, когда `apps.txt` не пуст. Режим, выбранный клавишей `m`, сохраняется в `last_server.json` и при следующих запусках перекрывает `MODE` |
 | `PROXY_SYSTEM` | `true` | Включать системный прокси в режиме `proxy`. `false` — через VPN идут только программы из `apps.txt` |
 | `LOG_ENABLED` | `true` | Писать лог в файл (в консоль лог не пишется) |
-| `LOG_FILE` | `xray-runner.log` | Путь к лог-файлу; относительный — в папке данных |
+| `LOG_FILE` | `xray-runner.log` | Путь к лог-файлу; относительный — в папке данных (на Windows — в `%LOCALAPPDATA%\xray-runner`) |
 | `LOG_LEVEL` | `info` | Уровень файлового лога: `debug`, `info`, `warn`, `error` |
 | `MASK_CREDENTIALS` | `true` | Маскировать UUID/pbk/sid в выводе |
 | `XRAY_LOG_LEVEL` | `warning` | Уровень лога Xray: `debug`, `info`, `warning`, `error`, `none` |
@@ -345,8 +345,17 @@ cp .env.example .env
 
 Настройки и состояние программа хранит в папке данных пользователя: `~/.config/xray-runner/`
 на Linux (под `sudo` — в папке того, кто вызвал `sudo`) и `%APPDATA%\xray-runner\` на
-Windows. Там лежат `subscriptions.txt`, `apps.txt`, `last_server.json`, `hwid`, лог,
-сохранённые конфиги `configs/` и lock-файл.
+Windows. Там лежат `subscriptions.txt`, `apps.txt`, `last_server.json`, сохранённые конфиги
+`configs/` и lock-файл, а на Linux ещё `hwid` и лог.
+
+На Windows то, что относится к одному компьютеру, — `hwid` и лог — лежит в
+`%LOCALAPPDATA%\xray-runner\`: `%APPDATA%` в доменных сетях копируется на другие
+компьютеры, а идентификатор устройства у каждого свой. `hwid` из старой версии переносится
+туда сам, с тем же значением.
+
+Гео-базы, которые указывает панель подписки, скачиваются в кэш: `~/.cache/xray-runner/geo/`
+на Linux и `%LOCALAPPDATA%\xray-runner\geo\` на Windows. Их можно удалить — при следующем
+открытии подписки они скачаются снова. Старая папка `geo/` рядом с ядром удаляется сама.
 
 Если файл с таким же именем уже лежит рядом с программой, берётся он: так продолжают
 работать старые установки и запуск с флешки. Папка, из которой программу запустили,

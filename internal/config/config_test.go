@@ -42,6 +42,10 @@ func isolateHWID(t *testing.T) string {
 	placeProgram(t)
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("AppData", dir)
+	// The HWID lives in LocalAppData on Windows (H04), and the cache is kept
+	// out of the real profile the same way.
+	t.Setenv("XDG_CACHE_HOME", dir)
+	t.Setenv("LocalAppData", dir)
 	return dir
 }
 

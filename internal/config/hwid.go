@@ -34,6 +34,18 @@ func GetOrCreateHWID(override string) string {
 	if hwid := readHWID(path); hwid != "" {
 		return hwid
 	}
+	// Where earlier versions kept it on Windows, in Roaming (H04): carried over
+	// as it is, since a new value would be a new device to the panel.
+	if data := DataDir(); data != "" {
+		if old := filepath.Join(data, "hwid"); old != path {
+			if hwid := readHWID(old); hwid != "" {
+				if err := writeHWID(path, hwid); err != nil {
+					slog.Warn("HWID not moved to the local data dir, reading it from the old place", "from", old, "to", path, "error", err)
+				}
+				return hwid
+			}
+		}
+	}
 
 	hwid := generateHWID()
 	if err := writeHWID(path, hwid); err != nil {
@@ -53,11 +65,11 @@ func readHWID(path string) string {
 	return strings.TrimSpace(string(data))
 }
 
-// hwidPath returns the preferred HWID location in the data dir, falling back to
-// the program's directory when it is unavailable. Under sudo the data dir belongs to the invoking
+// hwidPath returns the preferred HWID location in LocalDir, falling back to the
+// program's directory when it is unavailable. Under sudo the data dir belongs to the invoking
 // user, so a TUN run and a proxy run report the same device to the panel.
 func hwidPath() string {
-	dir := DataDir()
+	dir := LocalDir()
 	if dir == "" {
 		return filepath.Join(ProgramDir(), hwidFile)
 	}

@@ -147,7 +147,7 @@ func newGeoApp(t *testing.T) (*App, string) {
 	coreDir := t.TempDir()
 	a.binary = filepath.Join(coreDir, "xray")
 	writeGeoPair(t, coreDir, []string{"google"}, time.Now())
-	return a, filepath.Join(coreDir, "geo", subKey(geoSubURL))
+	return a, filepath.Join(config.CacheDir(), "geo", subKey(geoSubURL))
 }
 
 // unreachableGeo points both databases at a loopback port nobody listens on, so
@@ -211,4 +211,38 @@ func readGeoPair(t *testing.T, dir string) geoPairState {
 		s.mtime = fi.ModTime()
 	}
 	return s
+}
+
+// Earlier versions kept the panel's databases in geo/ beside the core. Beside
+// the program's own core that directory is dropped, the cache holding them now;
+// beside a core found on PATH nothing is touched (H03).
+func TestDropLegacyGeoDir(t *testing.T) {
+	isolateState(t)
+	prog := config.ProgramDir()
+	elsewhere := t.TempDir()
+	for name, tc := range map[string]struct {
+		core    string
+		removed bool
+	}{
+		"bundled core": {filepath.Join(prog, "bin", "xray"), true},
+		"core on PATH": {filepath.Join(elsewhere, "xray"), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			old := filepath.Join(filepath.Dir(tc.core), "geo", subKey(geoSubURL))
+			if err := os.MkdirAll(old, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(old, "geoip.dat"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			a := &App{binary: tc.core}
+
+			a.dropLegacyGeoDir()
+
+			_, err := os.Stat(filepath.Dir(old))
+			if gone := os.IsNotExist(err); gone != tc.removed {
+				t.Errorf("geo/ beside the core removed = %v, want %v", gone, tc.removed)
+			}
+		})
+	}
 }

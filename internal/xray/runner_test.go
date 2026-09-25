@@ -520,10 +520,6 @@ func TestMeetsMinVersion(t *testing.T) {
 // anywhere else, on PATH, is not the program's to overwrite (H05).
 func TestBundled(t *testing.T) {
 	prog := filepath.Join(t.TempDir(), "app")
-	orig := osExecutable
-	osExecutable = func() (string, error) { return filepath.Join(prog, "xray-runner"), nil }
-	t.Cleanup(func() { osExecutable = orig })
-
 	for path, want := range map[string]bool{
 		filepath.Join(prog, "xray"):                      true,
 		filepath.Join(prog, "bin", "xray"):               true,
@@ -531,8 +527,11 @@ func TestBundled(t *testing.T) {
 		filepath.Join(t.TempDir(), "usr", "bin", "xray"): false,
 		filepath.Join(prog, "bin", "sub", "xray"):        false,
 	} {
-		if got := Bundled(path); got != want {
+		if got := Bundled(path, prog); got != want {
 			t.Errorf("Bundled(%q) = %v, want %v", path, got, want)
 		}
+	}
+	if Bundled(filepath.Join(prog, "xray"), "") {
+		t.Error("a core counted as the program's with no program dir to compare to")
 	}
 }

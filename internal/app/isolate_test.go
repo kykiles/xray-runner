@@ -18,6 +18,10 @@ func isolateState(t *testing.T) {
 	data := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", data)
 	t.Setenv("AppData", data)
+	// The cache too (H03): XDG_CACHE_HOME on Linux, LocalAppData on Windows.
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	t.Setenv("LocalAppData", cache)
 	placeProgram(t)
 }
 

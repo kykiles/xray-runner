@@ -21,7 +21,7 @@ func Init(cfg *config.Config) func() {
 		return func() {}
 	}
 
-	// Resolved through config.Path, not left relative to the working directory:
+	// Resolved through config.LocalPath, not left relative to the working directory:
 	// LOG_FILE defaults to a bare name, and an install under Program Files
 	// cannot write next to the binary — the run would then have no log at all.
 	// An absolute path from the environment is taken as given.
@@ -30,7 +30,7 @@ func Init(cfg *config.Config) func() {
 		logFile = "xray-runner.log"
 	}
 	if !filepath.IsAbs(logFile) {
-		logFile = config.Path(logFile)
+		logFile = config.LocalPath(logFile)
 	}
 
 	// Truncated, not appended: xray's own output lands here, and a TUN session

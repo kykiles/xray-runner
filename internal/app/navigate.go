@@ -230,7 +230,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 			}
 			if action == tui.SubsUpdate {
 				// Update core/geo, then return to the subscription list.
-				if err := tui.RunUpdate(ctx, a.binary, coreVersion(a.binary), xray.Bundled(a.binary)); err != nil {
+				if err := tui.RunUpdate(ctx, a.binary, coreVersion(a.binary), xray.Bundled(a.binary, config.ProgramDir())); err != nil {
 					tui.ReleaseScreen() // readable on the normal buffer, see menuLoop
 					ui.Error(err.Error())
 				}

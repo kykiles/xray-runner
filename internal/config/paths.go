@@ -5,6 +5,7 @@ package config
 // the single-file build littered the folder it was double-clicked from.
 
 import (
+	"errors"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -69,21 +70,89 @@ func DataDir() string {
 		return ""
 	}
 	dir := filepath.Join(base, "xray-runner")
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if ownDir(dir) != nil {
 		return ""
 	}
-	// Created by root under sudo, and the next run without sudo would not be
-	// able to read its own subscriptions, so it is handed back to the invoking
-	// user. Best-effort, as everywhere else — except that a symlink at the final
-	// component is not followed but refused: the handback would otherwise give
-	// the user whatever the link pointed at, a path to root. A tampered data dir
-	// is dropped rather than written to.
-	if uid, gid, ok := sudoOwner(); ok {
-		if err := chownDirToSudoUser(dir, uid, gid); err != nil {
-			return ""
-		}
+	return dir
+}
+
+// CacheDir is the per-user directory for what can be downloaded again — the
+// panel's geo databases — created on first use: ~/.cache/xray-runner (the
+// invoking user's under sudo) and %LOCALAPPDATA%\xray-runner on Windows. Empty
+// when the OS won't say where it is. Not next to the core, where they used to
+// go: a core found on PATH sits among somebody else's files (H03).
+func CacheDir() string {
+	base, err := userCacheBase()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Join(base, "xray-runner")
+	if ownDir(dir) != nil {
+		return ""
 	}
 	return dir
+}
+
+// CacheSubdir is a directory under CacheDir, each level made the way CacheDir
+// is, so a run without sudo can read and replace what a sudo run put there.
+func CacheSubdir(elem ...string) (string, error) {
+	dir := CacheDir()
+	if dir == "" {
+		return "", errors.New("папка кэша недоступна")
+	}
+	for _, e := range elem {
+		dir = filepath.Join(dir, e)
+		if err := ownDir(dir); err != nil {
+			return "", err
+		}
+	}
+	return dir, nil
+}
+
+// ownDir makes dir (0700) and, under sudo, hands it back to the invoking user:
+// made by root, it would keep the next run without sudo from reading what is
+// inside. Best-effort, as everywhere else — except that a symlink at the final
+// component is not followed but refused: the handback would otherwise give the
+// user whatever the link pointed at, a path to root. A tampered dir is dropped
+// rather than written to.
+func ownDir(dir string) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if uid, gid, ok := sudoOwner(); ok {
+		return chownDirToSudoUser(dir, uid, gid)
+	}
+	return nil
+}
+
+// LocalDir is where what belongs to this one machine is kept: the HWID — one
+// per device, by definition — and the log. On Windows that is %LOCALAPPDATA%:
+// %APPDATA% is Roaming, copied to every machine a domain profile signs in on,
+// which would hand them all one HWID (H04). Elsewhere it is the data dir: the
+// cache is for what may be thrown away, and a lost HWID is a new device to the
+// panel.
+func LocalDir() string {
+	if goos == "windows" {
+		if dir := CacheDir(); dir != "" {
+			return dir
+		}
+	}
+	return DataDir()
+}
+
+// LocalPath is Path for a file of LocalDir's: one already next to the program
+// wins, as there.
+func LocalPath(name string) string {
+	if dir := ProgramDir(); dir != "" {
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	if dir := LocalDir(); dir != "" {
+		return filepath.Join(dir, name)
+	}
+	return Path(name)
 }
 
 // userConfigBase is os.UserConfigDir, except that under sudo it answers for the
@@ -97,6 +166,17 @@ func userConfigBase() (string, error) {
 		}
 	}
 	return os.UserConfigDir()
+}
+
+// userCacheBase is os.UserCacheDir, answering for the user behind sudo the way
+// userConfigBase does.
+func userCacheBase() (string, error) {
+	if uid, _, ok := sudoOwner(); ok {
+		if u, err := user.LookupId(strconv.Itoa(uid)); err == nil && u.HomeDir != "" {
+			return filepath.Join(u.HomeDir, ".cache"), nil
+		}
+	}
+	return os.UserCacheDir()
 }
 
 // sudoOwner is the user behind a sudo invocation; absent on Windows and on a
