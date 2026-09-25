@@ -3,8 +3,9 @@ package system
 import (
 	"errors"
 	"io/fs"
-	"os"
 	"strings"
+
+	"xray-runner/internal/safefile"
 )
 
 // AppsFile is the split-tunnel list: one process name per line, "#" starts a
@@ -31,7 +32,7 @@ type SplitScan struct {
 // comments are dropped; names keep their original case (matching is done
 // case-insensitively) and duplicates are collapsed.
 func LoadApps(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
+	data, err := safefile.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -65,5 +66,5 @@ func SaveApps(path string, names []string) error {
 		b.WriteString(n)
 		b.WriteByte('\n')
 	}
-	return os.WriteFile(path, []byte(b.String()), 0600)
+	return safefile.WriteFile(path, []byte(b.String()), 0600)
 }

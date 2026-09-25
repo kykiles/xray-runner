@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"xray-runner/internal/safefile"
 )
 
 const hwidFile = "hwid.txt"
@@ -41,7 +43,7 @@ func GetOrCreateHWID(override string) string {
 
 // readHWID returns the trimmed HWID stored at path, empty when there is none.
 func readHWID(path string) string {
-	data, err := os.ReadFile(path)
+	data, err := safefile.ReadFile(path)
 	if err != nil {
 		return ""
 	}
@@ -65,7 +67,7 @@ func writeHWID(path, hwid string) error {
 			return err
 		}
 	}
-	return os.WriteFile(path, []byte(hwid), 0600)
+	return safefile.WriteFile(path, []byte(hwid), 0600)
 }
 
 func generateHWID() string {

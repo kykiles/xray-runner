@@ -5,9 +5,9 @@ package app
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"xray-runner/internal/config"
+	"xray-runner/internal/safefile"
 )
 
 const stateFile = "last_server.json"
@@ -27,7 +27,7 @@ type LastState struct {
 }
 
 func loadLastState() (*LastState, error) {
-	data, err := os.ReadFile(statePath())
+	data, err := safefile.ReadFile(statePath())
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +45,7 @@ func saveLastState(s LastState) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(statePath(), data, 0600)
+	return safefile.WriteFile(statePath(), data, 0600)
 }
 
 // updateState edits the saved state in place. The server selection and the mode

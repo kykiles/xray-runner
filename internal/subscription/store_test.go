@@ -134,3 +134,24 @@ func TestRemoveSubscription_RewritesRemainingEntries(t *testing.T) {
 		t.Errorf("after removing index 0, got %+v", subs)
 	}
 }
+
+// A list whose last line lacks its newline gets the new URL on a line of its
+// own, not glued onto the old one.
+func TestSaveSubscription_AddsOnItsOwnLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "subscriptions.txt")
+	if err := os.WriteFile(path, []byte("https://a.example.com/sub"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	orig := subscriptionsFile
+	subscriptionsFile = path
+	defer func() { subscriptionsFile = orig }()
+
+	if err := SaveSubscription("https://b.example.com/sub"); err != nil {
+		t.Fatalf("SaveSubscription: %v", err)
+	}
+
+	got, _ := os.ReadFile(path)
+	if want := "https://a.example.com/sub\nhttps://b.example.com/sub\n"; string(got) != want {
+		t.Errorf("list = %q, want %q", got, want)
+	}
+}
