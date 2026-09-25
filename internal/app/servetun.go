@@ -39,8 +39,10 @@ var prepareServiceApp = func(*App) {}
 // session in the interface's own process — tunLifecycle, the kill switch,
 // releaseSession — until ctx ends or the core gives up. ready is called once,
 // with nil when the first core is set up or with the reason it was not;
-// status gets what the session would show on its status screen. The system is
-// left as it was found on every way out.
+// status gets what the session would show on its status screen; it must not
+// block — ServeTun hands the last update over before it returns, and a status
+// that waits for a slow reader would hold the session's end on it. The system
+// is left as it was found on every way out.
 func ServeTun(ctx context.Context, spec ServiceTun, ready func(error), status func(tui.StatusUpdate)) error {
 	var once sync.Once
 	signal := func(err error) { once.Do(func() { ready(err) }) }
@@ -104,6 +106,8 @@ func serveTun(ctx context.Context, spec ServiceTun, ready func(error), status fu
 
 	ch := make(chan tui.StatusUpdate, 64)
 	a.setStatusCh(ch)
+	// Updates go out in order on their own goroutine: publishers never wait,
+	// and status does not either.
 	forwarded := make(chan struct{})
 	go func() {
 		defer close(forwarded)

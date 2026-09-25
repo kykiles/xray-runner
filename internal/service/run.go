@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 
 	"xray-runner/internal/app"
@@ -91,7 +93,7 @@ func setUp(version string) (*Service, ipc.Listener, error) {
 		RefreshSplit: system.RefreshSplitFor,
 		DisableSplit: system.DisableSplit,
 		CloseConns:   system.CloseConns,
-		ListenerUID:  listenerUID,
+		ListenerUIDs: listenerUIDs,
 		Binary:       binary,
 		CoreVersion:  strings.TrimSpace(firstLine(coreVer)),
 		Version:      version,
@@ -122,7 +124,11 @@ func firstLine(s string) string {
 	return line
 }
 
-// teeHandler logs as its inner handler does and hands each line to fwd too.
+// teeHandler logs as its inner handler does and hands the session's lines to
+// fwd too: those of the code the session runs — the core's output, its
+// bring-up and health checks — and those of the service marked with
+// sessionLog. Not the rest of the service's own log: who connected or was
+// refused is nobody else's business.
 type teeHandler struct {
 	slog.Handler
 	fwd func(slog.Level, string)
@@ -130,6 +136,9 @@ type teeHandler struct {
 
 func (h *teeHandler) Handle(ctx context.Context, r slog.Record) error {
 	err := h.Handler.Handle(ctx, r)
+	if ctx.Value(sessionLogKey{}) == nil && !sessionCode(r.PC) {
+		return err
+	}
 	var b strings.Builder
 	b.WriteString(r.Message)
 	r.Attrs(func(a slog.Attr) bool {
@@ -138,6 +147,30 @@ func (h *teeHandler) Handle(ctx context.Context, r slog.Record) error {
 	})
 	h.fwd(r.Level, b.String())
 	return err
+}
+
+// sessionPackages run a session in the service, and nothing else there.
+var sessionPackages = []string{"app", "system", "xray"}
+
+// sessionCode reports whether the line at pc was logged by one of
+// sessionPackages.
+func sessionCode(pc uintptr) bool {
+	if pc == 0 {
+		return false
+	}
+	fn, _ := runtime.CallersFrames([]uintptr{pc}).Next()
+	return sessionFunc(fn.Function)
+}
+
+// sessionFunc is sessionCode by the function's full name.
+func sessionFunc(name string) bool {
+	// xray-runner/internal/app.(*App).foo.func1
+	rest, ok := strings.CutPrefix(name, "xray-runner/internal/")
+	if !ok {
+		return false
+	}
+	pkg, _, _ := strings.Cut(rest, ".")
+	return slices.Contains(sessionPackages, pkg)
 }
 
 func (h *teeHandler) WithAttrs(attrs []slog.Attr) slog.Handler {

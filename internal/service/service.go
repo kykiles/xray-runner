@@ -39,12 +39,13 @@ type Deps struct {
 	RefreshSplit func(names []string, uid int) (system.SplitScan, error)
 	DisableSplit func() error
 	CloseConns   func(conns []system.Conn, uid int) []system.Conn
-	// ListenerUID is the owner of the local TCP listener on port, false when
-	// nothing listens there.
-	ListenerUID func(port int) (int, bool)
-	Binary      string
-	CoreVersion string
-	Version     string
+	// ListenerUIDs are the owners of the local sockets bound to port on the
+	// loopback or any address, network "tcp" (listeners) or "udp"; none when
+	// nothing is bound there.
+	ListenerUIDs func(network string, port int) []int
+	Binary       string
+	CoreVersion  string
+	Version      string
 	// Grace is how long a session outlives the connection that held it.
 	Grace time.Duration
 }
@@ -54,12 +55,19 @@ const DefaultGrace = 10 * time.Second
 
 // Service serves connections one listener hands it.
 type Service struct {
-	d   Deps
-	ctx context.Context
+	d Deps
+
+	// op is held across what a session does to the machine and the checks
+	// it rests on — the split's rules, its teardown — so two of them never
+	// interleave: a stop and the next enable, a refresh and a resume. Taken
+	// before mu, never under it.
+	op sync.Mutex
 
 	mu    sync.Mutex
 	sess  *session
 	conns map[*ipc.Conn]bool
+	// closing is set once Serve stops accepting: no new session after it.
+	closing bool
 	// logTo is the connection holding the session, for forwardLog. Apart
 	// from mu: the service logs with mu held, and a log line must not wait
 	// for the lock its own writer holds. Set by attached, under mu.
@@ -85,10 +93,26 @@ type session struct {
 	conn  *ipc.Conn // the connection holding it; nil during the grace period
 	grace *time.Timer
 
+	// stopping is set, under mu, by whoever takes the session down; nobody
+	// takes it back after that. stoppedBy is the connection that asked for it
+	// and gets its reply instead of an ended event; nil when the service
+	// stopped it itself.
+	stopping  bool
+	stoppedBy *ipc.Conn
+	// done is closed once the session is down.
+	done chan struct{}
+
 	// tun
-	cancel   context.CancelFunc
-	done     chan struct{}
-	stopping bool
+	cancel context.CancelFunc
+	// events are the status updates on their way to the interface, the
+	// oldest dropped when it lags: each says what the screen shows now.
+	events chan ipc.Event
+	// ended is the connection told the session ended on its own, and why;
+	// set before done is closed.
+	endedTo  *ipc.Conn
+	endedErr error
+	// pumped is closed once pump has said all it had to.
+	pumped chan struct{}
 
 	// split
 	names []string
@@ -105,7 +129,6 @@ func New(d Deps) *Service {
 // Serve accepts connections until ctx ends, then takes the session down and
 // returns once the machine is left as it was found.
 func (s *Service) Serve(ctx context.Context, l ipc.Listener) error {
-	s.ctx = ctx
 	go func() {
 		<-ctx.Done()
 		_ = l.Close()
@@ -126,11 +149,22 @@ func (s *Service) Serve(ctx context.Context, l ipc.Listener) error {
 			s.handle(c)
 		}()
 	}
+	// No new session from here on, then the current one down, then the
+	// connections: a request still being handled finds no session to start.
 	s.mu.Lock()
+	s.closing = true
 	sess := s.sess
 	s.mu.Unlock()
 	if sess != nil {
 		s.teardown(sess)
+		// The ended event goes out before the connection closes, unless
+		// its client does not read.
+		if sess.pumped != nil {
+			select {
+			case <-sess.pumped:
+			case <-time.After(time.Second):
+			}
+		}
 	}
 	s.mu.Lock()
 	for c := range s.conns {
@@ -185,14 +219,16 @@ func (s *Service) handle(c *ipc.Conn) {
 		case ipc.TypeStartTun:
 			s.startTun(c, m)
 		case ipc.TypeStop:
-			go func() { c.Reply(m.ID, nil, s.stop(c)) }()
+			// In line: the next request of this connection sees the
+			// session gone, not one on its way down.
+			c.Reply(m.ID, nil, s.stop(c, ""))
 		case ipc.TypeStatus:
 			c.Reply(m.ID, s.status(c), nil)
 		case ipc.TypeEnableSplit, ipc.TypeRefreshSplit:
 			reply, err := s.split(c, m)
 			c.Reply(m.ID, reply, err)
 		case ipc.TypeDisableSplit:
-			c.Reply(m.ID, nil, s.disableSplit(c))
+			c.Reply(m.ID, nil, s.stop(c, "split"))
 		case ipc.TypeCloseConns:
 			reply, err := s.closeConns(c, m)
 			c.Reply(m.ID, reply, err)
@@ -206,12 +242,14 @@ func (s *Service) handle(c *ipc.Conn) {
 // connection. The old connection may not have been seen to drop yet — a
 // client reconnects as soon as it notices, and the service can notice later —
 // so it is taken over whether it waits in its grace period or not: the token
-// went to that one connection only, and whoever holds it is its client.
+// went to that one connection only, and whoever holds it is its client. A
+// session on its way down is not handed back: it would end under its new
+// connection without a word.
 func (s *Service) resume(c *ipc.Conn, token string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess := s.sess
-	if sess == nil || sess.owner != c.Peer.Key ||
+	if sess == nil || sess.stopping || s.closing || sess.owner != c.Peer.Key ||
 		subtle.ConstantTimeCompare([]byte(sess.token), []byte(token)) != 1 {
 		return false
 	}
@@ -224,7 +262,7 @@ func (s *Service) resume(c *ipc.Conn, token string) bool {
 	}
 	sess.conn = c
 	s.attached()
-	slog.Info("служба: сессия возвращена интерфейсу", "user", c.Peer.Name, "kind", sess.kind)
+	slog.InfoContext(sessionLog, "служба: сессия возвращена интерфейсу", "user", c.Peer.Name, "kind", sess.kind)
 	return true
 }
 
@@ -240,12 +278,16 @@ func (s *Service) detach(c *ipc.Conn) {
 	s.attached()
 	slog.Warn("служба: интерфейс отключился, сессия ждёт его", "user", c.Peer.Name, "grace", s.d.Grace)
 	sess.grace = time.AfterFunc(s.d.Grace, func() {
+		s.op.Lock()
+		defer s.op.Unlock()
+		// Orphaned and on its way down in one hold of mu: a resume after it
+		// is refused, one before it leaves the session a connection.
 		s.mu.Lock()
-		orphan := s.sess == sess && sess.conn == nil
+		orphan := s.sess == sess && sess.conn == nil && s.markStop(sess, nil)
 		s.mu.Unlock()
 		if orphan {
 			slog.Warn("служба: интерфейс не вернулся, сессия снимается", "kind", sess.kind)
-			s.teardown(sess)
+			s.finish(sess)
 		}
 	})
 }
@@ -254,6 +296,9 @@ func (s *Service) detach(c *ipc.Conn) {
 func (s *Service) claim(c *ipc.Conn, sess *session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closing {
+		return errors.New("служба останавливается")
+	}
 	if cur := s.sess; cur != nil {
 		if cur.conn == c {
 			return fmt.Errorf("сессия (%s) уже идёт — сначала остановите её", cur.kind)
@@ -292,26 +337,30 @@ func (s *Service) startTun(c *ipc.Conn, m ipc.Message) {
 		c.Reply(m.ID, nil, err)
 		return
 	}
-	ctx, cancel := context.WithCancel(s.ctx)
-	sess := &session{kind: "tun", title: spec.Title, cancel: cancel, done: make(chan struct{})}
+	// Not under Serve's context: Serve takes the session down itself, in
+	// its order, and the client hears why.
+	ctx, cancel := context.WithCancel(context.Background())
+	sess := &session{
+		kind: "tun", title: spec.Title, cancel: cancel,
+		done: make(chan struct{}), events: make(chan ipc.Event, statusBacklog), pumped: make(chan struct{}),
+	}
 	if err := s.claim(c, sess); err != nil {
 		cancel()
 		c.Reply(m.ID, nil, err)
 		return
 	}
-	slog.Info("служба: TUN-сессия", "user", c.Peer.Name, "title", spec.Title)
+	slog.InfoContext(sessionLog, "служба: TUN-сессия", "user", c.Peer.Name, "title", spec.Title)
+	ready := make(chan error, 1)
+	go s.pump(sess, c, m.ID, ready)
 	go func() {
 		defer close(sess.done)
-		readied := false
 		err := s.d.Tun(ctx, spec, func(err error) {
-			readied = err == nil
-			if err != nil {
-				c.Reply(m.ID, nil, err)
-				return
+			select {
+			case ready <- err:
+			default:
 			}
-			c.Reply(m.ID, ipc.StartReply{Token: sess.token}, nil)
 		}, func(u tui.StatusUpdate) {
-			s.emit(sess, statusEvent(u))
+			queueLatest(sess.events, statusEvent(u))
 		})
 		cancel()
 		s.mu.Lock()
@@ -322,19 +371,78 @@ func (s *Service) startTun(c *ipc.Conn, m ipc.Message) {
 		if sess.grace != nil {
 			sess.grace.Stop()
 		}
-		stopping, conn := sess.stopping, sess.conn
+		// Whoever asked for the stop has its reply; anyone else holding the
+		// session is told it ended.
+		if sess.conn != sess.stoppedBy {
+			sess.endedTo, sess.endedErr = sess.conn, err
+		}
 		s.mu.Unlock()
 		if err != nil {
-			slog.Warn("служба: TUN-сессия завершилась", "error", err)
-		}
-		if readied && !stopping && conn != nil {
-			ev := ipc.Event{Kind: ipc.EventEnded}
-			if err != nil && !errors.Is(err, context.Canceled) {
-				ev.Error = err.Error()
-			}
-			conn.Event(ev)
+			slog.WarnContext(sessionLog, "служба: TUN-сессия завершилась", "error", err)
 		}
 	}()
+}
+
+// statusBacklog is how many status updates wait for an interface that lags.
+const statusBacklog = 16
+
+// queueLatest puts ev on q, dropping the oldest when q is full. One sender.
+func queueLatest(q chan ipc.Event, ev ipc.Event) {
+	for {
+		select {
+		case q <- ev:
+			return
+		default:
+		}
+		select {
+		case <-q:
+		default:
+		}
+	}
+}
+
+// pump carries a tun session's words to its interface: the answer to
+// start_tun, the status updates, and the ended event. It alone waits for a
+// client that does not read; the session comes and goes without it.
+func (s *Service) pump(sess *session, c *ipc.Conn, id uint64, ready <-chan error) {
+	defer close(sess.pumped)
+	var err error
+	select {
+	case err = <-ready:
+	case <-sess.done:
+		select {
+		case err = <-ready:
+		default:
+			err = errors.New("сессия завершилась, не поднявшись")
+		}
+	}
+	if err != nil {
+		c.Reply(id, nil, err)
+	} else {
+		c.Reply(id, ipc.StartReply{Token: sess.token}, nil)
+	}
+	for {
+		select {
+		case ev := <-sess.events:
+			s.emit(sess, ev)
+		case <-sess.done:
+			// The last updates were queued before done closed.
+			for len(sess.events) > 0 {
+				s.emit(sess, <-sess.events)
+			}
+			s.mu.Lock()
+			to, why := sess.endedTo, sess.endedErr
+			s.mu.Unlock()
+			if err == nil && to != nil {
+				ev := ipc.Event{Kind: ipc.EventEnded}
+				if why != nil && !errors.Is(why, context.Canceled) {
+					ev.Error = why.Error()
+				}
+				to.Event(ev)
+			}
+			return
+		}
+	}
 }
 
 // tunSpec checks a request and turns it into what app.ServeTun runs.
@@ -418,52 +526,98 @@ func (s *Service) emit(sess *session, ev ipc.Event) {
 	}
 }
 
-// forwardLog hands a line of the service's log to the connection holding the
-// session: the core's output reaches the user's own log that way.
+// sessionLog marks a line of the service's own log as the session's, for its
+// holder to see too (forwardLog); the rest — who connected, who was refused —
+// is for the service's log alone.
+var sessionLog = context.WithValue(context.Background(), sessionLogKey{}, true)
+
+type sessionLogKey struct{}
+
+// forwardLog hands a line of the session's log to the connection holding it:
+// the core's output reaches the user's own log that way.
 func (s *Service) forwardLog(level slog.Level, line string) {
 	if conn := s.logTo.Load(); conn != nil {
 		conn.Event(ipc.Event{Kind: ipc.EventLog, Level: level.String(), Line: line})
 	}
 }
 
-func (s *Service) stop(c *ipc.Conn) error {
+// stop takes down c's session — only a split one with kind "split" — and
+// returns once it is down.
+func (s *Service) stop(c *ipc.Conn, kind string) error {
+	s.op.Lock()
 	s.mu.Lock()
 	sess := s.sess
-	s.mu.Unlock()
-	if sess == nil {
+	if sess == nil || (kind != "" && sess.kind != kind) {
+		s.mu.Unlock()
+		s.op.Unlock()
 		return nil
 	}
 	if sess.conn != c {
+		s.mu.Unlock()
+		s.op.Unlock()
 		return errors.New("сессия не этого подключения")
 	}
-	s.teardown(sess)
+	first := s.markStop(sess, c)
+	s.mu.Unlock()
+	if first {
+		s.finish(sess)
+	}
+	s.op.Unlock()
+	<-sess.done
 	return nil
 }
 
-// teardown takes sess down and waits until it is.
+// teardown takes sess down on the service's own account and waits until it
+// is.
 func (s *Service) teardown(sess *session) {
+	s.op.Lock()
 	s.mu.Lock()
+	first := s.markStop(sess, nil)
+	s.mu.Unlock()
+	if first {
+		s.finish(sess)
+	}
+	s.op.Unlock()
+	<-sess.done
+}
+
+// markStop claims sess's teardown for the caller, false when someone has it
+// already. With mu held.
+func (s *Service) markStop(sess *session, by *ipc.Conn) bool {
+	if sess.stopping {
+		return false
+	}
+	sess.stopping, sess.stoppedBy = true, by
 	if sess.grace != nil {
 		sess.grace.Stop()
 		sess.grace = nil
 	}
-	sess.stopping = true
-	s.mu.Unlock()
+	return true
+}
+
+// finish takes down the session markStop gave the caller. With op held.
+func (s *Service) finish(sess *session) {
 	switch sess.kind {
 	case "tun":
 		sess.cancel()
 		<-sess.done
 	case "split":
 		if err := s.d.DisableSplit(); err != nil {
-			slog.Warn("служба: раздельная маршрутизация снята не полностью", "error", err)
+			slog.WarnContext(sessionLog, "служба: раздельная маршрутизация снята не полностью", "error", err)
 		}
-		s.mu.Lock()
-		if s.sess == sess {
-			s.sess = nil
-			s.attached()
-		}
-		s.mu.Unlock()
+		s.drop(sess)
 	}
+}
+
+// drop forgets a split session that is down.
+func (s *Service) drop(sess *session) {
+	s.mu.Lock()
+	if s.sess == sess {
+		s.sess = nil
+		s.attached()
+	}
+	s.mu.Unlock()
+	close(sess.done)
 }
 
 func (s *Service) status(c *ipc.Conn) ipc.StatusReply {
@@ -506,12 +660,28 @@ func (s *Service) split(c *ipc.Conn, m ipc.Message) (*ipc.SplitReply, error) {
 		uid = -1
 	}
 
+	s.op.Lock()
+	defer s.op.Unlock()
 	s.mu.Lock()
 	cur := s.sess
+	mine := cur != nil && cur.kind == "split" && cur.conn == c && !cur.stopping
 	s.mu.Unlock()
 	if m.Type == ipc.TypeRefreshSplit {
-		if cur == nil || cur.kind != "split" || cur.conn != c {
+		if !mine {
 			return &ipc.SplitReply{}, nil
+		}
+		// The core may have restarted since the split went up, and somebody
+		// else may have taken its ports in the gap: the split does not
+		// outlive that.
+		if err := s.redirectOwnedBy(c, false); err != nil {
+			s.mu.Lock()
+			first := s.markStop(cur, c)
+			s.mu.Unlock()
+			if first {
+				slog.WarnContext(sessionLog, "служба: раздельная маршрутизация снята", "error", err)
+				s.finish(cur)
+			}
+			return nil, fmt.Errorf("%w — раздельная маршрутизация снята", err)
 		}
 		scan, err := s.d.RefreshSplit(req.Names, uid)
 		if err != nil {
@@ -523,33 +693,56 @@ func (s *Service) split(c *ipc.Conn, m ipc.Message) (*ipc.SplitReply, error) {
 	if len(req.Names) == 0 {
 		return &ipc.SplitReply{}, nil
 	}
-	// The redirect lands in the core listening on the port; it has to be the
-	// asking user's own, or the moved processes' traffic would go to whoever
-	// took the port first.
-	if owner, ok := s.d.ListenerUID(xraycfg.RedirectPort); !ok {
-		return nil, fmt.Errorf("на порту %d никто не слушает — ядро интерфейса не запущено", xraycfg.RedirectPort)
-	} else if c.Peer.UID != 0 && owner != c.Peer.UID {
-		return nil, fmt.Errorf("порт %d слушает процесс другого пользователя (uid %d)", xraycfg.RedirectPort, owner)
+	if err := s.redirectOwnedBy(c, true); err != nil {
+		return nil, err
 	}
 	sess := cur
-	if cur == nil || cur.kind != "split" || cur.conn != c {
-		sess = &session{kind: "split", title: "split"}
+	if !mine {
+		sess = &session{kind: "split", title: "split", done: make(chan struct{})}
 		if err := s.claim(c, sess); err != nil {
 			return nil, err
 		}
 	}
 	scan, err := s.d.EnableSplit(req.Names, uid)
 	if err != nil {
+		// EnableSplit leaves nothing behind when it fails.
 		s.mu.Lock()
-		if s.sess == sess {
-			s.sess = nil
-			s.attached()
-		}
+		first := s.markStop(sess, c)
 		s.mu.Unlock()
+		if first {
+			s.drop(sess)
+		}
 		return nil, err
 	}
+	s.mu.Lock()
 	sess.names = req.Names
+	s.mu.Unlock()
 	return &ipc.SplitReply{Token: sess.token, Matched: scan.Matched, Unclosed: scan.Unclosed, Moved: scan.Moved}, nil
+}
+
+// redirectOwnedBy checks that the ports the split redirects into — TCP for
+// the traffic, UDP for DNS — are c's user's own: the moved processes'
+// traffic and names go to whoever holds them. Nobody on them is an error
+// only when the split is going up; later it is a core restarting.
+func (s *Service) redirectOwnedBy(c *ipc.Conn, enabling bool) error {
+	if c.Peer.UID == 0 {
+		return nil
+	}
+	for _, p := range []struct {
+		network string
+		port    int
+	}{{"tcp", xraycfg.RedirectPort}, {"udp", xraycfg.RedirectDNS}} {
+		owners := s.d.ListenerUIDs(p.network, p.port)
+		if len(owners) == 0 && enabling {
+			return fmt.Errorf("на порту %s/%d никто не слушает — ядро интерфейса не запущено", p.network, p.port)
+		}
+		for _, uid := range owners {
+			if uid != c.Peer.UID {
+				return fmt.Errorf("порт %s/%d занял процесс другого пользователя (uid %d)", p.network, p.port, uid)
+			}
+		}
+	}
+	return nil
 }
 
 // maxConns bounds a close_conns request.
@@ -558,12 +751,6 @@ const maxConns = 4096
 // closeConns closes connections of the split's owner that predate the move
 // of their process; each is checked to be the owner's socket (system.CloseConns).
 func (s *Service) closeConns(c *ipc.Conn, m ipc.Message) (*ipc.CloseConnsReply, error) {
-	s.mu.Lock()
-	sess := s.sess
-	s.mu.Unlock()
-	if sess == nil || sess.kind != "split" || sess.conn != c {
-		return nil, errors.New("нет раздельной маршрутизации этого подключения")
-	}
 	var req ipc.CloseConns
 	if err := json.Unmarshal(m.Body, &req); err != nil {
 		return nil, fmt.Errorf("запрос не разобран: %w", err)
@@ -571,23 +758,18 @@ func (s *Service) closeConns(c *ipc.Conn, m ipc.Message) (*ipc.CloseConnsReply, 
 	if len(req.Conns) > maxConns {
 		return nil, errors.New("слишком много соединений в запросе")
 	}
+	s.op.Lock()
+	defer s.op.Unlock()
+	s.mu.Lock()
+	sess := s.sess
+	mine := sess != nil && sess.kind == "split" && sess.conn == c && !sess.stopping
+	s.mu.Unlock()
+	if !mine {
+		return nil, errors.New("нет раздельной маршрутизации этого подключения")
+	}
 	uid := c.Peer.UID
 	if uid == 0 {
 		uid = -1
 	}
 	return &ipc.CloseConnsReply{Open: s.d.CloseConns(req.Conns, uid)}, nil
-}
-
-func (s *Service) disableSplit(c *ipc.Conn) error {
-	s.mu.Lock()
-	sess := s.sess
-	s.mu.Unlock()
-	if sess == nil || sess.kind != "split" {
-		return nil
-	}
-	if sess.conn != c {
-		return errors.New("сессия не этого подключения")
-	}
-	s.teardown(sess)
-	return nil
 }
