@@ -3,6 +3,7 @@ package subscription
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -11,6 +12,12 @@ import (
 )
 
 const token = "https://panel.example/sub/SECRET-TOKEN"
+
+// ownerOnly checks the mode where it means something: Windows reports 0666
+// for any writable file, its access is in the ACL.
+func ownerOnly(fi os.FileInfo) bool {
+	return runtime.GOOS == "windows" || fi.Mode().Perm() == 0o600
+}
 
 func withSealer(t *testing.T, f func() (secret.Sealer, error)) {
 	t.Helper()
@@ -80,7 +87,7 @@ func TestSubscriptionChangesStaySealed(t *testing.T) {
 	if _, err := os.Stat(plain); !os.IsNotExist(err) {
 		t.Errorf("a plain list appeared: %v", err)
 	}
-	if fi, err := os.Stat(sealed); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(sealed); err != nil || !ownerOnly(fi) {
 		t.Errorf("sealed file: %v, %v; want 0600", fi, err)
 	}
 }
@@ -125,7 +132,7 @@ func TestSubscriptionsWithoutAKeyStore(t *testing.T) {
 	if err := SaveSubscription(token); err != nil {
 		t.Fatal(err)
 	}
-	if fi, err := os.Stat(plain); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(plain); err != nil || !ownerOnly(fi) {
 		t.Errorf("plain file: %v, %v; want 0600", fi, err)
 	}
 	if _, err := os.Stat(sealed); !os.IsNotExist(err) {
