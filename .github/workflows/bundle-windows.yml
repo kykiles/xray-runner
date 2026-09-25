@@ -1,0 +1,63 @@
+name: Bundle (Windows)
+on: [push, workflow_dispatch]
+
+# A ready-to-test Windows bundle for every push, laid out the way
+# scripts/deploy.sh lays one out, with the manual checklist inside
+# (scripts/windows-test-checklist.md). It is downloaded from the run page,
+# under Artifacts; nothing built is committed.
+jobs:
+  bundle-windows:
+    name: Bundle (Windows)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # The core is xray.MinVersion, read the way deploy.sh reads it and checked
+      # against the release's .dgst. Its zip carries wintun.dll and the geo
+      # databases too.
+      - name: Assemble the bundle
+        run: |
+          set -euo pipefail
+          version="$(git describe --tags --always --dirty)"
+          core="$(sed -n 's/^const MinVersion = "\(.*\)"$/\1/p' internal/xray/runner.go)"
+          [ -n "$core" ] || { echo "xray.MinVersion not found in internal/xray/runner.go"; exit 1; }
+          name="xray-runner-windows-$version"
+          dir="dist/$name"
+          mkdir -p "$dir/bin"
+
+          GOOS=windows GOARCH=amd64 go build -ldflags "-X main.Version=$version" -o "$dir/xray-runner.exe" ./cmd/xray-runner
+
+          tmp="$(mktemp -d)"
+          url="https://github.com/XTLS/Xray-core/releases/download/v$core/Xray-windows-64.zip"
+          curl -fsSL -o "$tmp/core.zip" "$url"
+          curl -fsSL -o "$tmp/core.zip.dgst" "$url.dgst"
+          want="$(tr -d '\r' < "$tmp/core.zip.dgst" | sed -n 's/^SHA2-256= *//p')"
+          got="$(sha256sum "$tmp/core.zip" | cut -d' ' -f1)"
+          if [ -z "$want" ] || [ "$want" != "$got" ]; then
+            echo "SHA-256 mismatch for Xray-windows-64.zip: .dgst says '$want', file is '$got'"
+            exit 1
+          fi
+          unzip -q "$tmp/core.zip" -d "$tmp/core"
+          cp "$tmp/core/xray.exe" "$tmp/core/wintun.dll" "$tmp/core/geoip.dat" "$tmp/core/geosite.dat" "$dir/bin/"
+
+          # The licenses travel with the binaries they cover; the config comes
+          # from the tracked template, never a working .env with real tokens.
+          cp LICENSE LICENSE-wintun.txt "$dir/bin/"
+          cp README.md "$dir/"
+          cp .env.example "$dir/.env"
+          : > "$dir/subscriptions.txt"
+          cp scripts/windows-test-checklist.md "$dir/CHECKLIST.md"
+
+          echo "BUNDLE=$name" >> "$GITHUB_ENV"
+          echo "xray-runner $version, xray $core, core sha256 $got"
+          ls -la "$dir" "$dir/bin"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUNDLE }}
+          path: dist/
+          retention-days: 30
