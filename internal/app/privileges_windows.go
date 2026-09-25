@@ -24,5 +24,5 @@ func checkTunPrivileges() error {
 	if err != nil || elevated {
 		return nil
 	}
-	return fmt.Errorf("режим требует прав администратора — запустите от имени администратора")
+	return fmt.Errorf("режим требует прав администратора — установите службу один раз (xray-runner.exe service install от имени администратора) или запустите программу от имени администратора")
 }

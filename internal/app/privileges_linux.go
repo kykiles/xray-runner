@@ -20,5 +20,5 @@ func checkTunPrivileges() error {
 	return errNoTunPrivileges
 }
 
-var errNoTunPrivileges = errors.New("режиму TUN нужно право менять сеть: выдайте его программе один раз — " +
-	"sudo setcap cap_net_admin+ep <путь к xray-runner> — или запустите её через sudo")
+var errNoTunPrivileges = errors.New("режиму TUN нужно право менять сеть: установите службу один раз — " +
+	"sudo xray-runner service install, — или выдайте право программе (sudo setcap cap_net_admin+ep <путь к xray-runner>), или запустите её через sudo")

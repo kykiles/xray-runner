@@ -189,5 +189,7 @@ func serviceState(t *testing.T) svc.State {
 // processPath is the executable of a running process.
 func processPath(t *testing.T, pid int) string {
 	t.Helper()
-	return strings.TrimSpace(ps(t, "(Get-Process -Id "+strconv.Itoa(pid)+").Path"))
+	// CIM, not Get-Process: the latter reads the path out of the process,
+	// which a SYSTEM process may not allow.
+	return strings.TrimSpace(ps(t, `(Get-CimInstance Win32_Process -Filter "ProcessId=`+strconv.Itoa(pid)+`").ExecutablePath`))
 }
