@@ -178,9 +178,11 @@ func (m listModel) rows() []listRow {
 			out = append(out, m.children(pi, p)...)
 		case len(p.Entries) == 1:
 			// A single-server profile is just a server, named after the profile.
+			// The entry keeps the name as the panel wrote it: the status title
+			// compares it with the owner's name, and only the row drops emoji.
 			e := p.Entries[0]
-			e.Remarks = profileName(p)
-			out = append(out, listRow{kind: rowServer, profIdx: pi, entry: e, name: e.Remarks})
+			e.Remarks = p.Name
+			out = append(out, listRow{kind: rowServer, profIdx: pi, entry: e, name: profileName(p)})
 		default:
 			out = append(out, listRow{kind: rowGroup, profIdx: pi, entry: face(p), name: profileName(p)})
 			out = append(out, m.children(pi, p)...)
@@ -239,8 +241,8 @@ func (m listModel) visibleRows() []listRow {
 		// A single-server profile is a plain server row: it stands or falls alone.
 		if p.Balancer == nil && len(p.Entries) == 1 {
 			e := p.Entries[0]
-			e.Remarks = profileName(p)
-			r := listRow{kind: rowServer, profIdx: pi, entry: e, name: e.Remarks}
+			e.Remarks = p.Name
+			r := listRow{kind: rowServer, profIdx: pi, entry: e, name: profileName(p)}
 			if rowMatches(r, terms) {
 				out = append(out, r)
 			}

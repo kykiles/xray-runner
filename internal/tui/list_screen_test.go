@@ -133,6 +133,33 @@ func TestList_BalancerTreeFoldAndActions(t *testing.T) {
 	}
 }
 
+// A single-server profile in a tree hands the app the profile's own name, emoji
+// and all: the status title compares it with the owner's name, and a stripped
+// copy made "🎮 Игровой I" and "Игровой I" differ — the screen showed
+// "Игровой I · Игровой I". The list itself still shows the name without emoji,
+// filtered or not.
+func TestList_SingleServerKeepsProfileName(t *testing.T) {
+	profiles := balancerFixture()
+	profiles[1].Name = "🎮 Игровой I"
+
+	for _, query := range []string{"", "игров"} {
+		m := newList(profiles)
+		m.filter.input.SetValue(query)
+		m.cursor = 1 // the single-server row
+		if query != "" {
+			m.cursor = 0 // the filter leaves only it
+		}
+		if out := m.View(); strings.Contains(out, "🎮") || !strings.Contains(out, "Игровой I") {
+			t.Errorf("filter %q: row should read without emoji:\n%s", query, out)
+		}
+		next, _ := m.updateKey(tea.KeyMsg{Type: tea.KeyRight})
+		final := next.(listModel)
+		if final.action != ListConnect || final.entry == nil || final.entry.Remarks != "🎮 Игровой I" {
+			t.Errorf("filter %q: action=%v entry=%+v, want connect with the profile's name", query, final.action, final.entry)
+		}
+	}
+}
+
 // The filter narrows the tree over the same columns the table shows, and the
 // cursor counts visible rows so → acts on the row it points at.
 func TestList_FilterNarrowsAndKeepsChoice(t *testing.T) {
