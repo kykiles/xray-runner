@@ -1,45 +1,48 @@
-linters-settings:
-  errcheck:
-    exclude-functions:
-      - (io.Closer).Close
-      - (*os.File).Close
-      - (io/fs.File).Close
-      - (*compress/gzip.Reader).Close
-      - (net.Conn).Close
-  gosec:
-    # These rules don't fit this project's threat model:
-    #   G304 — file paths come from local config or our own directories, never
-    #          from remote/web input.
-    #   G302 — the xray core and its assets must be executable/readable.
-    #   G115 — the only sites are the geo-database walk (geodata.go), where every
-    #          int↔uint64 conversion is guarded by a preceding length check
-    #          (size > uint64(len(data)-n)), so it cannot overflow.
-    # G204 stays on: not every command is an argument vector — the Windows route
-    # code hands PowerShell a -Command script (system.powershell). A site gosec
-    # flags carries its own //nolint with the reason.
-    excludes:
-      - G302
-      - G304
-      - G115
-  staticcheck:
-    checks:
-      - all
+version: "2"
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
-    - gofmt
-    - goimports
     - gosec
     - staticcheck
     - unconvert
     - unused
-issues:
-  exclude-use-default: false
-  exclude-rules:
-    # Test files legitimately ignore Close/Write/Serve errors and write world-
-    # readable fixtures; gosec/errcheck noise there is not a shipping concern.
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (io/fs.File).Close
+        - (*compress/gzip.Reader).Close
+        - (net.Conn).Close
+    gosec:
+      # These rules don't fit this project's threat model:
+      #   G304 — file paths come from local config or our own directories, never
+      #          from remote/web input.
+      #   G302 — the xray core and its assets must be executable/readable.
+      #   G115 — the only sites are the geo-database walk (geodata.go), where every
+      #          int↔uint64 conversion is guarded by a preceding length check
+      #          (size > uint64(len(data)-n)), so it cannot overflow.
+      # G204 stays on: not every command is an argument vector — the Windows route
+      # code hands PowerShell a -Command script (system.powershell). A site gosec
+      # flags carries its own //nolint with the reason.
+      excludes:
+        - G302
+        - G304
+        - G115
+    staticcheck:
+      checks:
+        - all
+  exclusions:
+    generated: lax
+    rules:
+      # Test files legitimately ignore Close/Write/Serve errors and write world-
+      # readable fixtures; gosec/errcheck noise there is not a shipping concern.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+formatters:
+  enable:
+    - gofmt
+    - goimports

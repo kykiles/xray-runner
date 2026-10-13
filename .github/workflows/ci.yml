@@ -11,11 +11,11 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v8
         with:
-          # Pinned, and built with go.mod's Go: the prebuilt v1 binaries are built
-          # with go1.24 and refuse a module that targets a newer Go.
-          version: v1.64.8
+          # Pinned, and built with go.mod's Go: a prebuilt binary built with an
+          # older Go refuses a module that targets a newer one.
+          version: v2.14.0
           install-mode: goinstall
       # Pinned like the linter. It fails on a vulnerability the code reaches,
       # standard library included — the Go version above is part of what it checks.

@@ -37,7 +37,7 @@ func TestDecryptHappCrypt1to4(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: ключ: %v", prefix, err)
 		}
-		cipher, err := rsa.EncryptPKCS1v15(rand.Reader, &key.PublicKey, []byte(url))
+		cipher, err := rsa.EncryptPKCS1v15(rand.Reader, &key.PublicKey, []byte(url)) //nolint:staticcheck // SA1019: the Happ link format is PKCS #1 v1.5
 		if err != nil {
 			t.Fatalf("%s: шифрование: %v", prefix, err)
 		}

@@ -118,7 +118,7 @@ func happDecryptRSA(ordinal int, payload string) (string, error) {
 	}
 	var out []byte
 	for i := 0; i < len(cipher); i += blockSize {
-		plain, err := rsa.DecryptPKCS1v15(rand.Reader, key, cipher[i:i+blockSize])
+		plain, err := rsa.DecryptPKCS1v15(rand.Reader, key, cipher[i:i+blockSize]) //nolint:staticcheck // SA1019: the Happ link format is PKCS #1 v1.5
 		if err != nil {
 			return "", fmt.Errorf("расшифровка happ-ссылки: %w", err)
 		}
@@ -213,7 +213,7 @@ func happCrypt5Body(body []byte, key *rsa.PrivateKey, salted bool) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("happ crypt5 base64 ключа: %w", err)
 	}
-	rsaPlain, err := rsa.DecryptPKCS1v15(rand.Reader, key, rsaCipher)
+	rsaPlain, err := rsa.DecryptPKCS1v15(rand.Reader, key, rsaCipher) //nolint:staticcheck // SA1019: the Happ link format is PKCS #1 v1.5
 	if err != nil {
 		return "", fmt.Errorf("happ crypt5: расшифровка ключа: %w", err)
 	}
