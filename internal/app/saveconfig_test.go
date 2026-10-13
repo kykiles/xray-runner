@@ -188,7 +188,7 @@ func TestSaveConfig_HandsOverTheFileNotTheName(t *testing.T) {
 		if err := r.Remove(name); err != nil {
 			return err
 		}
-		return os.Symlink(victim, filepath.Join(r.Name(), name))
+		return r.Symlink(victim, name)
 	}
 	t.Cleanup(func() { publishStaged = orig })
 
