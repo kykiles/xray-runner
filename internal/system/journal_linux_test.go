@@ -239,7 +239,7 @@ func TestDirStore(t *testing.T) {
 	}
 	got, err := s.all()
 	if err != nil || len(got) != 2 || string(got[7]) != "two" || string(got[8]) != "three" {
-		t.Fatalf("all() = %q, %v", got, err)
+		t.Fatalf("all() = %v, %v", got, err)
 	}
 	fi, err := os.Stat(filepath.Join(s.dir, "7.json"))
 	if err != nil || fi.Mode().Perm() != 0o600 {
