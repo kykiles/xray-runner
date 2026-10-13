@@ -1,3 +1,5 @@
+// Package xraycfg builds the JSON configs xray-core runs with: inbounds,
+// outbounds per protocol, routing and split rules, and checks of the geo data.
 package xraycfg
 
 import "encoding/json"

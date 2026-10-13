@@ -78,16 +78,16 @@ func localKey() ([]byte, error) {
 			return nil, err
 		}
 		if err := keyringSet(service, account, base64.StdEncoding.EncodeToString(fresh)); err != nil {
-			return nil, fmt.Errorf("Secret Service: сохранить ключ: %w", err)
+			return nil, fmt.Errorf("Secret Service: сохранить ключ: %w", err) //nolint:staticcheck // ST1005: "Secret Service" is a proper name
 		}
 		s, err = keyringGet(service, account)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("Secret Service: %w", err)
+		return nil, fmt.Errorf("Secret Service: %w", err) //nolint:staticcheck // ST1005: "Secret Service" is a proper name
 	}
 	k, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))
 	if err != nil || len(k) != 32 {
-		return nil, errors.New("Secret Service: ключ xray-runner повреждён")
+		return nil, errors.New("Secret Service: ключ xray-runner повреждён") //nolint:staticcheck // ST1005: "Secret Service" is a proper name
 	}
 	return k, nil
 }
@@ -106,7 +106,7 @@ func withTimeout(f func() ([]byte, error)) ([]byte, error) {
 	case r := <-ch:
 		return r.k, r.err
 	case <-time.After(keyTimeout):
-		return nil, errors.New("Secret Service не ответил")
+		return nil, errors.New("Secret Service не ответил") //nolint:staticcheck // ST1005: "Secret Service" is a proper name
 	}
 }
 

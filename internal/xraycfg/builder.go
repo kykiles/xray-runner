@@ -100,9 +100,7 @@ func AddCatchAllRule(routing json.RawMessage) json.RawMessage {
 // writes a value that would only be overwritten.
 func MergeConfig(tc *XrayConfig, proxyOutbound json.RawMessage) *XrayConfig {
 	outbounds := []json.RawMessage{proxyOutbound}
-	for _, ob := range tc.Outbounds {
-		outbounds = append(outbounds, ob)
-	}
+	outbounds = append(outbounds, tc.Outbounds...)
 
 	return &XrayConfig{
 		DNS:       tc.DNS,

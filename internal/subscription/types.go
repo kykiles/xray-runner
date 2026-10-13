@@ -1,3 +1,5 @@
+// Package subscription fetches, decodes and stores subscriptions — share links,
+// Happ links and panel-provided Xray configs — and benchmarks their servers.
 package subscription
 
 import "encoding/json"

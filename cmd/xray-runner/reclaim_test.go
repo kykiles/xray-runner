@@ -38,8 +38,8 @@ func TestReclaimWalksOnlyOwnDirs(t *testing.T) {
 	data, cache := config.DataDir(), config.CacheDir()
 	programConfigs := filepath.Join(config.ProgramDir(), "configs")
 	for _, dir := range reclaimedDirs() {
-		switch {
-		case dir == "" || dir == data || dir == cache || dir == programConfigs || dir == "keys":
+		switch dir {
+		case "", data, cache, programConfigs, "keys":
 		default:
 			t.Errorf("reclaimedDirs contains %q, which is not the app's own directory", dir)
 		}

@@ -64,8 +64,8 @@ func (netlinkOps) listRoutes(v6 bool) ([]ipRoute, error) {
 // toIPRoute spells a kernel route the way ipRoute keeps it.
 func toIPRoute(r netlink.Route, v6 bool, names map[int]string) ipRoute {
 	out := ipRoute{Dev: names[r.LinkIndex], Metric: r.Priority}
-	switch {
-	case r.Dst == nil:
+	switch r.Dst {
+	case nil:
 		out.Dst = "default"
 	default:
 		ones, bits := r.Dst.Mask.Size()

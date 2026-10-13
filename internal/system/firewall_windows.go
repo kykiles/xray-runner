@@ -95,7 +95,7 @@ var (
 	procFwpmTransactionAbort0     = fwpuclnt.NewProc("FwpmTransactionAbort0")
 	procFwpmSubLayerAdd0          = fwpuclnt.NewProc("FwpmSubLayerAdd0")
 	procFwpmFilterAdd0            = fwpuclnt.NewProc("FwpmFilterAdd0")
-	procFwpmGetAppIdFromFileName0 = fwpuclnt.NewProc("FwpmGetAppIdFromFileName0")
+	procFwpmGetAppIDFromFileName0 = fwpuclnt.NewProc("FwpmGetAppIdFromFileName0")
 	procFwpmFreeMemory0           = fwpuclnt.NewProc("FwpmFreeMemory0")
 )
 
@@ -276,7 +276,7 @@ func wfpAppID(path string) (*fwpByteBlob, error) {
 		return nil, err
 	}
 	var blob *fwpByteBlob
-	r, _, _ := procFwpmGetAppIdFromFileName0.Call(uintptr(unsafe.Pointer(p)), uintptr(unsafe.Pointer(&blob))) //nolint:gosec // G103: a pointer argument, converted in the call so it stays put
+	r, _, _ := procFwpmGetAppIDFromFileName0.Call(uintptr(unsafe.Pointer(p)), uintptr(unsafe.Pointer(&blob))) //nolint:gosec // G103: a pointer argument, converted in the call so it stays put
 	if err := wfpErr("FwpmGetAppIdFromFileName0 "+path, r); err != nil {
 		return nil, err
 	}

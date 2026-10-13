@@ -33,8 +33,8 @@ type serviceConn interface {
 	Hello() ipc.HelloReply
 }
 
-// NoServiceEnv, set to 1, keeps the interface in its own process even with a
-// service to talk to.
+// NoServiceEnv names the variable that, set to 1, keeps the interface in its
+// own process even with a service to talk to.
 const NoServiceEnv = "XRAY_RUNNER_NO_SERVICE"
 
 // dialService reaches the service; a variable so tests need none.

@@ -1,3 +1,5 @@
+// Package ui prints the lines shown between the full-screen menus and sets up
+// the console for them.
 package ui
 
 import "fmt"

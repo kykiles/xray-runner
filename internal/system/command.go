@@ -1,3 +1,6 @@
+// Package system changes the host for a connection — routes to the tunnel, the
+// kill switch, split tunnelling, the system proxy — and keeps a journal to undo
+// those changes after a run that died without its teardown.
 package system
 
 import (

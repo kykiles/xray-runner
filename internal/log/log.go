@@ -1,3 +1,4 @@
+// Package log sends the program's slog output to its log file.
 package log
 
 import (
