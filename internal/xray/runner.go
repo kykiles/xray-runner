@@ -1,3 +1,4 @@
+// Package xray finds, checks and runs the xray-core binary.
 package xray
 
 import (

@@ -1,3 +1,5 @@
+// Package config loads the settings from .env and knows where the program keeps
+// its files: the program, data and cache directories and the hardware ID.
 package config
 
 import (

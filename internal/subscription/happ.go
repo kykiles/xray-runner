@@ -167,7 +167,7 @@ func happDecryptCrypt5(payload string) (string, error) {
 	// is not flagged, so we guess from the byte where the unsalted layout would
 	// start its decimal length and fall back to the other reading.
 	body := shuffled[4 : len(shuffled)-4]
-	preferSalted := len(body) > 12 && !(body[12] >= '0' && body[12] <= '9')
+	preferSalted := len(body) > 12 && (body[12] < '0' || body[12] > '9')
 	first, err := happCrypt5Body(body, key, preferSalted)
 	if err == nil {
 		return first, nil

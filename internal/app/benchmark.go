@@ -183,9 +183,7 @@ func (pb *ProxyBenchmarker) measureEntry(ctx context.Context, entry subscription
 	}
 
 	outbounds := []json.RawMessage{outboundJSON}
-	for _, ob := range pb.template.Outbounds {
-		outbounds = append(outbounds, ob)
-	}
+	outbounds = append(outbounds, pb.template.Outbounds...)
 
 	cfg := &xraycfg.XrayConfig{
 		Log:       &xraycfg.LogConfig{Loglevel: pb.logLevel},

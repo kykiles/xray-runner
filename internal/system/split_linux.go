@@ -716,7 +716,7 @@ func connOwnedBy(c Conn, uid int) bool {
 				owner = x
 			}
 		}
-		if owner != want && !(uid == 0 && owner == "") {
+		if owner != want && (uid != 0 || owner != "") {
 			return false
 		}
 		found = true

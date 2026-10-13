@@ -1,3 +1,6 @@
+// Package app is the client itself: the menus over subscriptions and servers,
+// the connection session, server benchmarks, and the tunnel the service runs
+// (ServeTun).
 package app
 
 import (
