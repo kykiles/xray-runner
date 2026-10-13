@@ -304,21 +304,19 @@ func (a *App) announceRestart() {
 
 // verifySystemProxy reports whether the OS actually took the proxy setting; a
 // mismatch surfaces on the status screen, since it means traffic is not going
-// through xray.
+// through xray. It runs during bring-up, before any screen is up, so the note
+// waits in pendingNote.
 func (a *App) verifySystemProxy(httpPort int) {
-	s := system.ReadProxyState()
+	s := a.readProxyState()
 	if !s.Enabled {
 		slog.Warn("system proxy not confirmed", "mode", s.Mode, "server", s.Server, "expected", fmt.Sprintf("127.0.0.1:%d", httpPort))
-		a.publishStatus(tui.StatusUpdate{Note: "Системный прокси не применился — браузер идёт напрямую (процессы из " + config.Path(system.AppsFile) + " туннель не теряют)", Err: true})
+		a.noteOnStatus("Системный прокси не применился — браузер идёт напрямую (процессы из " + config.Path(system.AppsFile) + " туннель не теряют)")
 		return
 	}
 	expected := fmt.Sprintf("127.0.0.1:%d", httpPort)
 	if s.Server != expected {
 		slog.Warn("system proxy mismatch", "got", s.Server, "expected", expected)
-		a.publishStatus(tui.StatusUpdate{
-			Note: fmt.Sprintf("Системный прокси: %s (ожидался %s)", s.Server, expected),
-			Err:  true,
-		})
+		a.noteOnStatus(fmt.Sprintf("Системный прокси: %s (ожидался %s)", s.Server, expected))
 		return
 	}
 	// Only the OS setting is confirmed here; whether anything travels through it

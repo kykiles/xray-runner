@@ -205,3 +205,39 @@ func TestListeningAt(t *testing.T) {
 		t.Errorf("listeningAt(%s) = true after the listener closed", addr)
 	}
 }
+
+// Whether the OS took the proxy setting is known before any screen is up, so a
+// refusal waits in pendingNote for the status screen: published, it went to a
+// channel nobody had opened yet and only the log heard it. The note joins
+// whatever bring-up left before it.
+func TestVerifySystemProxy_NoteWaitsForTheScreen(t *testing.T) {
+	cases := []struct {
+		name string
+		s    system.ProxyState
+		want string
+	}{
+		{"not taken", system.ProxyState{Server: "127.0.0.1:10809"}, "не применился"},
+		{"another address", system.ProxyState{Enabled: true, Server: "127.0.0.1:3128"}, "ожидался 127.0.0.1:10809"},
+		{"taken", system.ProxyState{Enabled: true, Server: "127.0.0.1:10809"}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := New(&config.Config{}, Options{})
+			a.readProxyState = func() system.ProxyState { return c.s }
+			a.pendingNote = "Прошлый режим TUN недоступен"
+
+			a.verifySystemProxy(10809)
+
+			if !strings.HasPrefix(a.pendingNote, "Прошлый режим TUN недоступен") {
+				t.Errorf("pendingNote = %q, the earlier note was lost", a.pendingNote)
+			}
+			got := strings.TrimPrefix(a.pendingNote, "Прошлый режим TUN недоступен")
+			if c.want == "" && got != "" {
+				t.Errorf("pendingNote gained %q for a proxy the OS took", got)
+			}
+			if c.want != "" && !strings.Contains(got, c.want) {
+				t.Errorf("pendingNote = %q, want a note with %q", a.pendingNote, c.want)
+			}
+		})
+	}
+}

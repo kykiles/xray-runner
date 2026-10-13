@@ -339,8 +339,8 @@ func (a *App) setStatusCh(ch chan tui.StatusUpdate) {
 
 // closeStatusCh detaches and closes the given channel under the same lock
 // publishStatus sends under. stopHealth does not cover every publisher — the
-// bring-up goroutine (verifySystemProxy, the proxy test) is nobody's to wait on
-// — so the lock, not the waiting, is what keeps a send off a closed channel.
+// service's event reader (serviceEvents) is nobody's to wait on — so the lock,
+// not the waiting, is what keeps a send off a closed channel.
 func (a *App) closeStatusCh(ch chan tui.StatusUpdate) {
 	a.statusMu.Lock()
 	if a.statusCh == ch {
@@ -728,7 +728,7 @@ func (a *App) bringUpProxy(ctx context.Context, ports sessionPorts) error {
 
 	// Only whether the OS took the setting: whether anything answers through the
 	// proxy is the health check's to say, on the status line (A06).
-	go a.verifySystemProxy(ports.http)
+	a.verifySystemProxy(ports.http)
 	return nil
 }
 
