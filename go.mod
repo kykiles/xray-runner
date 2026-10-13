@@ -1,8 +1,8 @@
 module xray-runner
 
-go 1.25.0
+go 1.26.0
 
-toolchain go1.26.8
+toolchain go1.26.9
 
 require (
 	github.com/joho/godotenv v1.5.1

@@ -117,7 +117,7 @@ func TestRegStore(t *testing.T) {
 	}
 	got, err := s.all()
 	if err != nil || len(got) != 2 || string(got[7]) != "two" || string(got[8]) != "three" {
-		t.Fatalf("all() = %q, %v", got, err)
+		t.Fatalf("all() = %v, %v", got, err)
 	}
 	for _, pid := range []int{7, 7, 8} {
 		if err := s.drop(pid); err != nil {
