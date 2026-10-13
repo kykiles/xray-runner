@@ -18,7 +18,7 @@ import (
 // Overridable in tests: gsettings and kwriteconfig5 write to the live session,
 // so the restore logic can't be exercised against the real binaries.
 var desktopCmd = func(bin string, args ...string) ([]byte, error) {
-	cmd := exec.Command(bin, args...)
+	cmd := exec.Command(bin, args...) //nolint:gosec // G204: fixed desktop tools (gsettings, kreadconfig/kwriteconfig), an argument vector
 	asDesktopUser(cmd)
 	return cmd.Output()
 }
