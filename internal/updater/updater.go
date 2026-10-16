@@ -72,6 +72,11 @@ type Release struct {
 // rename is os.Rename, swapped by tests to fail one step of an install.
 var rename = os.Rename
 
+// installMu makes the file replacements in the install directory, and their
+// rollback, go one at a time, so the rollback of one install never puts old
+// files back over another install's.
+var installMu sync.Mutex
+
 // testTransport, when a test sets it, stands in for both clients' transports.
 var testTransport http.RoundTripper
 
@@ -514,7 +519,10 @@ func InstallCore(ctx context.Context, a Asset, xrayPath string) error {
 		discard(bin)
 		return err
 	}
-	if err := swap(bin.Name(), xrayPath); err != nil {
+	installMu.Lock()
+	err = swap(bin.Name(), xrayPath)
+	installMu.Unlock()
+	if err != nil {
 		discard(bin)
 		return err
 	}
@@ -589,6 +597,15 @@ func installGeo(ctx context.Context, geoip, geosite Asset, dir string, allowUnpu
 		}
 	}
 
+	return commitAll(assets, staged, dir)
+}
+
+// commitAll puts the sealed temps in staged over the databases in dir, holding
+// installMu from the first replacement until the moved-aside copies are gone,
+// and clears the entry of each temp it published.
+func commitAll(assets []Asset, staged []*os.File, dir string) error {
+	installMu.Lock()
+	defer installMu.Unlock()
 	// The second rename can still fail — a database held open by a running core
 	// on Windows — so the first is put back if it does.
 	var done []installed

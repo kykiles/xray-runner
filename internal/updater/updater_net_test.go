@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -318,6 +319,83 @@ func TestInstallGeo_ConcurrentInstallsKeepTheirStaging(t *testing.T) {
 		}
 	}
 	assertDirHolds(t, dir, geoipName, geositeName)
+}
+
+// Install A is stopped at its second commit and fails there; install B of the
+// same pair into the same directory runs meanwhile. A's rollback must not put
+// the old files back over what B installed.
+func TestInstallGeo_RollbackDoesNotUndoConcurrentInstall(t *testing.T) {
+	dir := t.TempDir()
+	writeOldGeo(t, dir)
+	aIP, aSite := geoServer(t, func(name string) string { return "A " + name }, nil)
+	bIP, bSite := geoServer(t, newGeo, nil)
+
+	// A's renames are the first four: move the old geoip aside, put the new one
+	// in, move the old geosite aside, put the new one in. The fourth blocks and
+	// fails; B starts only after A got there.
+	errSwap := errors.New("файл занят")
+	arrived, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	var calls atomic.Int32
+	orig := rename
+	rename = func(from, to string) error {
+		if calls.Add(1) == 4 {
+			close(arrived)
+			<-release
+			return &os.LinkError{Op: "rename", Old: from, New: to, Err: errSwap}
+		}
+		return orig(from, to)
+	}
+	t.Cleanup(func() { rename = orig })
+
+	aDone, bDone := make(chan error, 1), make(chan error, 1)
+	go func() { aDone <- InstallReleaseGeo(context.Background(), aIP, aSite, dir) }()
+	<-arrived
+	go func() { bDone <- InstallReleaseGeo(context.Background(), bIP, bSite, dir) }()
+
+	// Let B go as far as it can while A is stopped: either it finishes, or it
+	// is parked on the install lock. Neither needs a timer to observe.
+	var bErr error
+	bFinished := false
+	for !bFinished && !goroutineWaitsOnMutex("updater.installGeo(") {
+		select {
+		case bErr = <-bDone:
+			bFinished = true
+		default:
+			runtime.Gosched()
+		}
+	}
+	unblock()
+	if err := <-aDone; !errors.Is(err, errSwap) {
+		t.Fatalf("install A: err = %v, want the failed second replacement", err)
+	}
+	if !bFinished {
+		bErr = <-bDone
+	}
+	if bErr != nil {
+		t.Fatalf("install B: %v", bErr)
+	}
+	for _, db := range []string{geoipName, geositeName} {
+		if got := readFile(t, filepath.Join(dir, db)); got != newGeo(db) {
+			t.Errorf("%s = %q, want %q: successful B install lost", db, got, newGeo(db))
+		}
+	}
+	assertDirHolds(t, dir, geoipName, geositeName)
+}
+
+// goroutineWaitsOnMutex reports whether a goroutine running fn is parked on a
+// sync.Mutex.
+func goroutineWaitsOnMutex(fn string) bool {
+	buf := make([]byte, 1<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, "sync.Mutex.Lock") && strings.Contains(g, fn) {
+			return true
+		}
+	}
+	return false
 }
 
 func coreBin() string {
