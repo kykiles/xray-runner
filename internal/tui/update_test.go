@@ -1,10 +1,14 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"xray-runner/internal/updater"
@@ -139,5 +143,121 @@ func TestUpdate_ForeignCoreIsLeftAlone(t *testing.T) {
 				t.Errorf("stage %v, err %v; want done with the reason naming the core's directory", got.stage, got.err)
 			}
 		})
+	}
+}
+
+// Once the guard is closed no operation starts, and closing waits for the ones
+// that did.
+func TestOpGuard_ClosingWaitsAndRefusesLaterStarts(t *testing.T) {
+	g := &opGuard{}
+	if !g.start() {
+		t.Fatal("start() on an open guard returned false")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		g.closeAndWait()
+		close(closed)
+	}()
+
+	// closeAndWait sets closed before it waits, so once start() refuses, the
+	// close is under way and the started operation is still counted.
+	for g.start() {
+		g.done()
+		runtime.Gosched()
+	}
+	select {
+	case <-closed:
+		t.Fatal("closeAndWait returned while an operation was still running")
+	default:
+	}
+
+	g.done()
+	<-closed
+	if g.start() {
+		t.Error("start() on a closed guard returned true")
+	}
+}
+
+// A guard nobody started on closes at once.
+func TestOpGuard_CloseWithoutOperations(t *testing.T) {
+	g := &opGuard{}
+	g.closeAndWait()
+	if g.start() {
+		t.Error("start() on a closed guard returned true")
+	}
+}
+
+// An install command that runs after the screen was closed does nothing: it
+// reports the cancellation and never reaches the installer.
+func TestUpdate_InstallAfterCloseIsRefused(t *testing.T) {
+	var called atomic.Int32
+	origGeo, origCore := installReleaseGeo, installCoreBinary
+	installReleaseGeo = func(context.Context, updater.Asset, updater.Asset, string) error {
+		called.Add(1)
+		return nil
+	}
+	installCoreBinary = func(context.Context, updater.Asset, string) error {
+		called.Add(1)
+		return nil
+	}
+	t.Cleanup(func() { installReleaseGeo, installCoreBinary = origGeo, origCore })
+
+	ops := &opGuard{}
+	m := updateModel{ctx: context.Background(), ops: ops, dir: t.TempDir(), xrayPath: "xray"}
+	geoCmd := m.installGeo(updater.Asset{}, updater.Asset{})
+	coreCmd := m.installCore(updater.Asset{})
+	ops.closeAndWait()
+
+	for name, cmd := range map[string]tea.Cmd{"geo": geoCmd, "core": coreCmd} {
+		msg, ok := cmd().(installedMsg)
+		if !ok || !errors.Is(msg.err, context.Canceled) {
+			t.Errorf("%s: got %#v, want installedMsg with context.Canceled", name, msg)
+		}
+	}
+	if n := called.Load(); n != 0 {
+		t.Errorf("installer ran %d times after the screen was closed", n)
+	}
+}
+
+// A running install holds closeAndWait until it returns, and the installer sees
+// the context it was given.
+func TestUpdate_CloseWaitsForRunningInstall(t *testing.T) {
+	entered, finish, returned := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	origGeo := installReleaseGeo
+	installReleaseGeo = func(ctx context.Context, _, _ updater.Asset, _ string) error {
+		defer close(returned)
+		close(entered)
+		<-finish
+		return ctx.Err()
+	}
+	t.Cleanup(func() { installReleaseGeo = origGeo })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ops := &opGuard{}
+	m := updateModel{ctx: ctx, ops: ops, dir: t.TempDir()}
+	cmd := m.installGeo(updater.Asset{}, updater.Asset{})
+
+	msgs := make(chan tea.Msg, 1)
+	go func() { msgs <- cmd() }()
+	<-entered
+
+	cancel()
+	closed := make(chan struct{})
+	go func() {
+		ops.closeAndWait()
+		close(closed)
+	}()
+
+	close(finish)
+	<-closed
+	select {
+	case <-returned:
+	default:
+		t.Fatal("closeAndWait returned before the install did")
+	}
+	if msg := (<-msgs).(installedMsg); !errors.Is(msg.err, context.Canceled) {
+		t.Errorf("install err = %v, want context.Canceled", msg.err)
 	}
 }

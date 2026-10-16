@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -44,8 +45,49 @@ type geoReleaseMsg struct {
 }
 type installedMsg struct{ err error }
 
+// The installers, as variables for tests.
+var (
+	installReleaseGeo = updater.InstallReleaseGeo
+	installCoreBinary = updater.InstallCore
+)
+
+// opGuard lets the screen's closing wait for the installs it started. Bubble
+// Tea runs a command on its own goroutine and may not have started it, or may
+// still be running it, when the program returns, so a bare WaitGroup would
+// either hang on a command that never starts or let one start after the wait.
+type opGuard struct {
+	mu     sync.Mutex
+	closed bool
+	wg     sync.WaitGroup
+}
+
+// start registers an operation and reports whether it may run; after
+// closeAndWait it may not.
+func (g *opGuard) start() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return false
+	}
+	g.wg.Add(1)
+	return true
+}
+
+// done ends an operation start allowed.
+func (g *opGuard) done() { g.wg.Done() }
+
+// closeAndWait refuses any further start and waits for the operations that
+// already started.
+func (g *opGuard) closeAndWait() {
+	g.mu.Lock()
+	g.closed = true
+	g.mu.Unlock()
+	g.wg.Wait()
+}
+
 type updateModel struct {
 	ctx      context.Context
+	ops      *opGuard // installs in flight; closed when the screen returns
 	xrayPath string
 	dir      string
 	// foreign is a core that is not the program's own (xray.Bundled): found on
@@ -74,11 +116,20 @@ var updateMenu = []string{"Обновить ядро xray", "Обновить г
 // (empty if it could not be determined), shown so the user knows what they are
 // updating from. bundled says whether that core is the program's own; one that
 // is not is left alone, databases included.
+//
+// When the screen closes, an install still running is cancelled and waited for,
+// and none starts after that: RunUpdate returns only once nothing it started is
+// still changing files.
 func RunUpdate(ctx context.Context, xrayPath, installed string, bundled bool) error {
 	dir := filepath.Dir(xrayPath)
 	sp := newSpinner()
-	m := updateModel{ctx: ctx, xrayPath: xrayPath, dir: dir, foreign: !bundled, installed: installed, geoDate: geoDate(dir), spinner: sp}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ops := &opGuard{}
+	m := updateModel{ctx: ctx, ops: ops, xrayPath: xrayPath, dir: dir, foreign: !bundled, installed: installed, geoDate: geoDate(dir), spinner: sp}
 	_, err := runScreen(m)
+	cancel()
+	ops.closeAndWait()
 	return err
 }
 
@@ -298,16 +349,24 @@ func (m updateModel) fetchGeoRelease() tea.Cmd {
 }
 
 func (m updateModel) installCore(a updater.Asset) tea.Cmd {
-	ctx, path := m.ctx, m.xrayPath
+	ctx, ops, path := m.ctx, m.ops, m.xrayPath
 	return func() tea.Msg {
-		return installedMsg{err: updater.InstallCore(ctx, a, path)}
+		if !ops.start() {
+			return installedMsg{err: context.Canceled}
+		}
+		defer ops.done()
+		return installedMsg{err: installCoreBinary(ctx, a, path)}
 	}
 }
 
 func (m updateModel) installGeo(geoip, geosite updater.Asset) tea.Cmd {
-	ctx, dir := m.ctx, m.dir
+	ctx, ops, dir := m.ctx, m.ops, m.dir
 	return func() tea.Msg {
-		return installedMsg{err: updater.InstallReleaseGeo(ctx, geoip, geosite, dir)}
+		if !ops.start() {
+			return installedMsg{err: context.Canceled}
+		}
+		defer ops.done()
+		return installedMsg{err: installReleaseGeo(ctx, geoip, geosite, dir)}
 	}
 }
 
