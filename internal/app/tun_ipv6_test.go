@@ -12,6 +12,7 @@ import (
 	"slices"
 	"testing"
 
+	"xray-runner/internal/subscription"
 	"xray-runner/internal/system"
 	"xray-runner/internal/xraycfg"
 )
@@ -113,5 +114,109 @@ func TestTun_WithoutIPv6Stack(t *testing.T) {
 	defer l.afterStop()
 	if got.Addr6 != "" {
 		t.Errorf("Addr6 = %q without an IPv6 stack, want none", got.Addr6)
+	}
+}
+
+// withV6Server answers tunAcceptsV6Server for the test.
+func withV6Server(t *testing.T, accepts bool) {
+	t.Helper()
+	orig := tunAcceptsV6Server
+	tunAcceptsV6Server = accepts
+	t.Cleanup(func() { tunAcceptsV6Server = orig })
+}
+
+// v6OnlyTarget is a server with an IPv6 literal and no IPv4 address at all.
+func v6OnlyTarget() *target {
+	return &target{entry: &subscription.SubEntry{Protocol: "vless", Address: "2001:db8::5", Port: 443}}
+}
+
+// v6SetUpApp is a tun app whose routing calls are counted and recorded.
+func v6SetUpApp(calls *int, got *system.TunRouteConfig) *App {
+	var spy killSwitchSpy
+	a := newKillSwitchApp(&spy, nil)
+	a.cfg.KillSwitch = false
+	a.cfg.HealthCheckURLs = []string{"http://127.0.0.1:1/"}
+	a.enableTunRouting = func(c system.TunRouteConfig) error { *calls++; *got = c; return nil }
+	return a
+}
+
+// Where the routing layer can keep an IPv6 server outside the tunnel, a server
+// with no IPv4 address is a valid one: the route set carries only the IPv6
+// exception.
+func TestTunSetUp_V6OnlyServerAcceptedWhereSupported(t *testing.T) {
+	withIPv6Stack(t, true)
+	withV6Server(t, true)
+	var got system.TunRouteConfig
+	calls := 0
+	a := v6SetUpApp(&calls, &got)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	l := a.newTunLifecycle(v6OnlyTarget(), sessionPorts{}, false)
+	if err := l.afterStart(ctx); err != nil {
+		t.Fatalf("tun setup for an IPv6-only server: %v", err)
+	}
+	defer l.afterStop()
+	if calls != 1 {
+		t.Fatalf("enableTunRouting called %d times, want 1", calls)
+	}
+	if len(got.ServerIPs) != 0 || !slices.Equal(got.ServerIPs6, []string{"2001:db8::5"}) {
+		t.Errorf("route config servers = %v / %v, want none / [2001:db8::5]", got.ServerIPs, got.ServerIPs6)
+	}
+}
+
+// Where the tunnel stays on IPv4 (Linux), or there is no IPv6 to claim, an
+// IPv6-only server is refused as before and no route is touched: a tunnel
+// without the server's exception would loop the uplink into itself.
+func TestTunSetUp_V6OnlyServerRefusedOtherwise(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		accepts, stack bool
+	}{
+		{"unsupported platform", false, true},
+		{"no IPv6 stack", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withIPv6Stack(t, tc.stack)
+			withV6Server(t, tc.accepts)
+			var got system.TunRouteConfig
+			calls := 0
+			a := v6SetUpApp(&calls, &got)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			l := a.newTunLifecycle(v6OnlyTarget(), sessionPorts{}, false)
+			if err := l.afterStart(ctx); err == nil {
+				l.afterStop()
+				t.Fatal("tun setup accepted an IPv6-only server")
+			}
+			if calls != 0 {
+				t.Errorf("enableTunRouting called %d times, want 0", calls)
+			}
+		})
+	}
+}
+
+// The kill switch has to let the IPv6 uplink out too, where the tunnel carries
+// IPv6 servers; elsewhere the list stays IPv4-only.
+func TestKillSwitchEndpoints_V6OnlyWhereSupported(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		accepts, stack bool
+		want           []system.Endpoint
+	}{
+		{"supported", true, true, []system.Endpoint{{IP: "2001:db8::5", Port: 443}}},
+		{"unsupported", false, true, nil},
+		{"no IPv6 stack", true, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withIPv6Stack(t, tc.stack)
+			withV6Server(t, tc.accepts)
+			a := &App{serverHost: "2001:db8::5", serverPort: 443}
+			got := a.killSwitchEndpoints(v6OnlyTarget())
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("endpoints = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }

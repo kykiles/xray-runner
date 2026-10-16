@@ -1057,6 +1057,58 @@ func TestEnableTunRouting_SendsIPv6IntoTunAndExcludesServer(t *testing.T) {
 	}
 }
 
+// A server with only IPv6 addresses is excluded by its /128 alone; the IPv4
+// default halves still go into the tun, and no IPv4 exception is written.
+func TestEnableTunRouting_IPv6OnlyServer(t *testing.T) {
+	f := winHost()
+	withFakeIP(t, f)
+	cfg := TunRouteConfig{Iface: "xray-tun", Addr: "10.0.0.1",
+		Addr6: "fdfe:dcba:9876::1", ServerIPs6: []string{"2a00:1450::64"}}
+
+	if err := EnableTunRouting(cfg); err != nil {
+		t.Fatalf("EnableTunRouting: %v", err)
+	}
+
+	for _, want := range []string{
+		"netsh interface ipv6 add route prefix=2a00:1450::64/128 interface=12 store=active nexthop=fe80::1",
+		"route add 0.0.0.0 mask 128.0.0.0 10.0.0.1 if 27",
+		"route add 128.0.0.0 mask 128.0.0.0 10.0.0.1 if 27",
+		"netsh interface ipv6 add route prefix=::/1 interface=27 store=active nexthop=fdfe:dcba:9876::1",
+		"netsh interface ipv6 add route prefix=8000::/1 interface=27 store=active nexthop=fdfe:dcba:9876::1",
+	} {
+		if !f.has(want) {
+			t.Errorf("missing %q, got: %v", want, f.cmds)
+		}
+	}
+	for _, cmd := range f.cmds {
+		if strings.Contains(cmd, "255.255.255.255") {
+			t.Errorf("IPv4 server exception written for an IPv6-only server: %q", cmd)
+		}
+	}
+}
+
+// Without a server exception in either family the tunnel would swallow its own
+// uplink: refused before any route is touched. A v6 server counts only when the
+// tunnel claims IPv6.
+func TestEnableTunRouting_RefusesWhenNoServerInEitherFamily(t *testing.T) {
+	for name, cfg := range map[string]TunRouteConfig{
+		"no servers":              {Iface: "xray-tun", Addr: "10.0.0.1", Addr6: "fdfe:dcba:9876::1"},
+		"no servers, no IPv6":     {Iface: "xray-tun", Addr: "10.0.0.1"},
+		"v6 server, IPv6 not set": {Iface: "xray-tun", Addr: "10.0.0.1", ServerIPs6: []string{"2a00:1450::64"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := winHost()
+			withFakeIP(t, f)
+			if err := EnableTunRouting(cfg); err == nil {
+				t.Fatalf("routed with no server exception: %v", f.cmds)
+			}
+			if len(f.cmds) != 0 {
+				t.Errorf("routes changed: %v", f.cmds)
+			}
+		})
+	}
+}
+
 // Tun mode leaves IPv6 alone, so an empty Addr6 must not produce a single netsh
 // call: the mode's behaviour is unchanged by the split work.
 func TestEnableTunRouting_WithoutIPv6TouchesNoIPv6Routes(t *testing.T) {

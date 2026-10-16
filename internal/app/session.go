@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -911,6 +912,12 @@ func unclosedNote(names []string) string {
 	return "Не удалось закрыть старые соединения " + strings.Join(names, ", ") + ": они идут мимо VPN, пока программы не переподключатся — перезапустите их (подробности в логе)."
 }
 
+// tunAcceptsV6Server tells whether a tun session may run against a server that
+// has only IPv6 addresses: Windows excludes the server from the tunnel over
+// IPv6 as well, Linux keeps the tunnel on IPv4 alone. A var so tests can check
+// both branches.
+var tunAcceptsV6Server = runtime.GOOS == "windows"
+
 // tunLifecycle sets a tun session up around every core process (C01): each core
 // brings up its own interface, and the routes on the previous one went with it.
 // The hooks run on the runner's goroutine, which owns a.tunRouted and
@@ -1039,7 +1046,7 @@ func (l *tunLifecycle) setUp(ctx context.Context) error {
 		if hasIPv6Stack() {
 			routeCfg.Addr6 = xraycfg.TunAddr6
 		}
-		if len(routeCfg.ServerIPs) == 0 {
+		if len(routeCfg.ServerIPs) == 0 && !(tunAcceptsV6Server && routeCfg.Addr6 != "" && len(routeCfg.ServerIPs6) > 0) {
 			return fmt.Errorf("не удалось определить IP VPN-сервера — без него маршрутизация TUN оставит машину без сети")
 		}
 		l.route = &routeCfg
@@ -1124,7 +1131,11 @@ func (a *App) killSwitchEndpoints(t *target) []system.Endpoint {
 	var out []system.Endpoint
 	seen := map[system.Endpoint]bool{}
 	add := func(host string, port int, udp bool) {
-		for _, ip := range resolveAllIPs([]string{host}) {
+		ips := resolveAllIPs([]string{host})
+		if tunAcceptsV6Server && hasIPv6Stack() {
+			ips = append(ips, resolveAllIPs6([]string{host})...)
+		}
+		for _, ip := range ips {
 			e := system.Endpoint{IP: ip, Port: port, UDP: udp}
 			if seen[e] {
 				continue
