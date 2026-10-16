@@ -34,13 +34,19 @@ func (a *App) resolveScriptedTarget(ctx context.Context) (*target, error) {
 		if stateErr != nil {
 			return nil, fmt.Errorf("%w: --last: нет сохранённого выбора (%v)", ErrSelection, stateErr)
 		}
-		subURL = state.SubscriptionURL
+		var ok bool
+		if subURL, ok = subscriptionForKey(subs, a.cfg.SubscriptionURL, state.SubscriptionKey); !ok {
+			return nil, fmt.Errorf("%w: --last: сохранённой подписки больше нет в списке", ErrSelection)
+		}
 	case len(subs) == 1:
 		subURL = subs[0].URL
 	case a.cfg.SubscriptionURL != "":
 		subURL = a.cfg.SubscriptionURL
 	case stateErr == nil:
-		subURL = state.SubscriptionURL
+		var ok bool
+		if subURL, ok = subscriptionForKey(subs, a.cfg.SubscriptionURL, state.SubscriptionKey); !ok {
+			return nil, fmt.Errorf("%w: сохранённой подписки больше нет в списке", ErrSelection)
+		}
 	default:
 		return nil, fmt.Errorf("%w: несколько подписок и нет сохранённого выбора — укажите --last или оставьте одну подписку", ErrSelection)
 	}
@@ -72,6 +78,24 @@ func (a *App) resolveScriptedTarget(ctx context.Context) (*target, error) {
 	t := &target{subURL: subURL, entry: selected}
 	t.attachProfile(profiles)
 	return t, nil
+}
+
+// subscriptionForKey finds the subscription URL whose fingerprint (subKey) is
+// key: first in the saved list, then SUBSCRIPTION_URL from .env. The state file
+// keeps only the fingerprint, so this is the way back to the link.
+func subscriptionForKey(subs []subscription.NamedSubscription, cfgURL, key string) (string, bool) {
+	if key == "" {
+		return "", false
+	}
+	for _, s := range subs {
+		if subKey(s.URL) == key {
+			return s.URL, true
+		}
+	}
+	if cfgURL != "" && subKey(cfgURL) == key {
+		return cfgURL, true
+	}
+	return "", false
 }
 
 // migrateLegacyURL seeds an empty list from .env: SUBSCRIPTION_URL as a
@@ -170,7 +194,7 @@ func pickEntry(entries []subscription.SubEntry, sel string, state *LastState, us
 // the saved state rather than replacing it, so the remembered mode survives.
 func (a *App) rememberSelection(subURL string, e *subscription.SubEntry) {
 	if err := updateState(func(s *LastState) {
-		s.SubscriptionURL = subURL
+		s.SubscriptionKey = subKey(subURL)
 		s.ServerRemarks = e.Remarks
 		s.ServerAddress = e.Address
 		s.ServerPort = e.Port

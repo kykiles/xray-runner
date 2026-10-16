@@ -5,6 +5,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"xray-runner/internal/config"
 	"xray-runner/internal/safefile"
@@ -17,10 +18,16 @@ const stateFile = "last_server.json"
 func statePath() string { return config.Path(stateFile) }
 
 type LastState struct {
-	SubscriptionURL string `json:"subscription_url"`
-	ServerRemarks   string `json:"server_remarks"`
-	ServerAddress   string `json:"server_address"`
-	ServerPort      int    `json:"server_port"`
+	// SubscriptionKey is the fingerprint of the chosen subscription (subKey).
+	// The file is plain text, so it never holds the link itself; the link is
+	// looked up in the subscription list by this key.
+	SubscriptionKey string `json:"subscription_key,omitempty"`
+	// LegacyURL is read only, to migrate files written by older versions;
+	// loadLastState clears it and it is never written back.
+	LegacyURL     string `json:"subscription_url,omitempty"`
+	ServerRemarks string `json:"server_remarks"`
+	ServerAddress string `json:"server_address"`
+	ServerPort    int    `json:"server_port"`
 	// Mode is the proxy/tun mode the user last switched to, so a restart comes
 	// back up the way they left it. Empty means "never switched" — cfg.Mode wins.
 	Mode string `json:"mode,omitempty"`
@@ -34,6 +41,15 @@ func loadLastState() (*LastState, error) {
 	var s LastState
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("state file %s corrupted: %w", stateFile, err)
+	}
+	if s.LegacyURL != "" {
+		if s.SubscriptionKey == "" {
+			s.SubscriptionKey = subKey(s.LegacyURL)
+		}
+		s.LegacyURL = ""
+		if err := saveLastState(s); err != nil {
+			slog.Warn("failed to migrate last-server state", "error", err)
+		}
 	}
 	return &s, nil
 }

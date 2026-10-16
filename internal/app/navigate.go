@@ -322,7 +322,7 @@ func (a *App) selectFromList(ctx context.Context) (*target, error) {
 	// saved address means nothing in another one.
 	var lastAddress string
 	var lastPort int
-	if state, err := loadLastState(); err == nil && state != nil && state.SubscriptionURL == subURL {
+	if state, err := loadLastState(); err == nil && state != nil && state.SubscriptionKey == subKey(subURL) {
 		lastAddress, lastPort = state.ServerAddress, state.ServerPort
 	}
 
