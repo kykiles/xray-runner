@@ -1046,7 +1046,7 @@ func (l *tunLifecycle) setUp(ctx context.Context) error {
 		if hasIPv6Stack() {
 			routeCfg.Addr6 = xraycfg.TunAddr6
 		}
-		if len(routeCfg.ServerIPs) == 0 && !(tunAcceptsV6Server && routeCfg.Addr6 != "" && len(routeCfg.ServerIPs6) > 0) {
+		if len(routeCfg.ServerIPs) == 0 && (!tunAcceptsV6Server || routeCfg.Addr6 == "" || len(routeCfg.ServerIPs6) == 0) {
 			return fmt.Errorf("не удалось определить IP VPN-сервера — без него маршрутизация TUN оставит машину без сети")
 		}
 		l.route = &routeCfg

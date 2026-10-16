@@ -158,7 +158,7 @@ func activeRoutes() ([]winRoute, error) {
 // in place is refused before the first change, and a failure takes back
 // exactly what this call added.
 func EnableTunRouting(cfg TunRouteConfig) error {
-	if len(cfg.ServerIPs) == 0 && !(cfg.Addr6 != "" && len(cfg.ServerIPs6) > 0) {
+	if len(cfg.ServerIPs) == 0 && (cfg.Addr6 == "" || len(cfg.ServerIPs6) == 0) {
 		return fmt.Errorf("не задан адрес VPN-сервера для исключения из туннеля")
 	}
 	servers, err := serverAddrs(cfg.ServerIPs, false)
