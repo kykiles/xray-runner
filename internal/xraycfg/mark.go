@@ -44,15 +44,26 @@ func BindDirectOutbounds(raw json.RawMessage, bind DirectBind) (json.RawMessage,
 	}
 
 	for _, ob := range outbounds {
+		protocolKey, err := soleField(ob, "protocol")
+		if err != nil {
+			return nil, fmt.Errorf("outbounds: %w", err)
+		}
 		var protocol string
-		if err := json.Unmarshal(ob["protocol"], &protocol); err != nil || protocol != "freedom" {
+		if err := json.Unmarshal(ob[protocolKey], &protocol); err != nil || protocol != "freedom" {
 			continue
 		}
-		stream, err := withBind(ob["streamSettings"], bind)
+		streamKey, err := soleField(ob, "streamSettings")
+		if err != nil {
+			return nil, fmt.Errorf("outbounds: %w", err)
+		}
+		if streamKey == "" {
+			streamKey = "streamSettings"
+		}
+		stream, err := withBind(ob[streamKey], bind)
 		if err != nil {
 			return nil, err
 		}
-		ob["streamSettings"] = stream
+		ob[streamKey] = stream
 	}
 
 	encoded, err := json.Marshal(outbounds)
@@ -62,6 +73,17 @@ func BindDirectOutbounds(raw json.RawMessage, bind DirectBind) (json.RawMessage,
 	cfg["outbounds"] = encoded
 
 	return json.Marshal(cfg)
+}
+
+// setField writes m[name], first dropping every other spelling of name that the
+// core would read as the same field.
+func setField(m map[string]json.RawMessage, name string, value json.RawMessage) {
+	for k := range m {
+		if sameKey(k, name) {
+			delete(m, k)
+		}
+	}
+	m[name] = value
 }
 
 // withBind adds the binding to an outbound's sockopt, keeping whatever stream
@@ -79,9 +101,16 @@ func withBind(raw json.RawMessage, bind DirectBind) (json.RawMessage, error) {
 		stream = map[string]json.RawMessage{}
 	}
 
+	sockoptKey, err := soleField(stream, "sockopt")
+	if err != nil {
+		return nil, fmt.Errorf("streamSettings: %w", err)
+	}
+	if sockoptKey == "" {
+		sockoptKey = "sockopt"
+	}
 	sockopt := map[string]json.RawMessage{}
-	if len(stream["sockopt"]) > 0 {
-		if err := json.Unmarshal(stream["sockopt"], &sockopt); err != nil {
+	if len(stream[sockoptKey]) > 0 {
+		if err := json.Unmarshal(stream[sockoptKey], &sockopt); err != nil {
 			return nil, fmt.Errorf("sockopt: %w", err)
 		}
 	}
@@ -94,21 +123,21 @@ func withBind(raw json.RawMessage, bind DirectBind) (json.RawMessage, error) {
 		if err != nil {
 			return nil, err
 		}
-		sockopt["mark"] = mark
+		setField(sockopt, "mark", mark)
 	}
 	if bind.Interface != "" {
 		iface, err := json.Marshal(bind.Interface)
 		if err != nil {
 			return nil, err
 		}
-		sockopt["interface"] = iface
+		setField(sockopt, "interface", iface)
 	}
 
 	encodedSockopt, err := json.Marshal(sockopt)
 	if err != nil {
 		return nil, fmt.Errorf("sockopt: %w", err)
 	}
-	stream["sockopt"] = encodedSockopt
+	stream[sockoptKey] = encodedSockopt
 
 	return json.Marshal(stream)
 }

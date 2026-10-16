@@ -198,6 +198,23 @@ func fieldOf(m map[string]json.RawMessage, name string) string {
 	return ""
 }
 
+// soleField is the key of m the core reads the field name from, "" if none. It
+// refuses a map with several such keys, since which of them the core would honour
+// is not ours to guess.
+func soleField(m map[string]json.RawMessage, name string) (string, error) {
+	found := ""
+	for k := range m {
+		if !sameKey(k, name) {
+			continue
+		}
+		if found != "" {
+			return "", fmt.Errorf("ключ %q повторяется (с точностью до регистра)", name)
+		}
+		found = k
+	}
+	return found, nil
+}
+
 // forbiddenKey is a field that names a file: certificateFile, keyFile,
 // masterKeyLog and whatever the core adds in their manner.
 func forbiddenKey(k string) bool {

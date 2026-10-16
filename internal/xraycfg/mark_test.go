@@ -154,6 +154,113 @@ func TestBindDirectOutbounds_LeavesRestAlone(t *testing.T) {
 	}
 }
 
+// The core reads keys without regard to case, so an outbound spelled
+// {"Protocol":"freedom"} is a freedom outbound and must be bound like one, with
+// the binding landing in the one block the core will read.
+func TestBindDirectOutbounds_KeysAreCaseInsensitive(t *testing.T) {
+	raw := json.RawMessage(`{"outbounds":[
+		{"tag":"a","Protocol":"freedom"},
+		{"tag":"b","PROTOCOL":"freedom","StreamSettings":{"Sockopt":{"Mark":7,"Interface":"old","tcpFastOpen":true}}}
+	]}`)
+
+	for name, bind := range map[string]DirectBind{
+		"mark":      {Mark: DirectFwMark},
+		"interface": {Interface: "eth0"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bound, err := BindDirectOutbounds(raw, bind)
+			if err != nil {
+				t.Fatalf("BindDirectOutbounds: %v", err)
+			}
+
+			// encoding/json matches keys the way the core does.
+			var cfg struct {
+				Outbounds []struct {
+					Stream struct {
+						Sockopt struct {
+							Mark        int    `json:"mark"`
+							Interface   string `json:"interface"`
+							TCPFastOpen bool   `json:"tcpFastOpen"`
+						} `json:"sockopt"`
+					} `json:"streamSettings"`
+				} `json:"outbounds"`
+			}
+			if err := json.Unmarshal(bound, &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			for i, o := range cfg.Outbounds {
+				s := o.Stream.Sockopt
+				if bind.Mark != 0 && s.Mark != bind.Mark {
+					t.Errorf("outbound %d: mark = %d, want %d: %s", i, s.Mark, bind.Mark, bound)
+				}
+				if bind.Interface != "" && s.Interface != bind.Interface {
+					t.Errorf("outbound %d: interface = %q, want %q: %s", i, s.Interface, bind.Interface, bound)
+				}
+			}
+			if !cfg.Outbounds[1].Stream.Sockopt.TCPFastOpen {
+				t.Errorf("existing sockopt field was dropped: %s", bound)
+			}
+
+			// Exactly one spelling of each key may remain.
+			var top struct {
+				Outbounds []map[string]json.RawMessage `json:"outbounds"`
+			}
+			if err := json.Unmarshal(bound, &top); err != nil {
+				t.Fatal(err)
+			}
+			for i, ob := range top.Outbounds {
+				if n := len(foldedMapKeys(ob, "protocol")); n != 1 {
+					t.Errorf("outbound %d: %d protocol keys: %s", i, n, bound)
+				}
+				if n := len(foldedMapKeys(ob, "streamSettings")); n != 1 {
+					t.Errorf("outbound %d: %d streamSettings keys: %s", i, n, bound)
+					continue
+				}
+				var stream map[string]json.RawMessage
+				if err := json.Unmarshal(ob[foldedMapKeys(ob, "streamSettings")[0]], &stream); err != nil {
+					t.Fatal(err)
+				}
+				if n := len(foldedMapKeys(stream, "sockopt")); n != 1 {
+					t.Errorf("outbound %d: %d sockopt keys: %s", i, n, bound)
+					continue
+				}
+				var sockopt map[string]json.RawMessage
+				if err := json.Unmarshal(stream[foldedMapKeys(stream, "sockopt")[0]], &sockopt); err != nil {
+					t.Fatal(err)
+				}
+				for _, field := range []string{"mark", "interface"} {
+					if n := len(foldedMapKeys(sockopt, field)); n > 1 {
+						t.Errorf("outbound %d: %d %s keys: %s", i, n, field, bound)
+					}
+				}
+			}
+		})
+	}
+}
+
+func foldedMapKeys(m map[string]json.RawMessage, name string) []string {
+	var keys []string
+	for k := range m {
+		if sameKey(k, name) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// Two spellings of one key leave it unclear which the core would honour.
+func TestBindDirectOutbounds_RepeatedKeyIsRejected(t *testing.T) {
+	for _, raw := range []string{
+		`{"outbounds":[{"protocol":"freedom","Protocol":"freedom"}]}`,
+		`{"outbounds":[{"protocol":"freedom","streamSettings":{},"StreamSettings":{}}]}`,
+		`{"outbounds":[{"protocol":"freedom","streamSettings":{"sockopt":{},"Sockopt":{}}}]}`,
+	} {
+		if _, err := BindDirectOutbounds(json.RawMessage(raw), DirectBind{Mark: DirectFwMark}); err == nil {
+			t.Errorf("expected an error for %s", raw)
+		}
+	}
+}
+
 // Panel exports carry explicit nulls. Unmarshalling `null` into a map sets it
 // back to nil, so the marking code has to re-make the map before writing to it —
 // otherwise a subscription can crash the process on connect.
