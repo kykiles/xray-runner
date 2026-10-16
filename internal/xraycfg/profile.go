@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 )
 
 // panelOnlyFields are metadata the panel adds to a profile config; xray does not
@@ -73,6 +74,9 @@ func profileBase(raw json.RawMessage, inbounds []Inbound, logLevel string) (map[
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, fmt.Errorf("profile config: %w", err)
 	}
+	if err := canonicalTopKeys(cfg); err != nil {
+		return nil, err
+	}
 	if len(cfg["outbounds"]) == 0 {
 		return nil, fmt.Errorf("profile config has no outbounds")
 	}
@@ -94,6 +98,40 @@ func profileBase(raw json.RawMessage, inbounds []Inbound, logLevel string) (map[
 	}
 
 	return cfg, nil
+}
+
+// canonicalTopKeys renames the top-level keys the code below addresses by exact
+// name. The core reads keys without regard to case, so "Log" is its log section
+// just as much as "log" is; left alone, such a key would slip past the
+// replacements and deletions that follow. Two keys that the core would read as
+// one field are refused, since which of them wins is not ours to guess.
+func canonicalTopKeys(cfg map[string]json.RawMessage) error {
+	keys := make([]string, 0, len(cfg))
+	for k := range cfg {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	seen := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		f := foldKey(k)
+		if seen[f] {
+			return fmt.Errorf("profile config: ключ %q повторяется (с точностью до регистра)", k)
+		}
+		seen[f] = true
+	}
+
+	names := append([]string{"log", "inbounds", "outbounds", "routing", "observatory", "burstObservatory"}, panelOnlyFields...)
+	for _, k := range keys {
+		for _, name := range names {
+			if k != name && sameKey(k, name) {
+				cfg[name] = cfg[k]
+				delete(cfg, k)
+				break
+			}
+		}
+	}
+	return nil
 }
 
 // OutboundTag reads an outbound's tag. Empty when it has none or does not parse.

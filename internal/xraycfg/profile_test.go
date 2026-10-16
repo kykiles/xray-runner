@@ -1,6 +1,7 @@
 package xraycfg
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -216,4 +217,122 @@ func TestMergeProfile_RejectsBrokenJSON(t *testing.T) {
 	if _, err := MergeProfile(json.RawMessage(`{"outbounds":`), nil, "warning"); err == nil {
 		t.Fatal("expected an error for malformed profile JSON")
 	}
+}
+
+// foldedKeys lists the keys of a JSON object that the core reads as name.
+func foldedKeys(t *testing.T, raw json.RawMessage, name string) []string {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var keys []string
+	for k := range m {
+		if sameKey(k, name) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// The core matches top-level keys without regard to case, so a profile key in
+// another spelling must be treated exactly like its canonical name.
+func TestMergeProfile_KeysAreCaseInsensitive(t *testing.T) {
+	inbounds := []Inbound{{Tag: "socks", Port: 10808, Protocol: "socks"}}
+
+	t.Run("log is replaced", func(t *testing.T) {
+		for _, key := range []string{"Log", "LOG"} {
+			body := `"` + key + `": {"error": "/tmp/x.log", "access": "/tmp/y.log"},
+				"outbounds": [{"tag": "proxy", "protocol": "vless"}]`
+			merges := map[string]func() (json.RawMessage, error){
+				"MergeProfile": func() (json.RawMessage, error) {
+					return MergeProfile(json.RawMessage(`{`+body+`}`), inbounds, "warning")
+				},
+				"MergeProfileSingle": func() (json.RawMessage, error) {
+					return MergeProfileSingle(json.RawMessage(`{`+body+`, "routing": {}}`), "proxy", inbounds, "warning")
+				},
+			}
+			for name, merge := range merges {
+				out, err := merge()
+				if err != nil {
+					t.Fatalf("%s/%s: %v", name, key, err)
+				}
+				keys := foldedKeys(t, out, "log")
+				if len(keys) != 1 {
+					t.Fatalf("%s/%s: log keys = %v, want exactly one", name, key, keys)
+				}
+				var m map[string]json.RawMessage
+				if err := json.Unmarshal(out, &m); err != nil {
+					t.Fatal(err)
+				}
+				var logCfg map[string]json.RawMessage
+				if err := json.Unmarshal(m[keys[0]], &logCfg); err != nil {
+					t.Fatalf("%s/%s: log: %v", name, key, err)
+				}
+				for k := range logCfg {
+					if sameKey(k, "error") || sameKey(k, "access") {
+						t.Errorf("%s/%s: log kept %q from the profile", name, key, k)
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("panel inbounds do not survive", func(t *testing.T) {
+		raw := json.RawMessage(`{"Inbounds": [{"tag": "from-panel", "port": 1, "protocol": "socks"}],
+			"outbounds": [{"tag": "proxy", "protocol": "vless"}]}`)
+		out, err := MergeProfile(raw, inbounds, "warning")
+		if err != nil {
+			t.Fatalf("MergeProfile: %v", err)
+		}
+		if keys := foldedKeys(t, out, "inbounds"); len(keys) != 1 {
+			t.Fatalf("inbounds keys = %v, want exactly one", keys)
+		}
+		var cfg struct {
+			Inbounds []Inbound `json:"inbounds"`
+		}
+		if err := json.Unmarshal(out, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.Inbounds) != 1 || cfg.Inbounds[0].Tag != "socks" {
+			t.Errorf("inbounds = %+v, want only ours", cfg.Inbounds)
+		}
+	})
+
+	t.Run("panel-only fields are dropped", func(t *testing.T) {
+		raw := json.RawMessage(`{"API": {}, "Stats": {}, "Remarks": "x", "POLICY": {},
+			"Observatory": {}, "BurstObservatory": {},
+			"Outbounds": [{"tag": "proxy", "protocol": "vless"}],
+			"Routing": {"balancers": [{"tag": "B"}], "rules": [{"balancerTag": "B"}]}}`)
+		out, err := MergeProfileSingle(raw, "proxy", nil, "warning")
+		if err != nil {
+			t.Fatalf("MergeProfileSingle: %v", err)
+		}
+		for _, name := range []string{"api", "stats", "remarks", "policy", "observatory", "burstObservatory"} {
+			if keys := foldedKeys(t, out, name); len(keys) != 0 {
+				t.Errorf("%s kept as %v", name, keys)
+			}
+		}
+		if bytes.Contains(out, []byte("balancers")) || bytes.Contains(out, []byte("balancerTag")) {
+			t.Errorf("balancer survived: %s", out)
+		}
+	})
+
+	t.Run("only Outbounds is accepted", func(t *testing.T) {
+		raw := json.RawMessage(`{"Outbounds": [{"tag": "proxy", "protocol": "vless"}]}`)
+		if _, err := MergeProfile(raw, inbounds, "warning"); err != nil {
+			t.Fatalf("MergeProfile: %v", err)
+		}
+	})
+
+	t.Run("two spellings of one key are rejected", func(t *testing.T) {
+		raw := json.RawMessage(`{"log": {}, "Log": {"error": "/tmp/x.log"},
+			"outbounds": [{"tag": "proxy", "protocol": "vless"}]}`)
+		if _, err := MergeProfile(raw, inbounds, "warning"); err == nil {
+			t.Error("MergeProfile: expected an error for a repeated key")
+		}
+		if _, err := MergeProfileSingle(raw, "proxy", inbounds, "warning"); err == nil {
+			t.Error("MergeProfileSingle: expected an error for a repeated key")
+		}
+	})
 }
