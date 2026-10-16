@@ -29,23 +29,36 @@ import (
 // megabytes on every subscription open would be felt.
 const panelGeoTTL = 24 * time.Hour
 
+// installPanelGeo downloads the panel's databases; a variable for tests.
+var installPanelGeo = updater.InstallPanelGeo
+
 // useGeoAssets installs the databases the subscription points at (when it points
 // at any) and makes both xray and the geo check read from wherever the active
 // ones are. A failed update stops nothing by itself: the panel's previous pair
 // stays in use — the core's own databases when there is none — the session's
 // screen says so (noteGeoDatabases), and a config naming lists they lack is
 // refused when it is built, the failed update named (xraycfg.CheckGeoLists).
-func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
+//
+// ctx is the load's own: when it is cancelled, whether before, during or after
+// the download, nothing is switched — the databases in use stay as they were —
+// and ctx.Err() is returned. Otherwise the result is nil, a failed update
+// included.
+func (a *App) useGeoAssets(ctx context.Context, subURL string, src subscription.PanelInfo) (retErr error) {
 	dir, note := filepath.Dir(a.binary), ""
 	defer func() {
-		// XRAY_LOCATION_ASSET is inherited by every xray we spawn — the session,
-		// the config test and each benchmark probe — so one env var covers them all.
-		if err := os.Setenv("XRAY_LOCATION_ASSET", dir); err != nil {
-			slog.Warn("не удалось указать xray каталог гео-баз", "dir", dir, "error", err)
+		committed := a.commitLoad(ctx, func() {
+			// XRAY_LOCATION_ASSET is inherited by every xray we spawn — the session,
+			// the config test and each benchmark probe — so one env var covers them all.
+			if err := os.Setenv("XRAY_LOCATION_ASSET", dir); err != nil {
+				slog.Warn("не удалось указать xray каталог гео-баз", "dir", dir, "error", err)
+			}
+			xraycfg.SetGeoAssets(dir, note)
+			a.geoNote, a.geoDir = note, dir
+			slog.Info("geo databases in use", "dir", dir)
+		})
+		if !committed {
+			retErr = ctx.Err()
 		}
-		xraycfg.SetGeoAssets(dir, note)
-		a.geoNote, a.geoDir = note, dir
-		slog.Info("geo databases in use", "dir", dir)
 	}()
 
 	a.dropLegacyGeoDir()
@@ -78,9 +91,9 @@ func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
 	// policy: https only, and a checksum enforced when the panel publishes one.
 	geoip := updater.Asset{Name: "geoip.dat", URL: src.IPURL}
 	geosite := updater.Asset{Name: "geosite.dat", URL: src.SiteURL}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	installCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	if err := updater.InstallPanelGeo(ctx, geoip, geosite, panelDir); err != nil {
+	if err := installPanelGeo(installCtx, geoip, geosite, panelDir); err != nil {
 		// E03: a failed install puts the previous pair back as it was, age
 		// included, so the next open tries again. The panel's rules were written
 		// against that pair, so it serves until then; whether it still carries
@@ -97,6 +110,7 @@ func (a *App) useGeoAssets(subURL string, src subscription.PanelInfo) {
 	}
 	slog.Info("panel geo databases installed", "dir", panelDir)
 	dir = panelDir
+	return nil
 }
 
 // dropLegacyGeoDir removes the geo/ directory earlier versions kept the panel's

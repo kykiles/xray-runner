@@ -59,7 +59,10 @@ func (a *App) resolveScriptedTarget(ctx context.Context) (*target, error) {
 	if err != nil {
 		return nil, fmt.Errorf("загрузка подписки: %w", err)
 	}
-	a.useGeoAssets(subURL, geo) // the scripted path runs the panel's routing too
+	// The scripted path runs the panel's routing too.
+	if err := a.useGeoAssets(ctx, subURL, geo); err != nil {
+		return nil, err
+	}
 	entries := subscription.FlattenUnique(profiles)
 	slog.Info("subscription loaded", "servers", len(entries))
 

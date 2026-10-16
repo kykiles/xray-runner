@@ -176,22 +176,7 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 		// Load fetches the chosen subscription's profiles from inside the
 		// subscription screen, so the shell does not flash during the network
 		// fetch (task #3). Results are stashed in a.nav for the next level.
-		Load: func(loadCtx context.Context, rawURL string) error {
-			if a.nav.fresh(rawURL) {
-				// Cached profiles skip the fetch, but the databases in use are
-				// global: another subscription opened in between has left its own
-				// in place.
-				a.useGeoAssets(rawURL, a.nav.geo)
-				return nil
-			}
-			profiles, geo, err := a.loadProfiles(loadCtx, rawURL, "open")
-			if err != nil {
-				return err
-			}
-			a.nav.setProfiles(rawURL, profiles, geo)
-			a.nav.profIdx = 0
-			return nil
-		},
+		Load: a.loadSubscription,
 	}
 
 	for {
@@ -259,6 +244,31 @@ func (a *App) chooseTarget(ctx context.Context) (*target, error) {
 			return t, nil
 		}
 	}
+}
+
+// loadSubscription is the subscription screen's Load callback: it makes the
+// subscription rawURL the one in a.nav, fetching it unless the cached copy is
+// fresh.
+func (a *App) loadSubscription(loadCtx context.Context, rawURL string) error {
+	if a.nav.fresh(rawURL) {
+		// Cached profiles skip the fetch, but the databases in use are
+		// global: another subscription opened in between has left its own
+		// in place.
+		return a.useGeoAssets(loadCtx, rawURL, a.nav.geo)
+	}
+	profiles, geo, err := a.loadProfiles(loadCtx, rawURL, "open")
+	if err != nil {
+		return err
+	}
+	// A load cancelled meanwhile (the user backed out and opened another
+	// subscription) must not replace what the later one has put in place.
+	if !a.commitLoad(loadCtx, func() {
+		a.nav.setProfiles(rawURL, profiles, geo)
+		a.nav.profIdx = 0
+	}) {
+		return loadCtx.Err()
+	}
+	return nil
 }
 
 // pickApps runs the split-tunnel process picker and saves the result. The list
@@ -413,7 +423,9 @@ func (a *App) loadProfiles(ctx context.Context, subURL, why string) ([]subscript
 	}
 	// The panel's rules are written against the panel's geo databases, so switch
 	// to them before anything builds a config from this subscription.
-	a.useGeoAssets(subURL, info)
+	if err := a.useGeoAssets(ctx, subURL, info); err != nil {
+		return nil, info, fmt.Errorf("загрузка подписки: %w", err)
+	}
 	a.adoptPanelTitle(subURL, info.Title)
 	slog.Info("subscription loaded", "profiles", len(profiles), "servers", len(subscription.Flatten(profiles)), "why", why)
 	return profiles, info, nil

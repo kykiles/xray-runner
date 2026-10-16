@@ -63,6 +63,9 @@ type App struct {
 	geoDir        string // where the geo databases in use are: beside the core, or the panel's in the cache
 	noTTY         bool   // stdin is not a terminal (systemd, pipe): no screen to draw on
 	nav           nav    // menu position, kept across sessions
+	// loadMu orders the commit of a subscription load's results: the profiles in
+	// nav, the geo databases in use and the environment pointing xray at them.
+	loadMu        sync.Mutex
 	serverHost    string
 	serverPort    int
 	serverUDP     bool
@@ -184,6 +187,21 @@ func New(cfg *config.Config, opts Options) *App {
 		showStatus:        tui.ShowStatus,
 		connectScreen:     tui.ShowConnecting,
 	}
+}
+
+// commitLoad applies the results of a subscription load, but only while that
+// load is still wanted: once ctx is cancelled nothing is applied and false is
+// returned. The check and apply run under one lock, so a load cancelled in
+// favour of another cannot apply its results after the later one has.
+// apply must not block: no network or waiting under loadMu.
+func (a *App) commitLoad(ctx context.Context, apply func()) bool {
+	a.loadMu.Lock()
+	defer a.loadMu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
+	apply()
+	return true
 }
 
 func (a *App) Run(ctx context.Context) error {

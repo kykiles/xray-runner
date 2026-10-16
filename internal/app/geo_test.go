@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -71,7 +72,7 @@ func TestUseGeoAssetsAfterFailedUpdate(t *testing.T) {
 			}
 			before := readGeoPair(t, panelDir)
 
-			a.useGeoAssets(geoSubURL, unreachableGeo(t))
+			a.useGeoAssets(context.Background(), geoSubURL, unreachableGeo(t))
 
 			want := filepath.Dir(a.binary)
 			if c.panelDir {
@@ -114,13 +115,13 @@ func TestUseGeoAssetsAfterFailedUpdate(t *testing.T) {
 func TestUseGeoAssetsNoteClearsWhenCurrent(t *testing.T) {
 	a, panelDir := newGeoApp(t)
 	writeGeoPair(t, panelDir, []string{"google"}, time.Now().Add(-2*panelGeoTTL))
-	a.useGeoAssets(geoSubURL, unreachableGeo(t))
+	a.useGeoAssets(context.Background(), geoSubURL, unreachableGeo(t))
 	if a.geoNote == "" {
 		t.Fatal("no note after a failed update")
 	}
 
 	writeGeoPair(t, panelDir, []string{"google"}, time.Now())
-	a.useGeoAssets(geoSubURL, unreachableGeo(t))
+	a.useGeoAssets(context.Background(), geoSubURL, unreachableGeo(t))
 
 	a.pendingNote = ""
 	a.noteGeoDatabases()
