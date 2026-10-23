@@ -40,9 +40,16 @@ func (p Profile) Mode() string {
 // It also reports what the response headers say about the subscription — its
 // name and geo databases, see PanelInfo.
 func FetchProfiles(ctx context.Context, rawURL string, opts ...FetchOption) ([]Profile, PanelInfo, error) {
+	profiles, info, _, err := fetchProfiles(ctx, rawURL, opts...)
+	return profiles, info, err
+}
+
+// fetchProfiles is FetchProfiles that also hands back the body the profiles
+// were parsed from, for the cache; nil for a bare link, which fetches nothing.
+func fetchProfiles(ctx context.Context, rawURL string, opts ...FetchOption) ([]Profile, PanelInfo, []byte, error) {
 	rawURL, err := unwrapHapp(rawURL)
 	if err != nil {
-		return nil, PanelInfo{}, err
+		return nil, PanelInfo{}, nil, err
 	}
 
 	// A bare link is one server and nothing to fetch. It becomes an unnamed
@@ -52,17 +59,17 @@ func FetchProfiles(ctx context.Context, rawURL string, opts ...FetchOption) ([]P
 	if IsBareLink(rawURL) {
 		e, err := ParseBareLink(rawURL)
 		if err != nil {
-			return nil, PanelInfo{}, err
+			return nil, PanelInfo{}, nil, err
 		}
-		return []Profile{{Entries: []SubEntry{*e}}}, PanelInfo{}, nil
+		return []Profile{{Entries: []SubEntry{*e}}}, PanelInfo{}, nil, nil
 	}
 
 	body, header, err := fetchBody(ctx, rawURL, opts...)
 	if err != nil {
-		return nil, PanelInfo{}, err
+		return nil, PanelInfo{}, nil, err
 	}
 	profiles, err := parseProfiles(body)
-	return profiles, panelInfo(header), err
+	return profiles, panelInfo(header), body, err
 }
 
 // FetchProfilesWithHWID mirrors FetchWithHWID for the profile-aware path.

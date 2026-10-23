@@ -99,10 +99,12 @@ type listModel struct {
 // SelectList shows the unified list and returns what to do with the pick. The
 // cursor starts on the last connected server (lastAddress:lastPort) or the last
 // run balancer (lastProfIdx), unfolding its profile if the server is nested.
-// filter is restored on the way in and handed back out on exit.
+// filter is restored on the way in and handed back out on exit. note, when not
+// empty, is a warning shown as the screen opens.
 func SelectList(
 	ctx context.Context,
 	profiles []subscription.Profile,
+	note string,
 	lastAddress string, lastPort, lastProfIdx int,
 	filter string,
 	pings, profPings PingCache,
@@ -148,6 +150,9 @@ func SelectList(
 		lastRefresh: time.Now(),
 	}
 	m.restoreCursor(lastAddress, lastPort, lastProfIdx)
+	if note != "" {
+		m.note.warn(note) // Init starts its fade
+	}
 
 	res, err := runScreen(m)
 	if err != nil {
@@ -157,7 +162,12 @@ func SelectList(
 	return final.action, final.choice, final.entry, final.filter.value(), nil
 }
 
-func (m listModel) Init() tea.Cmd { return nil }
+func (m listModel) Init() tea.Cmd {
+	if m.note.empty() {
+		return nil
+	}
+	return m.note.wait(noticeHold)
+}
 
 // rows expands the profiles into the ordered row list, honoring the fold state.
 func (m listModel) rows() []listRow {

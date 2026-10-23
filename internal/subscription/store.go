@@ -219,6 +219,7 @@ func RemoveSubscription(index int) error {
 		return fmt.Errorf("invalid index %d (max %d)", index, len(entries)-1)
 	}
 
+	removed := strings.TrimSpace(entries[index].url)
 	entries = append(entries[:index], entries[index+1:]...)
 
 	var sb strings.Builder
@@ -229,7 +230,11 @@ func RemoveSubscription(index int) error {
 		sb.WriteString(e.url + "\n")
 	}
 
-	return writeSubs([]byte(sb.String()))
+	if err := writeSubs([]byte(sb.String())); err != nil {
+		return err
+	}
+	removeCached(removed)
+	return nil
 }
 
 // writeFileAtomic replaces the list through a temp file (safefile.WriteFile),

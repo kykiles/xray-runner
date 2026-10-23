@@ -122,21 +122,29 @@ type nav struct {
 	// is kept because the cache below can hand the subscription back without a
 	// fetch, and the databases in use must still follow the subscription.
 	geo subscription.PanelInfo
+	// stale is set when the panel did not answer and the profiles are its last
+	// saved answer; the list screen says so, and the next open asks again.
+	stale *subscription.Stale
 }
 
 // subCacheTTL is how long a fetched subscription is reused before the menu goes
 // back to the panel for it.
 const subCacheTTL = 10 * time.Minute
 
-// setProfiles stores a freshly fetched subscription and stamps the cache.
-func (n *nav) setProfiles(subURL string, profiles []subscription.Profile, geo subscription.PanelInfo) {
+// setProfiles stores a loaded subscription and stamps the cache. A saved copy
+// (stale) is not stamped: it stands in only until the panel answers again.
+func (n *nav) setProfiles(subURL string, profiles []subscription.Profile, geo subscription.PanelInfo, stale *subscription.Stale) {
 	// A fresh fetch is a new list: the old numbers belong to profiles that may no
 	// longer be there, and `r` is how the user asks to measure again.
 	clear(n.profPings)
 	n.profiles = profiles
 	n.geo = geo
+	n.stale = stale
 	n.loadedURL = subURL
-	n.loadedAt = time.Now()
+	n.loadedAt = time.Time{}
+	if stale == nil {
+		n.loadedAt = time.Now()
+	}
 }
 
 // fresh reports whether the subscription already in hand can be shown as-is.
@@ -256,14 +264,14 @@ func (a *App) loadSubscription(loadCtx context.Context, rawURL string) error {
 		// in place.
 		return a.useGeoAssets(loadCtx, rawURL, a.nav.geo)
 	}
-	profiles, geo, err := a.loadProfiles(loadCtx, rawURL, "open")
+	profiles, geo, stale, err := a.loadProfiles(loadCtx, rawURL, "open")
 	if err != nil {
 		return err
 	}
 	// A load cancelled meanwhile (the user backed out and opened another
 	// subscription) must not replace what the later one has put in place.
 	if !a.commitLoad(loadCtx, func() {
-		a.nav.setProfiles(rawURL, profiles, geo)
+		a.nav.setProfiles(rawURL, profiles, geo, stale)
 		a.nav.profIdx = 0
 	}) {
 		return loadCtx.Err()
@@ -318,11 +326,16 @@ func (a *App) selectFromList(ctx context.Context) (*target, error) {
 	// A-4: `r` re-fetches with the same HWID headers as the initial load, keeping
 	// the profile structure so the same list is shown again.
 	refresh := func(screenCtx context.Context) ([]subscription.Profile, error) {
-		profiles, info, err := a.loadProfiles(screenCtx, subURL, "refresh")
+		profiles, info, stale, err := a.loadProfiles(screenCtx, subURL, "refresh")
 		if err != nil {
 			return nil, err
 		}
-		a.nav.setProfiles(subURL, profiles, info)
+		// `r` asks the panel: its saved copy is no answer, and the list on the
+		// screen stays as it is.
+		if stale != nil {
+			return nil, stale.Err
+		}
+		a.nav.setProfiles(subURL, profiles, info, nil)
 		a.nav.profIdx = 0
 		return profiles, nil
 	}
@@ -336,9 +349,14 @@ func (a *App) selectFromList(ctx context.Context) (*target, error) {
 		lastAddress, lastPort = state.ServerAddress, state.ServerPort
 	}
 
+	var note string
+	if s := a.nav.stale; s != nil {
+		note = "Подписка не обновилась — показан сохранённый список от " + s.At.Local().Format("02.01 15:04")
+	}
+
 	pb := NewProxyBenchmarker(a.template, a.binary, a.cfg)
 	action, profIdx, entry, filter, err := tui.SelectList(
-		ctx, a.nav.profiles, lastAddress, lastPort, a.nav.profIdx, a.nav.filter,
+		ctx, a.nav.profiles, note, lastAddress, lastPort, a.nav.profIdx, a.nav.filter,
 		a.nav.pings, a.nav.profPings, refresh, pb.Run, pb.RunProfiles,
 		a.serverConfig, a.profileConfig, a.saveConfig,
 	)
@@ -414,21 +432,25 @@ func (a *App) profileConfig(p subscription.Profile) (string, error) {
 // loadProfiles fetches between two full-screen menus, so it prints nothing: the
 // next screen would overwrite a progress line anyway. why names what asked for
 // the fetch: two "subscription loaded" lines in a row are only diagnosable if
-// the log says which of them was the user pressing `r`.
-func (a *App) loadProfiles(ctx context.Context, subURL, why string) ([]subscription.Profile, subscription.PanelInfo, error) {
+// the log says which of them was the user pressing `r`. A panel that does not
+// answer is stood in for by its last saved answer, reported in stale.
+func (a *App) loadProfiles(ctx context.Context, subURL, why string) ([]subscription.Profile, subscription.PanelInfo, *subscription.Stale, error) {
 	hwid := config.GetOrCreateHWID(a.cfg.HWID)
-	profiles, info, err := subscription.FetchProfilesWithHWID(ctx, subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
+	profiles, info, stale, err := subscription.FetchProfilesCached(ctx, subURL, subscription.WithHWID(hwid, runtime.GOOS, a.cfg.HWIDDeviceModel))
 	if err != nil {
-		return nil, info, fmt.Errorf("загрузка подписки: %w", err)
+		return nil, info, nil, fmt.Errorf("загрузка подписки: %w", err)
+	}
+	if stale != nil {
+		slog.Warn("подписка не обновилась, открыта сохранённая копия", "fetched", stale.At, "error", stale.Err, "why", why)
 	}
 	// The panel's rules are written against the panel's geo databases, so switch
 	// to them before anything builds a config from this subscription.
 	if err := a.useGeoAssets(ctx, subURL, info); err != nil {
-		return nil, info, fmt.Errorf("загрузка подписки: %w", err)
+		return nil, info, nil, fmt.Errorf("загрузка подписки: %w", err)
 	}
 	a.adoptPanelTitle(subURL, info.Title)
 	slog.Info("subscription loaded", "profiles", len(profiles), "servers", len(subscription.Flatten(profiles)), "why", why)
-	return profiles, info, nil
+	return profiles, info, stale, nil
 }
 
 // adoptPanelTitle names the subscription the way the panel does, so the list

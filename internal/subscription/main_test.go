@@ -14,7 +14,15 @@ import (
 // never touches the real keyring. The sealing tests put a fake in.
 func TestMain(m *testing.M) {
 	sealer = noSealer
-	os.Exit(m.Run())
+	// Nor the user's cache: the saved answers go to a directory of the run's.
+	dir, err := os.MkdirTemp("", "subs-cache-")
+	if err != nil {
+		panic(err)
+	}
+	cacheDir = func() (string, error) { return dir, nil }
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
 }
 
 func noSealer() (secret.Sealer, error) {

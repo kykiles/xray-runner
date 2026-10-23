@@ -14,6 +14,7 @@ import (
 
 	"xray-runner/internal/config"
 	"xray-runner/internal/subscription"
+	"xray-runner/internal/ui"
 )
 
 // resolveScriptedTarget picks a subscription and server without prompting (U-2):
@@ -55,9 +56,13 @@ func (a *App) resolveScriptedTarget(ctx context.Context) (*target, error) {
 	// Fetched profile-aware so the chosen server can run under its profile's
 	// routing, exactly like the menu does. FlattenUnique reproduces the flat list
 	// the scripted path has always indexed, so --server N keeps its meaning.
-	profiles, geo, err := subscription.FetchProfilesWithHWID(ctx, subURL, hwid, runtime.GOOS, a.cfg.HWIDDeviceModel)
+	profiles, geo, stale, err := subscription.FetchProfilesCached(ctx, subURL, subscription.WithHWID(hwid, runtime.GOOS, a.cfg.HWIDDeviceModel))
 	if err != nil {
 		return nil, fmt.Errorf("загрузка подписки: %w", err)
+	}
+	if stale != nil {
+		slog.Warn("подписка не обновилась, открыта сохранённая копия", "fetched", stale.At, "error", stale.Err)
+		ui.Warn("Подписка не обновилась — сервер выбран из сохранённого списка от " + stale.At.Local().Format("02.01 15:04"))
 	}
 	// The scripted path runs the panel's routing too.
 	if err := a.useGeoAssets(ctx, subURL, geo); err != nil {
