@@ -16,7 +16,7 @@ import (
 const killSwitchChain = "killswitch"
 
 func EnableKillSwitch(cfg KillSwitchConfig) error {
-	slog.Info("enabling kill switch via nftables", "endpoints", len(cfg.Endpoints))
+	slog.Info("enabling kill switch via nftables", "endpoints", len(cfg.Endpoints), "pass_dns", cfg.PassDNS)
 	chain, err := killSwitchRuleset(cfg)
 	if err != nil {
 		return err
@@ -76,16 +76,21 @@ func killSwitchRuleset(cfg KillSwitchConfig) (nftChain, error) {
 		}
 		rules = append(rules, r)
 	}
-	// DNS, so name resolution keeps working while the switch is up (resolving
-	// the server on reconnect). In TUN mode DNS normally goes through the
-	// tunnel; this is a safety net for the physical path. DHCPv6 and neighbour
-	// discovery keep the uplink's IPv6 alive; DHCP for IPv4 and ARP go through
-	// packet sockets netfilter does not see.
-	rules = append(rules,
-		nftRule{l4proto: protoUDP, dport: 53, verdict: nftAccept},
-		nftRule{l4proto: protoTCP, dport: 53, verdict: nftAccept},
-		nftRule{nfproto: 6, l4proto: protoUDP, dport: 547, verdict: nftAccept},
-	)
+	// DNS past the tunnel only when the system's DNS was left on the physical
+	// path (PassDNS): with it in the tunnel, the one thing that would go out
+	// here is the system falling back to the LAN's resolver while the tunnel
+	// is down between two cores — the names would reach the provider. Nothing
+	// of ours needs it: the servers' addresses were looked up before the
+	// switch went in and are pinned into the core's config.
+	if cfg.PassDNS {
+		rules = append(rules,
+			nftRule{l4proto: protoUDP, dport: 53, verdict: nftAccept},
+			nftRule{l4proto: protoTCP, dport: 53, verdict: nftAccept},
+		)
+	}
+	// DHCPv6 and neighbour discovery keep the uplink's IPv6 alive; DHCP for
+	// IPv4 and ARP go through packet sockets netfilter does not see.
+	rules = append(rules, nftRule{nfproto: 6, l4proto: protoUDP, dport: 547, verdict: nftAccept})
 	for typ := uint8(133); typ <= 137; typ++ {
 		rules = append(rules, nftRule{nfproto: 6, l4proto: protoICMPv6, icmpType: typ, hasICMPType: true, verdict: nftAccept})
 	}

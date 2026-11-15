@@ -24,4 +24,12 @@ type KillSwitchConfig struct {
 	// leaves the physical adapter; Linux lets it through by its socket mark
 	// instead and ignores this.
 	Core string
+	// PassDNS lets DNS (port 53) past the tunnel. A session sets it when the
+	// system's DNS still takes the physical path (EnableTunDNS failed or the
+	// platform does not switch it): closed, every lookup would fail. With the
+	// DNS in the tunnel the port stays shut on Linux — the lookups that would
+	// use it are the system's own while the tunnel is down between two cores,
+	// and the names would go to the provider. Windows always lets DNS through
+	// (its DNS Client resolves for every program) and ignores this.
+	PassDNS bool
 }

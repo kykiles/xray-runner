@@ -244,3 +244,96 @@ func TestTunDNS_SplitIsNotHijacked(t *testing.T) {
 		t.Errorf("split config changed:\n%s", out)
 	}
 }
+
+// ksDNSApp is a tun session with the kill switch asked for, whose switch and
+// DNS calls land in order in *calls.
+func ksDNSApp(t *testing.T, calls *[]string, got *system.KillSwitchConfig) *App {
+	t.Helper()
+	a := dnsTunApp()
+	a.cfg.KillSwitch = true
+	a.serverHost, a.serverPort = "203.0.113.5", 443
+	a.enableKillSwitch = func(c system.KillSwitchConfig) error {
+		*calls = append(*calls, "killswitch")
+		*got = c
+		return nil
+	}
+	return a
+}
+
+// With the system's DNS in the tunnel the kill switch shuts port 53 past it:
+// the one lookup that would still go there is the system falling back to the
+// router while the tunnel is down between two cores, and the provider would
+// see the names. The DNS is switched first, so the switch knows.
+func TestTunDNS_KillSwitchShutsDNSOnceItIsInTheTunnel(t *testing.T) {
+	spy := withDNSSpy(t)
+	var calls []string
+	var ks system.KillSwitchConfig
+	a := ksDNSApp(t, &calls, &ks)
+	orig := enableTunDNS
+	enableTunDNS = func(iface string) error { calls = append(calls, "dns"); return orig(iface) }
+
+	l := a.newTunLifecycle(killSwitchTarget(), sessionPorts{}, false)
+	if err := l.afterStart(context.Background()); err != nil {
+		t.Fatalf("tun setup: %v", err)
+	}
+	defer l.afterStop()
+	if !slices.Equal(calls, []string{"dns", "killswitch"}) {
+		t.Errorf("calls %v, want the DNS switched before the kill switch", calls)
+	}
+	if ks.PassDNS {
+		t.Error("kill switch lets DNS past the tunnel although the system's DNS is in it")
+	}
+	if spy.on != 1 {
+		t.Errorf("DNS switched %d times", spy.on)
+	}
+}
+
+// A system DNS that stayed on the physical path keeps port 53 open: shut, no
+// name would resolve at all. The note already says the names may leak.
+func TestTunDNS_KillSwitchPassesDNSWhenItStayedOut(t *testing.T) {
+	spy := withDNSSpy(t)
+	spy.err = errors.New("systemd-resolved не запущен")
+	var calls []string
+	var ks system.KillSwitchConfig
+	a := ksDNSApp(t, &calls, &ks)
+
+	l := a.newTunLifecycle(killSwitchTarget(), sessionPorts{}, false)
+	if err := l.afterStart(context.Background()); err != nil {
+		t.Fatalf("tun setup: %v", err)
+	}
+	defer l.afterStop()
+	if !ks.PassDNS {
+		t.Error("kill switch shut DNS that only the physical path can carry")
+	}
+	if !strings.Contains(a.pendingNote, "могут уходить мимо VPN") {
+		t.Errorf("pendingNote = %q", a.pendingNote)
+	}
+}
+
+// A later core whose DNS switch fails under a kill switch that shut port 53:
+// the names do not leak, they stop resolving — the note says that instead.
+func TestTunDNS_LaterFailureUnderShutDNSSaysNamesStop(t *testing.T) {
+	spy := withDNSSpy(t)
+	var calls []string
+	var ks system.KillSwitchConfig
+	a := ksDNSApp(t, &calls, &ks)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	l := a.newTunLifecycle(killSwitchTarget(), sessionPorts{}, false)
+	if err := l.afterStart(ctx); err != nil {
+		t.Fatalf("first core: %v", err)
+	}
+	_ = l.afterStop()
+	spy.err = errors.New("systemd-resolved не запущен")
+	if err := l.afterStart(ctx); err != nil {
+		t.Fatalf("second core: %v", err)
+	}
+	defer l.afterStop()
+	if strings.Count(strings.Join(calls, ","), "killswitch") != 1 || ks.PassDNS {
+		t.Errorf("kill switch calls %v, PassDNS=%v: want one, with DNS shut", calls, ks.PassDNS)
+	}
+	if !strings.Contains(a.pendingNote, "сайты по именам не откроются") || strings.Contains(a.pendingNote, "могут уходить") {
+		t.Errorf("pendingNote = %q", a.pendingNote)
+	}
+}

@@ -984,6 +984,8 @@ type tunLifecycle struct {
 	failed error
 	// dnsNoted: the screen has heard that DNS stays out of the tunnel.
 	dnsNoted bool
+	// dnsShut: the session's kill switch keeps DNS off the physical path.
+	dnsShut bool
 }
 
 func (a *App) newTunLifecycle(t *target, ports sessionPorts, split bool) *tunLifecycle {
@@ -1105,36 +1107,47 @@ func (l *tunLifecycle) setUp(ctx context.Context) error {
 		// Left claimed on purpose: afterStop, then the final release, retry.
 		return fmt.Errorf("настроить маршрутизацию TUN: %w", err)
 	}
+	// DNS before the kill switch: whether the switch has to let DNS past the
+	// tunnel depends on whether the system's DNS made it in.
+	inTunnel := l.switchDNS()
 	if !l.sent {
-		if err := a.enableTunKillSwitch(l.t, l.split); err != nil {
+		if err := a.enableTunKillSwitch(l.t, l.split, !inTunnel); err != nil {
 			return err
 		}
+		l.dnsShut = a.killSwitchOn && inTunnel
 	}
-	l.switchDNS()
 	return nil
 }
 
-// switchDNS sends the system's DNS into the new core's tunnel. Every core
-// brings up a fresh interface, and the setting went with the previous one. A
-// failure leaves DNS on the old path and says so, once a session: it is a leak
-// to know about, not a reason to drop a tunnel that otherwise works. The split
-// leaves the system's DNS alone — most of the system is meant to go direct.
-func (l *tunLifecycle) switchDNS() {
+// switchDNS sends the system's DNS into the new core's tunnel and reports
+// whether it is there. Every core brings up a fresh interface, and the setting
+// went with the previous one. A failure leaves DNS on the old path and says so,
+// once a session: it is a leak to know about, not a reason to drop a tunnel
+// that otherwise works. The split leaves the system's DNS alone — most of the
+// system is meant to go direct.
+func (l *tunLifecycle) switchDNS() bool {
 	a := l.a
 	if !system.TunSwitchesDNS || l.split {
-		return
+		return false
 	}
 	a.tunDNSOn = true
 	err := enableTunDNS(xraycfg.TunInterfaceName)
 	if err == nil {
-		return
+		return true
 	}
 	slog.Warn("tun dns not switched", "error", err)
 	if l.dnsNoted {
-		return
+		return false
 	}
 	l.dnsNoted = true
-	a.noteOrPublish("DNS системы не переведён в туннель: "+err.Error()+". Имена сайтов могут уходить мимо VPN.", true)
+	note := "DNS системы не переведён в туннель: " + err.Error() + ". Имена сайтов могут уходить мимо VPN."
+	if l.dnsShut {
+		// A later core's switch failed under a kill switch that keeps DNS off
+		// the physical path: the names do not leak, they do not resolve.
+		note = "DNS системы не переведён в туннель: " + err.Error() + ". Kill switch не выпускает DNS мимо VPN, поэтому сайты по именам не откроются — переподключитесь."
+	}
+	a.noteOrPublish(note, true)
+	return false
 }
 
 // noteOrPublish shows a note on the status screen: at once when one is up,
@@ -1173,8 +1186,9 @@ func (l *tunLifecycle) afterStop() error {
 }
 
 // enableTunKillSwitch is the session's part of the tun bring-up, done once with
-// the first core's routes in.
-func (a *App) enableTunKillSwitch(t *target, split bool) error {
+// the first core's routes in. passDNS: the system's DNS is still on the
+// physical path, and shutting port 53 would leave no name resolving.
+func (a *App) enableTunKillSwitch(t *target, split, passDNS bool) error {
 	if a.cfg.KillSwitch && split {
 		// Kill switch cuts everything that does not go through the tunnel, which
 		// in split mode is most of the system working as intended (ADR-0003).
@@ -1195,11 +1209,11 @@ func (a *App) enableTunKillSwitch(t *target, split bool) error {
 			// An empty whitelist would cut xray's own uplink along with the leak.
 			return fmt.Errorf("kill switch не включён: не удалось определить IP серверов")
 		}
-		if err := a.enableKillSwitch(system.KillSwitchConfig{Endpoints: endpoints, Core: a.binary}); err != nil {
+		if err := a.enableKillSwitch(system.KillSwitchConfig{Endpoints: endpoints, Core: a.binary, PassDNS: passDNS}); err != nil {
 			return fmt.Errorf("kill switch не включился: %w", err)
 		}
 		a.killSwitchOn = true
-		slog.Info("kill switch enabled", "endpoints", len(endpoints))
+		slog.Info("kill switch enabled", "endpoints", len(endpoints), "pass_dns", passDNS)
 	}
 	return nil
 }

@@ -27,7 +27,9 @@ func killSwitchIn(t *testing.T, f *fakeNft) nftChain {
 
 // What passes and what does not, for both families in the one inet chain
 // (A02): the tunnel, loopback, the core's marked direct traffic and its
-// servers, DNS and IPv6's own housekeeping — and nothing else.
+// servers and IPv6's own housekeeping — and nothing else. DNS past the tunnel
+// is the system falling back to the LAN's resolver while the tunnel is down:
+// shut unless the session asks for it.
 func TestKillSwitchDecisions(t *testing.T) {
 	f := withFakeNft(t)
 	withJournal(t)
@@ -57,13 +59,47 @@ func TestKillSwitchDecisions(t *testing.T) {
 		{"server, other protocol", packet{oif: "eth0", daddr: "203.0.113.5", l4proto: protoUDP, dport: 443}, false},
 		{"IPv6 server over UDP", packet{oif: "eth0", daddr: "2001:db8::5", l4proto: protoUDP, dport: 8443}, true},
 		{"mapped server as IPv4", packet{oif: "eth0", daddr: "198.51.100.9", l4proto: protoTCP, dport: 80}, true},
-		{"DNS", packet{oif: "eth0", daddr: "8.8.8.8", l4proto: protoUDP, dport: 53}, true},
-		{"DNS over TCP, IPv6", packet{oif: "eth0", daddr: "2001:4860:4860::8888", l4proto: protoTCP, dport: 53}, true},
+		{"DNS", packet{oif: "eth0", daddr: "8.8.8.8", l4proto: protoUDP, dport: 53}, false},
+		{"DNS to the LAN's resolver", packet{oif: "eth0", daddr: "192.168.31.1", l4proto: protoUDP, dport: 53}, false},
+		{"DNS over TCP, IPv6", packet{oif: "eth0", daddr: "2001:4860:4860::8888", l4proto: protoTCP, dport: 53}, false},
 		{"DHCPv6", packet{oif: "eth0", daddr: "ff02::1:2", l4proto: protoUDP, dport: 547}, true},
 		{"neighbour solicitation", packet{oif: "eth0", daddr: "ff02::1:ff00:1", l4proto: protoICMPv6, icmp: 135}, true},
 		{"ICMPv6 echo", packet{oif: "eth0", daddr: "2606:4700::1111", l4proto: protoICMPv6, icmp: 128}, false},
 	}
 	for _, tc := range cases {
+		r, matched := nftEval(c, tc.p)
+		if !matched {
+			t.Errorf("%s: fell off the end of the chain", tc.name)
+			continue
+		}
+		if got := r.verdict == nftAccept; got != tc.want {
+			t.Errorf("%s: accepted = %v, want %v (rule %+v)", tc.name, got, tc.want, r)
+		}
+	}
+}
+
+// A session whose system DNS could not be moved into the tunnel still has it
+// on the physical path: shut, no name would resolve. PassDNS opens port 53 and
+// nothing else.
+func TestKillSwitchPassDNS(t *testing.T) {
+	f := withFakeNft(t)
+	withJournal(t)
+	cfg := ipv4Cfg
+	cfg.PassDNS = true
+	if err := EnableKillSwitch(cfg); err != nil {
+		t.Fatal(err)
+	}
+	c := killSwitchIn(t, f)
+	for _, tc := range []struct {
+		name string
+		p    packet
+		want bool
+	}{
+		{"DNS to the LAN's resolver", packet{oif: "eth0", daddr: "192.168.31.1", l4proto: protoUDP, dport: 53}, true},
+		{"DNS over TCP, IPv6", packet{oif: "eth0", daddr: "2001:4860:4860::8888", l4proto: protoTCP, dport: 53}, true},
+		{"DNS over TLS", packet{oif: "eth0", daddr: "1.1.1.1", l4proto: protoTCP, dport: 853}, false},
+		{"app on the physical path", packet{oif: "eth0", daddr: "1.1.1.1", l4proto: protoUDP, dport: 443}, false},
+	} {
 		r, matched := nftEval(c, tc.p)
 		if !matched {
 			t.Errorf("%s: fell off the end of the chain", tc.name)

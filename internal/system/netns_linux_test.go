@@ -299,7 +299,7 @@ func TestLiveKillSwitch(t *testing.T) {
 		{"marked direct", "8.8.8.8:9", 255, true},
 		{"the server", "203.0.113.5:4443", 0, true},
 		{"the server, other port", "203.0.113.5:4444", 0, false},
-		{"DNS", "8.8.8.8:53", 0, true},
+		{"DNS", "8.8.8.8:53", 0, false},
 		{"loopback", "127.0.0.1:9", 0, true},
 	} {
 		err := sendUDP(t, c.addr, c.mark)
@@ -310,9 +310,17 @@ func TestLiveKillSwitch(t *testing.T) {
 			t.Errorf("%s: %v, want EPERM", c.name, err)
 		}
 	}
-	// A second enable replaces the chain rather than stacking another.
+	// A second enable replaces the chain rather than stacking another — here
+	// with DNS let through, as for a session whose DNS stayed on the uplink.
+	cfg.PassDNS = true
 	if err := EnableKillSwitch(cfg); err != nil {
 		t.Fatalf("second EnableKillSwitch: %v", err)
+	}
+	if err := sendUDP(t, "8.8.8.8:53", 0); err != nil {
+		t.Errorf("DNS with PassDNS: %v, want it through", err)
+	}
+	if err := sendUDP(t, "8.8.8.8:9", 0); !errors.Is(err, unix.EPERM) {
+		t.Errorf("past the tunnel with PassDNS: %v, want EPERM", err)
 	}
 	chains, err := nfnetlink{}.chains()
 	must(t, err)
