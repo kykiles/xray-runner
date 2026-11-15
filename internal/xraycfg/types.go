@@ -226,7 +226,7 @@ func BuildTUNInbound(ipv6 bool) Inbound {
 		InterfaceName: TunInterfaceName,
 	})
 	return Inbound{
-		Tag:      "tun",
+		Tag:      TunInboundTag,
 		Protocol: "tun",
 		Settings: settings,
 		Sniffing: &SniffingConfig{

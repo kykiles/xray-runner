@@ -77,6 +77,11 @@ type App struct {
 	proxyAddr          string
 	proxyRestoreFailed bool
 	tunRouted          bool // tun routing attempted; teardown must take ours back out
+	tunDNSOn           bool // tun DNS switch attempted; teardown hands the link back to resolved
+	// pinned maps each server domain the TUN config pinned to the addresses it
+	// pinned (xraycfg.PinServerAddresses): the routes past the tunnel and the
+	// kill switch must name the addresses the core will dial.
+	pinned map[string][]string
 	// The active config routes something past the tunnel — as a rule the panel
 	// profile's own direct rules. The TUN label says so instead of promising
 	// that every packet goes through the VPN (A03).
@@ -503,6 +508,36 @@ var hasIPv6Stack = system.HasIPv6Stack
 // be false with the stack present (default.disable_ipv6=1): the interface then
 // takes IPv4 alone, while the routes still claim IPv6 and block it.
 var tunTakesIPv6 = system.TunTakesIPv6
+
+// enableTunDNS / disableTunDNS move the system's DNS into the tunnel and back;
+// vars so no test reaches the machine's resolver (see TestMain).
+var (
+	enableTunDNS  = system.EnableTunDNS
+	disableTunDNS = system.DisableTunDNS
+)
+
+// lookupServer resolves one server domain for pinning into the TUN config; a
+// var so tests need no network.
+var lookupServer = func(host string) []string { return resolveAllIPs([]string{host}) }
+
+// withPinned adds to ips the addresses pinned for hosts, without repeats: the
+// core dials only those, so the routes and the kill switch must cover them
+// even when a fresh lookup answered with others.
+func withPinned(ips, hosts []string, pinned map[string][]string) []string {
+	seen := map[string]bool{}
+	for _, ip := range ips {
+		seen[ip] = true
+	}
+	for _, h := range hosts {
+		for _, ip := range pinned[h] {
+			if !seen[ip] {
+				seen[ip] = true
+				ips = append(ips, ip)
+			}
+		}
+	}
+	return ips
+}
 
 // restoreLockOwner hands the lock file back to the sudo user; a var so a test
 // can see it called without being root.

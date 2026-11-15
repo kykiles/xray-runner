@@ -94,6 +94,9 @@ func serveTun(ctx context.Context, spec ServiceTun, ready func(error), status fu
 		return fmt.Errorf("привязать прямые outbound-ы: %w", err)
 	}
 	a.directBound = bind
+	if raw, err = a.pinServers(raw); err != nil {
+		return err
+	}
 
 	// The servers come from the outbounds the core runs, not from the client:
 	// the routes kept off the tunnel and the kill switch's whitelist cannot

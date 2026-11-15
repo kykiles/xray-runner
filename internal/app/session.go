@@ -459,7 +459,48 @@ func (a *App) buildSessionConfig(t *target) (json.RawMessage, sessionPorts, erro
 		return nil, sessionPorts{}, fmt.Errorf("привязать прямые outbound-ы: %w", err)
 	}
 	a.directBound = bind
+	if bound, err = a.pinServers(bound); err != nil {
+		return nil, sessionPorts{}, err
+	}
 	return bound, ports, nil
+}
+
+// pinServers writes the servers' addresses into a TUN config on a platform
+// whose tun session sends the system's DNS into the tunnel: without them the
+// core would look its own servers up through the tunnel they carry.
+func (a *App) pinServers(raw json.RawMessage) (json.RawMessage, error) {
+	a.pinned = nil
+	if !system.TunSwitchesDNS {
+		return raw, nil
+	}
+	out, pinned, err := xraycfg.PinServerAddresses(raw, lookupServer)
+	if err != nil {
+		return nil, fmt.Errorf("закрепить адреса серверов: %w", err)
+	}
+	a.pinned = pinned
+	return a.hijackDNS(out), nil
+}
+
+// hijackDNS lets the panel's dns servers answer the system's DNS that comes
+// through the tunnel. The split leaves the system's DNS alone, so there is
+// nothing of it in the tunnel to take. A config the core cannot safely answer
+// from — its DNS would ask the system, which now asks the core — runs without:
+// the system's DNS still goes through the tunnel, as plain queries. A config
+// the hijack cannot read runs without it too: it is an improvement over a
+// working tunnel, not a reason to refuse one.
+func (a *App) hijackDNS(raw json.RawMessage) json.RawMessage {
+	if a.split {
+		return raw
+	}
+	out, skipped, err := xraycfg.HijackTunDNS(raw, lookupServer)
+	switch {
+	case err != nil:
+		slog.Warn("tun dns not hijacked", "error", err)
+		return raw
+	case skipped != "":
+		slog.Info("tun dns not hijacked", "reason", skipped)
+	}
+	return out
 }
 
 // buildModeConfig is the config a session with this target runs and its preview
@@ -941,6 +982,8 @@ type tunLifecycle struct {
 	sent  bool
 	// failed is a setup that failed under a live core: why the session ends.
 	failed error
+	// dnsNoted: the screen has heard that DNS stays out of the tunnel.
+	dnsNoted bool
 }
 
 func (a *App) newTunLifecycle(t *target, ports sessionPorts, split bool) *tunLifecycle {
@@ -1040,7 +1083,7 @@ func (l *tunLifecycle) setUp(ctx context.Context) error {
 		routeCfg := system.TunRouteConfig{
 			Iface:      xraycfg.TunInterfaceName,
 			Addr:       xraycfg.TunAddr,
-			ServerIPs:  resolveAllIPs(l.t.serverHosts()),
+			ServerIPs:  withPinned(resolveAllIPs(l.t.serverHosts()), l.t.serverHosts(), a.pinned),
 			ServerIPs6: resolveAllIPs6(l.t.serverHosts()),
 		}
 		if hasIPv6Stack() {
@@ -1062,10 +1105,48 @@ func (l *tunLifecycle) setUp(ctx context.Context) error {
 		// Left claimed on purpose: afterStop, then the final release, retry.
 		return fmt.Errorf("настроить маршрутизацию TUN: %w", err)
 	}
-	if l.sent {
-		return nil
+	if !l.sent {
+		if err := a.enableTunKillSwitch(l.t, l.split); err != nil {
+			return err
+		}
 	}
-	return a.enableTunKillSwitch(l.t, l.split)
+	l.switchDNS()
+	return nil
+}
+
+// switchDNS sends the system's DNS into the new core's tunnel. Every core
+// brings up a fresh interface, and the setting went with the previous one. A
+// failure leaves DNS on the old path and says so, once a session: it is a leak
+// to know about, not a reason to drop a tunnel that otherwise works. The split
+// leaves the system's DNS alone — most of the system is meant to go direct.
+func (l *tunLifecycle) switchDNS() {
+	a := l.a
+	if !system.TunSwitchesDNS || l.split {
+		return
+	}
+	a.tunDNSOn = true
+	err := enableTunDNS(xraycfg.TunInterfaceName)
+	if err == nil {
+		return
+	}
+	slog.Warn("tun dns not switched", "error", err)
+	if l.dnsNoted {
+		return
+	}
+	l.dnsNoted = true
+	a.noteOrPublish("DNS системы не переведён в туннель: "+err.Error()+". Имена сайтов могут уходить мимо VPN.", true)
+}
+
+// noteOrPublish shows a note on the status screen: at once when one is up,
+// otherwise on the first one to come (publishStatus would drop it).
+func (a *App) noteOrPublish(note string, isErr bool) {
+	a.statusMu.Lock()
+	defer a.statusMu.Unlock()
+	if a.statusCh != nil {
+		a.sendStatusLocked(tui.StatusUpdate{Note: note, Err: isErr})
+		return
+	}
+	a.noteOnStatus(note)
 }
 
 // afterStop takes the core's routes out before the next core starts, so the
@@ -1131,7 +1212,7 @@ func (a *App) killSwitchEndpoints(t *target) []system.Endpoint {
 	var out []system.Endpoint
 	seen := map[system.Endpoint]bool{}
 	add := func(host string, port int, udp bool) {
-		ips := resolveAllIPs([]string{host})
+		ips := withPinned(resolveAllIPs([]string{host}), []string{host}, a.pinned)
 		if tunAcceptsV6Server && hasIPv6Stack() {
 			ips = append(ips, resolveAllIPs6([]string{host})...)
 		}
@@ -1155,6 +1236,14 @@ func (a *App) killSwitchEndpoints(t *target) []system.Endpoint {
 // releaseSession undoes everything bringUp did, leaving the OS clean for the
 // next session (or for exit).
 func (a *App) releaseSession() {
+	// DNS before the routes: a resolver left on the tun link once its routes
+	// are gone has no way out, and the lookups would fail until the core stops.
+	if a.tunDNSOn {
+		if err := disableTunDNS(xraycfg.TunInterfaceName); err != nil {
+			slog.Warn("failed to hand tun dns back", "error", err)
+		}
+		a.tunDNSOn = false
+	}
 	// Routes first: they are what stands between the user and a working
 	// network, so restore the physical path before anything else can fail.
 	if a.tunRouted {

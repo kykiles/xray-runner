@@ -25,6 +25,7 @@ import (
 	"xray-runner/internal/config"
 	"xray-runner/internal/subscription"
 	"xray-runner/internal/tui"
+	"xray-runner/internal/xraycfg"
 )
 
 // fastHealth shortens the health loop's waits so a test sees several checks
@@ -416,7 +417,15 @@ func TestBuildSessionConfig_OneProbeRuleAhead(t *testing.T) {
 				if count != 1 {
 					t.Fatalf("%d probe rules, want exactly 1", count)
 				}
-				first := cfg.Routing.Rules[0]
+				// The tun DNS hijack may stand ahead of it: that rule matches the
+				// tun inbound only and the probe rule the probe inbound only, so
+				// between the two the order means nothing. Ahead of the panel's
+				// rules is what counts.
+				rules := cfg.Routing.Rules
+				if len(rules) > 0 && rules[0].OutboundTag == xraycfg.TunDNSOutboundTag {
+					rules = rules[1:]
+				}
+				first := rules[0]
 				aim := map[string]string{"outboundTag": first.OutboundTag, "balancerTag": first.BalancerTag}[c.aim]
 				if !slices.Equal(first.Domain, hosts) || aim != c.tag {
 					t.Errorf("first rule = %+v, want the probe rule aimed at %s %q", first, c.aim, c.tag)
