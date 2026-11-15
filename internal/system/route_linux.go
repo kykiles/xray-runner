@@ -58,6 +58,27 @@ func HasIPv6Stack() bool {
 	return err == nil
 }
 
+// defaultDisableIPv6 is the sysctl a new interface copies its disable_ipv6
+// from. Overridable in tests.
+var defaultDisableIPv6 = "/proc/sys/net/ipv6/conf/default/disable_ipv6"
+
+// TunTakesIPv6 reports whether the tun interface, created fresh by the core,
+// can hold a v6 address. With net.ipv6.conf.default.disable_ipv6=1 the kernel
+// keeps IPv6 but refuses addresses on new interfaces, and the core exits on
+// the one it is given ("failed to add interface address … permission
+// denied"). The stack is still there, so the block that keeps IPv6 from going
+// around the tunnel stays: that is HasIPv6Stack's answer, not this one.
+func TunTakesIPv6() bool {
+	if !HasIPv6Stack() {
+		return false
+	}
+	b, err := os.ReadFile(defaultDisableIPv6)
+	if err != nil {
+		return true // no such sysctl: nothing says IPv6 is off
+	}
+	return strings.TrimSpace(string(b)) != "1"
+}
+
 // netOps is the host's routing state, read and changed the way EnableTunRouting
 // and its teardown need it. The real one speaks rtnetlink (netlink_linux.go):
 // nothing is parsed out of `ip`, which the program no longer runs (H09).

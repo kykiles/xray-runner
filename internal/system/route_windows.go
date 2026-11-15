@@ -32,6 +32,9 @@ var splitDefault6 = []netip.Prefix{netip.MustParsePrefix("::/1"), netip.MustPars
 // stack, only with it unbound from an adapter.
 func HasIPv6Stack() bool { return true }
 
+// TunTakesIPv6 is always true here for the same reason.
+func TunTakesIPv6() bool { return true }
+
 // ipCmd is overridable in tests.
 var ipCmd commander = execCommander{}
 

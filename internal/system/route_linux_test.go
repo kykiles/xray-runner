@@ -729,6 +729,35 @@ func withIPv6Stack(t *testing.T, present bool) {
 	t.Cleanup(func() { ifInet6 = orig })
 }
 
+func TestTunTakesIPv6(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stack  bool
+		sysctl string // "" leaves the file missing
+		want   bool
+	}{
+		{"enabled", true, "0\n", true},
+		{"disabled by sysctl", true, "1\n", false},
+		{"no sysctl file", true, "", true},
+		{"no stack", false, "0\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withIPv6Stack(t, tc.stack)
+			orig := defaultDisableIPv6
+			defaultDisableIPv6 = t.TempDir() + "/disable_ipv6"
+			t.Cleanup(func() { defaultDisableIPv6 = orig })
+			if tc.sysctl != "" {
+				if err := os.WriteFile(defaultDisableIPv6, []byte(tc.sysctl), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := TunTakesIPv6(); got != tc.want {
+				t.Errorf("TunTakesIPv6() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 var tunCfg6 = TunRouteConfig{Iface: "xray-tun", Addr: "10.0.0.1", Addr6: "fdfe:dcba:9876::1", ServerIPs: []string{"45.150.32.235"}}
 
 // A06/A11: the VPN runs without IPv6, and tun used to leave it alone — on a

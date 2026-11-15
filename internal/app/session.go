@@ -527,7 +527,7 @@ func (a *App) buildModeSource(t *target) (json.RawMessage, sessionPorts, error) 
 		if err != nil {
 			return nil, sessionPorts{}, fmt.Errorf("найти порт для проверки связи: %w", err)
 		}
-		inbounds = []xraycfg.Inbound{xraycfg.BuildTUNInbound(hasIPv6Stack()), xraycfg.BuildProbeInbound(pp.http)}
+		inbounds = []xraycfg.Inbound{xraycfg.BuildTUNInbound(tunTakesIPv6()), xraycfg.BuildProbeInbound(pp.http)}
 	} else if a.split {
 		// The listeners the split-tunnel nft rules redirect into. They are added,
 		// not substituted: the SOCKS/HTTP pair still serves the system proxy, and

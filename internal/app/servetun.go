@@ -78,7 +78,7 @@ func serveTun(ctx context.Context, spec ServiceTun, ready func(error), status fu
 	if err != nil {
 		return fmt.Errorf("найти порт для проверки связи: %w", err)
 	}
-	inbounds := []xraycfg.Inbound{xraycfg.BuildTUNInbound(hasIPv6Stack()), xraycfg.BuildProbeInbound(pp.http)}
+	inbounds := []xraycfg.Inbound{xraycfg.BuildTUNInbound(tunTakesIPv6()), xraycfg.BuildProbeInbound(pp.http)}
 	raw, err := xraycfg.AssembleService(spec.Parts, inbounds, spec.LogLevel)
 	if err != nil {
 		return fmt.Errorf("конфигурация от интерфейса отклонена: %w", err)

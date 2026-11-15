@@ -17,12 +17,55 @@ import (
 	"xray-runner/internal/xraycfg"
 )
 
-// withIPv6Stack answers hasIPv6Stack for the test.
+// withIPv6Stack answers hasIPv6Stack, and tunTakesIPv6 the same way, for the
+// test.
 func withIPv6Stack(t *testing.T, present bool) {
 	t.Helper()
-	orig := hasIPv6Stack
-	hasIPv6Stack = func() bool { return present }
-	t.Cleanup(func() { hasIPv6Stack = orig })
+	withIPv6(t, present, present)
+}
+
+// withIPv6 answers the stack check and the tun-address check separately.
+func withIPv6(t *testing.T, stack, tunAddr bool) {
+	t.Helper()
+	origStack, origTun := hasIPv6Stack, tunTakesIPv6
+	hasIPv6Stack = func() bool { return stack }
+	tunTakesIPv6 = func() bool { return tunAddr }
+	t.Cleanup(func() { hasIPv6Stack, tunTakesIPv6 = origStack, origTun })
+}
+
+// `sysctl -w net.ipv6.conf.default.disable_ipv6=1` keeps the stack but makes a
+// new interface refuse v6 addresses: the core exited on the one it was given
+// (exit status 255) and no server would connect. The interface now takes IPv4
+// alone, and the routes still claim IPv6 so nothing goes around the tunnel.
+func TestTun_IPv6DisabledBySysctl(t *testing.T) {
+	withIPv6(t, true, false)
+
+	a := newTemplateApp(t)
+	a.mode = "tun"
+	raw, _, err := a.buildSessionConfig(splitTarget())
+	if err != nil {
+		t.Fatalf("buildSessionConfig: %v", err)
+	}
+	if gw := tunGateway(t, raw); !slices.Equal(gw, []string{xraycfg.TunAddr + "/24"}) {
+		t.Errorf("tun gateway = %v with IPv6 disabled by sysctl, want IPv4 alone", gw)
+	}
+
+	var spy killSwitchSpy
+	b := newKillSwitchApp(&spy, nil)
+	b.cfg.KillSwitch = false
+	b.cfg.HealthCheckURLs = []string{"http://127.0.0.1:1/"}
+	var got system.TunRouteConfig
+	b.enableTunRouting = func(c system.TunRouteConfig) error { got = c; return nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	l := b.newTunLifecycle(killSwitchTarget(), sessionPorts{}, false)
+	if err := l.afterStart(ctx); err != nil {
+		t.Fatalf("tun setup: %v", err)
+	}
+	defer l.afterStop()
+	if got.Addr6 != xraycfg.TunAddr6 {
+		t.Errorf("Addr6 = %q with the stack present, want %q: IPv6 must stay blocked", got.Addr6, xraycfg.TunAddr6)
+	}
 }
 
 func TestBringUpTun_ClaimsIPv6OutsideSplit(t *testing.T) {
