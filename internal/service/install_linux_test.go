@@ -38,7 +38,10 @@ func TestServiceUnitRights(t *testing.T) {
 	}
 }
 
-// systemd reads both units without complaint.
+// systemd reads both units without complaint. Only lines about these two
+// files count: verify also loads the host's own units, and a newer systemd
+// warns about them (CI's image: "Support for option CPUAccounting= has been
+// removed" in xfs_scrub_all.service and others), which says nothing of ours.
 func TestUnitsVerify(t *testing.T) {
 	if _, err := exec.LookPath("systemd-analyze"); err != nil {
 		t.Skip("no systemd-analyze")
@@ -51,8 +54,14 @@ func TestUnitsVerify(t *testing.T) {
 		}
 	}
 	out, err := exec.Command("systemd-analyze", "verify", "--man=no", filepath.Join(dir, serviceUnit), filepath.Join(dir, socketUnit)).CombinedOutput()
-	if err != nil || len(strings.TrimSpace(string(out))) > 0 {
-		t.Fatalf("systemd-analyze verify: %v\n%s", err, out)
+	var ours []string
+	for line := range strings.Lines(string(out)) {
+		if strings.Contains(line, dir) {
+			ours = append(ours, strings.TrimSpace(line))
+		}
+	}
+	if err != nil || len(ours) > 0 {
+		t.Fatalf("systemd-analyze verify: %v\n%s", err, strings.Join(ours, "\n"))
 	}
 }
 
