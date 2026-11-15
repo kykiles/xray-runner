@@ -2,6 +2,7 @@ package xray
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -311,6 +312,23 @@ func TestRunnerTestConfig(t *testing.T) {
 	badBinary := buildMockXray(t, 1, 0)
 	if err := New(badBinary, config).TestConfig(context.Background()); err == nil {
 		t.Fatal("TestConfig expected error for failing binary")
+	}
+}
+
+// Leaving while the core still checks the config is leaving, not a config
+// error: the killed check used to come back as "config test failed: exit
+// status 1" (signal: killed on Linux), and the session said so.
+func TestRunnerTestConfig_CancelIsNotAConfigError(t *testing.T) {
+	slow := buildMockXray(t, 0, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+
+	err := New(slow, []byte("{}")).TestConfig(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("TestConfig err = %v, want context.Canceled", err)
+	}
+	if strings.Contains(err.Error(), "config test failed") {
+		t.Errorf("TestConfig err = %q reads as a config error", err)
 	}
 }
 

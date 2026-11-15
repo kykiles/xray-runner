@@ -273,6 +273,10 @@ func (r *Runner) TestConfig(ctx context.Context) error {
 	r.mu.Unlock()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// A check killed by the cancel says nothing of the config.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("config test failed: %w\n%s", err, lastLines(out, 10))
 	}
 	return nil
