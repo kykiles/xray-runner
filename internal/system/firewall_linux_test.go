@@ -5,6 +5,7 @@ package system
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"slices"
 	"strings"
 	"syscall"
@@ -55,8 +56,9 @@ func TestKillSwitchDecisions(t *testing.T) {
 		{"marked direct", packet{oif: "eth0", mark: xraycfg.DirectFwMark, daddr: "93.184.216.34", l4proto: protoTCP, dport: 443}, true},
 		{"another mark", packet{oif: "eth0", mark: 1, daddr: "93.184.216.34", l4proto: protoTCP, dport: 443}, false},
 		{"server", packet{oif: "eth0", daddr: "203.0.113.5", l4proto: protoTCP, dport: 443}, true},
-		{"server, other port", packet{oif: "eth0", daddr: "203.0.113.5", l4proto: protoTCP, dport: 22}, false},
-		{"server, other protocol", packet{oif: "eth0", daddr: "203.0.113.5", l4proto: protoUDP, dport: 443}, false},
+		{"ssh to the server", packet{oif: "eth0", daddr: "203.0.113.5", l4proto: protoTCP, dport: 22}, true},
+		{"server, other protocol", packet{oif: "eth0", daddr: "203.0.113.5", l4proto: protoUDP, dport: 443}, true},
+		{"server's neighbour", packet{oif: "eth0", daddr: "203.0.113.6", l4proto: protoTCP, dport: 443}, false},
 		{"IPv6 server over UDP", packet{oif: "eth0", daddr: "2001:db8::5", l4proto: protoUDP, dport: 8443}, true},
 		{"mapped server as IPv4", packet{oif: "eth0", daddr: "198.51.100.9", l4proto: protoTCP, dport: 80}, true},
 		{"DNS", packet{oif: "eth0", daddr: "8.8.8.8", l4proto: protoUDP, dport: 53}, false},
@@ -81,6 +83,32 @@ func TestKillSwitchDecisions(t *testing.T) {
 // A session whose system DNS could not be moved into the tunnel still has it
 // on the physical path: shut, no name would resolve. PassDNS opens port 53 and
 // nothing else.
+// Several profiles on one server — the same address on other ports, or once
+// as a mapped IPv6 — make one rule: the rule is the address, not the port.
+func TestKillSwitchOneRulePerServer(t *testing.T) {
+	f := withFakeNft(t)
+	withJournal(t)
+	cfg := KillSwitchConfig{Endpoints: []Endpoint{
+		{IP: "203.0.113.5", Port: 443},
+		{IP: "203.0.113.5", Port: 8443, UDP: true},
+		{IP: "::ffff:203.0.113.5", Port: 2053},
+		{IP: "2001:db8::5", Port: 443},
+	}}
+	if err := EnableKillSwitch(cfg); err != nil {
+		t.Fatal(err)
+	}
+	var servers []netip.Prefix
+	for _, r := range killSwitchIn(t, f).rules {
+		if r.daddr.IsValid() {
+			servers = append(servers, r.daddr)
+		}
+	}
+	want := []netip.Prefix{netip.MustParsePrefix("203.0.113.5/32"), netip.MustParsePrefix("2001:db8::5/128")}
+	if !slices.Equal(servers, want) {
+		t.Errorf("server rules: %v, want %v", servers, want)
+	}
+}
+
 func TestKillSwitchPassDNS(t *testing.T) {
 	f := withFakeNft(t)
 	withJournal(t)

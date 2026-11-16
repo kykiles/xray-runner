@@ -298,7 +298,8 @@ func TestLiveKillSwitch(t *testing.T) {
 		{"through the tunnel", "10.0.0.2:9", 0, true},
 		{"marked direct", "8.8.8.8:9", 255, true},
 		{"the server", "203.0.113.5:4443", 0, true},
-		{"the server, other port", "203.0.113.5:4444", 0, false},
+		{"the server, other port", "203.0.113.5:22", 0, true},
+		{"the server's neighbour", "203.0.113.6:4443", 0, false},
 		{"DNS", "8.8.8.8:53", 0, false},
 		{"loopback", "127.0.0.1:9", 0, true},
 	} {

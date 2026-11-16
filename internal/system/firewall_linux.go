@@ -58,21 +58,27 @@ func killSwitchRuleset(cfg KillSwitchConfig) (nftChain, error) {
 		// xray's freedom outbounds create.
 		{mark: xraycfg.DirectFwMark, verdict: nftAccept},
 	}
-	// xray's own traffic to the VPN servers — every packet of it — or the uplink,
-	// every reconnect and hysteria2's UDP flows are dropped and the tunnel can
-	// never recover.
+	// The VPN servers, on any port and protocol. xray's own traffic to them —
+	// every packet of it — or the uplink, every reconnect and hysteria2's UDP
+	// flows are dropped and the tunnel can never recover. Any port rather than
+	// only the one xray dials: the servers' addresses are routed past xray-tun
+	// (route_linux.go), so ssh to a node or its panel on :80 has no other way
+	// out, and a server the provider already sees us reach reveals nothing new.
+	// One rule per address: several profiles often share a server.
+	seen := map[netip.Addr]bool{}
 	for _, e := range cfg.Endpoints {
 		ip, err := netip.ParseAddr(e.IP)
 		if err != nil || ip.Zone() != "" || e.Port <= 0 || e.Port > 65535 {
 			return nftChain{}, fmt.Errorf("kill switch: неверный адрес сервера %s:%d", e.IP, e.Port)
 		}
 		ip = ip.Unmap()
-		r := nftRule{nfproto: 4, daddr: netip.PrefixFrom(ip, ip.BitLen()), l4proto: protoTCP, dport: uint16(e.Port), verdict: nftAccept}
+		if seen[ip] {
+			continue
+		}
+		seen[ip] = true
+		r := nftRule{nfproto: 4, daddr: netip.PrefixFrom(ip, ip.BitLen()), verdict: nftAccept}
 		if ip.Is6() {
 			r.nfproto = 6
-		}
-		if e.UDP {
-			r.l4proto = protoUDP
 		}
 		rules = append(rules, r)
 	}
