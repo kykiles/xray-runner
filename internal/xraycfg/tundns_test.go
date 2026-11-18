@@ -244,3 +244,53 @@ func TestHijackTunDNS_PassesXrayTest(t *testing.T) {
 		t.Fatalf("xray rejected the hijacked config: %v\n%s\n%s", err, b, out)
 	}
 }
+
+func TestWindowsTunDNS_UsesSyntheticResolver(t *testing.T) {
+	for _, tc := range []struct {
+		name, dns, wantAction string
+	}{
+		{"panel DoH", `"https://1.1.1.1/dns-query"`, "hijack"},
+		{"system-dependent resolver", `"localhost"`, "direct"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := json.RawMessage(`{"dns":{"servers":[` + tc.dns + `]},"outbounds":[{"tag":"proxy","protocol":"vless"}]}`)
+			out, skipped, err := HijackWindowsTunDNS(raw, func(string) []string { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (skipped == "") != (tc.wantAction == "hijack") {
+				t.Errorf("hijack skipped reason = %q, want action %s", skipped, tc.wantAction)
+			}
+			var cfg struct {
+				Outbounds []struct {
+					Tag      string `json:"tag"`
+					Settings struct {
+						RewriteAddress string `json:"rewriteAddress"`
+						Rules          []struct {
+							Action string `json:"action"`
+						} `json:"rules"`
+					} `json:"settings"`
+				} `json:"outbounds"`
+				Routing struct {
+					Rules []struct {
+						IP []string `json:"ip"`
+					} `json:"rules"`
+				} `json:"routing"`
+			}
+			if err := json.Unmarshal(out, &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if len(cfg.Outbounds) != 3 || cfg.Outbounds[0].Tag != "proxy" ||
+				cfg.Outbounds[1].Tag != TunDNSOutboundTag {
+				t.Fatalf("unexpected outbounds: %s", out)
+			}
+			s := cfg.Outbounds[1].Settings
+			if s.RewriteAddress != "1.1.1.1" || len(s.Rules) == 0 || s.Rules[0].Action != tc.wantAction {
+				t.Fatalf("unexpected DNS settings: %+v", s)
+			}
+			if got := cfg.Routing.Rules[0].IP; len(got) != 1 || got[0] != WindowsTunDNSAddr {
+				t.Errorf("DNS rule matches %v, want %s", got, WindowsTunDNSAddr)
+			}
+		})
+	}
+}

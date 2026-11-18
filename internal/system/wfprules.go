@@ -3,6 +3,7 @@ package system
 import (
 	"fmt"
 	"net/netip"
+	"slices"
 
 	"xray-runner/internal/xraycfg"
 )
@@ -80,10 +81,8 @@ var (
 //     leaves from there — the counterpart of the fwmark rule on Linux;
 //   - the VPN servers, by address, port and protocol: the core's uplink, and
 //     every reconnect, should the core's own permit not match;
-//   - DNS, to port 53 anywhere: Windows resolves names in the DNS Client
-//     service rather than in the program that asked, so a reconnect that must
-//     look the server up again would otherwise fail. The same exception the
-//     Linux kill switch makes;
+//   - DNS, when the session could not move the system's DNS to the tunnel;
+//     only then must the Windows DNS Client still reach the physical resolver;
 //   - DHCP (v4 and v6) and neighbour discovery (ICMPv6 133–137): without them
 //     the physical adapter loses its lease or its neighbours while the switch
 //     is up, and with them the tunnel's own path.
@@ -122,8 +121,10 @@ func killSwitchRules(cfg KillSwitchConfig, core bool) ([]wfpRule, error) {
 		}
 		both("server", true, []wfpLayer{l}, wfpCond{field: fieldRemoteAddr, addr: ip}, proto(p), rport(uint16(e.Port)))
 	}
-	for _, p := range []uint16{protoUDP, protoTCP} {
-		both("dns", true, []wfpLayer{layerConnect4, layerConnect6}, proto(p), rport(53))
+	if cfg.PassDNS {
+		for _, p := range []uint16{protoUDP, protoTCP} {
+			both("dns", true, []wfpLayer{layerConnect4, layerConnect6}, proto(p), rport(53))
+		}
 	}
 	both("dhcp", true, all4, proto(protoUDP), lport(68), rport(67))
 	both("dhcp", true, all6, proto(protoUDP), lport(546), rport(547))
@@ -132,4 +133,27 @@ func killSwitchRules(cfg KillSwitchConfig, core bool) ([]wfpRule, error) {
 	}
 	both("block", false, append(all4, all6...))
 	return rules, nil
+}
+
+// tunDNSRules keeps the DNS Client from falling back to a physical adapter
+// even when the session uses no full kill switch. Core permits preserve the
+// panel's direct outbounds; loopback permits keep local resolvers usable.
+func tunDNSRules() []wfpRule {
+	var rules []wfpRule
+	for _, layer := range []wfpLayer{layerConnect4, layerConnect6} {
+		tun := tunAddr4
+		if layer.v6() {
+			tun = tunAddr6
+		}
+		for _, proto := range []uint16{protoUDP, protoTCP} {
+			dns := []wfpCond{{field: fieldProtocol, num: proto}, {field: fieldRemotePort, num: 53}}
+			rules = append(rules,
+				wfpRule{name: "tun dns", layer: layer, permit: true, conds: append(slices.Clip(dns), wfpCond{field: fieldLocalAddr, addr: tun})},
+				wfpRule{name: "loopback dns", layer: layer, permit: true, conds: append(slices.Clip(dns), wfpCond{field: fieldLoopback})},
+				wfpRule{name: "core dns", layer: layer, permit: true, conds: append(slices.Clip(dns), wfpCond{field: fieldApp})},
+				wfpRule{name: "block physical dns", layer: layer, conds: dns},
+			)
+		}
+	}
+	return rules
 }

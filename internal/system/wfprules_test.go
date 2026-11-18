@@ -66,7 +66,7 @@ func evalRules(t *testing.T, rules []wfpRule, f flow) (permit, decided bool) {
 }
 
 func TestKillSwitchRules_Decisions(t *testing.T) {
-	cfg := KillSwitchConfig{Endpoints: []Endpoint{
+	cfg := KillSwitchConfig{PassDNS: true, Endpoints: []Endpoint{
 		{IP: "203.0.113.7", Port: 443},
 		{IP: "2001:db8::7", Port: 8443, UDP: true},
 		{IP: "::ffff:198.51.100.9", Port: 80},
@@ -172,5 +172,35 @@ func TestKillSwitchRules_BadEndpoint(t *testing.T) {
 		if _, err := killSwitchRules(KillSwitchConfig{Endpoints: []Endpoint{e}}, false); err == nil {
 			t.Errorf("endpoint %+v accepted", e)
 		}
+	}
+}
+
+func TestTunDNSRules(t *testing.T) {
+	killSwitch, err := killSwitchRules(KillSwitchConfig{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard := tunDNSRules()
+	for _, tc := range []struct {
+		name string
+		f    flow
+		want bool
+	}{
+		{"physical UDP", flow{layer: layerConnect4, local: "192.168.1.10", proto: protoUDP, rport: 53}, false},
+		{"physical TCP over IPv6", flow{layer: layerConnect6, local: "2001:db8::10", proto: protoTCP, rport: 53}, false},
+		{"TUN", flow{layer: layerConnect4, local: tunAddr4.String(), proto: protoUDP, rport: 53}, true},
+		{"loopback", flow{layer: layerConnect4, loopback: true, proto: protoTCP, rport: 53}, true},
+		{"core direct", flow{layer: layerConnect4, local: "192.168.1.10", proto: protoUDP, rport: 53, core: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, rules := range [][]wfpRule{guard, killSwitch} {
+				if permit, decided := evalRules(t, rules, tc.f); !decided || permit != tc.want {
+					t.Fatalf("permit = %v, decided = %v, want %v", permit, decided, tc.want)
+				}
+			}
+		})
+	}
+	if _, decided := evalRules(t, guard, flow{layer: layerConnect4, proto: protoTCP, rport: 443}); decided {
+		t.Fatal("DNS guard affects HTTPS")
 	}
 }

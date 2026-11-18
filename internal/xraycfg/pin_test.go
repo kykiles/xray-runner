@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -182,5 +183,20 @@ func TestPinServerAddresses_PassesXrayTest(t *testing.T) {
 	cmd := exec.Command(bin, "run", "-test", "-c", cfgPath) //nolint:gosec // G204: the repo's own core on a temp config
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("xray rejected the pinned config: %v\n%s\n%s", err, b, out)
+	}
+}
+
+func TestPinServerAddresses_AllowsIPv6Pins(t *testing.T) {
+	raw := json.RawMessage(`{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"v6.example.com","port":443}]}}]}`)
+	out, pinned, err := PinServerAddresses(raw, func(string) []string { return []string{"2001:db8::1"} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"domainStrategy":"UseIP"`) ||
+		!strings.Contains(string(out), `"full:v6.example.com":["2001:db8::1"]`) {
+		t.Errorf("config did not pin IPv6: %s", out)
+	}
+	if got := pinned["v6.example.com"]; len(got) != 1 || got[0] != "2001:db8::1" {
+		t.Errorf("IPv6 pins = %v", got)
 	}
 }

@@ -11,6 +11,11 @@ import (
 // TunInboundTag tags the tun inbound; the DNS hijack rule matches on it.
 const TunInboundTag = "tun"
 
+// WindowsTunDNSAddr is a synthetic resolver reached through the TUN. A
+// synthetic endpoint keeps Windows from upgrading a public resolver to DoH
+// on its own and bypassing the panel's DNS configuration.
+const WindowsTunDNSAddr = "192.0.2.53"
+
 // The pieces HijackTunDNS adds. The dns outbound answers A and AAAA from the
 // core's DNS and sends every other query on through the loopback, which hands
 // it back to routing under its own inbound tag: there the panel's rules take it
@@ -45,7 +50,30 @@ const (
 //     panel routes direct — through the system unless told otherwise, ignoring
 //     dns.hosts. A freedom outbound without a strategy of its own gets
 //     sockopt.domainStrategy, which sends it to the core's DNS, hosts first.
-func HijackTunDNS(raw json.RawMessage, lookup func(host string) []string) (out json.RawMessage, skipped string, err error) {
+func HijackTunDNS(raw json.RawMessage, lookup func(host string) []string) (json.RawMessage, string, error) {
+	return hijackTunDNS(raw, lookup, "")
+}
+
+// HijackWindowsTunDNS also forwards the queries the core does not answer to
+// 1.1.1.1 through the profile. The synthetic address is never dialled.
+func HijackWindowsTunDNS(raw json.RawMessage, lookup func(host string) []string) (json.RawMessage, string, error) {
+	out, skipped, err := hijackTunDNS(raw, lookup, WindowsTunDNSAddr)
+	if err != nil || skipped == "" {
+		return out, skipped, err
+	}
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, "", err
+	}
+	key, outbounds, err := readTunDNSOutbounds(cfg)
+	if err != nil {
+		return nil, "", err
+	}
+	out, err = finishTunDNS(cfg, key, outbounds, WindowsTunDNSAddr, false)
+	return out, skipped, err
+}
+
+func hijackTunDNS(raw json.RawMessage, lookup func(host string) []string, ingress string) (out json.RawMessage, skipped string, err error) {
 	var cfg map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, "", fmt.Errorf("config: %w", err)
@@ -84,16 +112,12 @@ func HijackTunDNS(raw json.RawMessage, lookup func(host string) []string) (out j
 		hosts[host] = nil
 	}
 
-	outKey, err := soleField(cfg, "outbounds")
+	outKey, outbounds, err := readTunDNSOutbounds(cfg)
 	if err != nil {
 		return nil, "", err
 	}
 	if outKey == "" {
 		return raw, "в конфиге нет outbounds", nil
-	}
-	var outbounds []map[string]json.RawMessage
-	if err := json.Unmarshal(cfg[outKey], &outbounds); err != nil {
-		return nil, "", fmt.Errorf("outbounds: %w", err)
 	}
 	if tag := takenTag(outbounds, cfg); tag != "" {
 		return raw, fmt.Sprintf("тег %q уже занят в конфиге", tag), nil
@@ -137,30 +161,47 @@ func HijackTunDNS(raw json.RawMessage, lookup func(host string) []string) (out j
 		if streamKey == "" {
 			streamKey = "streamSettings"
 		}
-		if ob[streamKey], err = withStrategy(ob[streamKey]); err != nil {
+		if ob[streamKey], err = withStrategy(ob[streamKey], pinStrategy); err != nil {
 			return nil, "", err
 		}
 		outbounds[i] = ob
 	}
-	added, err := tunDNSOutbounds()
-	if err != nil {
-		return nil, "", err
-	}
-	// Appended: the first outbound is the default route of a config without a
-	// rule for the traffic, and that must stay the panel's.
-	outbounds = append(outbounds, added...)
-	if cfg[outKey], err = json.Marshal(outbounds); err != nil {
-		return nil, "", fmt.Errorf("outbounds: %w", err)
-	}
+	out, err = finishTunDNS(cfg, outKey, outbounds, ingress, true)
+	return out, "", err
+}
 
-	if cfg, err = withHijackRule(cfg); err != nil {
-		return nil, "", err
+func readTunDNSOutbounds(cfg map[string]json.RawMessage) (string, []map[string]json.RawMessage, error) {
+	key, err := soleField(cfg, "outbounds")
+	if err != nil || key == "" {
+		return key, nil, err
 	}
-	out, err = json.Marshal(cfg)
+	var outbounds []map[string]json.RawMessage
+	if err := json.Unmarshal(cfg[key], &outbounds); err != nil {
+		return "", nil, fmt.Errorf("outbounds: %w", err)
+	}
+	return key, outbounds, nil
+}
+
+func finishTunDNS(cfg map[string]json.RawMessage, outKey string, outbounds []map[string]json.RawMessage, ingress string, hijack bool) (json.RawMessage, error) {
+	if outKey == "" || len(outbounds) == 0 {
+		return nil, fmt.Errorf("в конфиге нет outbounds для DNS туннеля")
+	}
+	if tag := takenTag(outbounds, cfg); tag != "" {
+		return nil, fmt.Errorf("тег %q уже занят в конфиге", tag)
+	}
+	added, err := tunDNSOutbounds(ingress, hijack)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	return out, "", nil
+	// The first outbound remains the panel's default.
+	cfg[outKey], err = json.Marshal(append(outbounds, added...))
+	if err != nil {
+		return nil, err
+	}
+	if err := addTunDNSRule(cfg, ingress); err != nil {
+		return nil, err
+	}
+	return json.Marshal(cfg)
 }
 
 // dnsServerAddresses lists the address of every server in dns.servers, the
@@ -288,14 +329,20 @@ func freedomHasStrategy(ob map[string]json.RawMessage) bool {
 // DNS — all it can answer — and direct lets the rest go on to where it was
 // sent, dialled through the loopback rather than straight out, which in a
 // tunnel would be either a loop or a leak.
-func tunDNSOutbounds() ([]map[string]json.RawMessage, error) {
+func tunDNSOutbounds(ingress string, hijack bool) ([]map[string]json.RawMessage, error) {
+	var rules []map[string]any
+	if hijack {
+		rules = append(rules, map[string]any{"action": "hijack", "qType": "1,28"})
+	}
+	rules = append(rules, map[string]any{"action": "direct"})
+	settings := map[string]any{"rules": rules}
+	if ingress != "" {
+		settings["rewriteAddress"] = "1.1.1.1"
+	}
 	dnsOut := map[string]any{
-		"tag":      TunDNSOutboundTag,
-		"protocol": "dns",
-		"settings": map[string]any{"rules": []map[string]any{
-			{"action": "hijack", "qType": "1,28"},
-			{"action": "direct"},
-		}},
+		"tag":            TunDNSOutboundTag,
+		"protocol":       "dns",
+		"settings":       settings,
 		"streamSettings": map[string]any{"sockopt": map[string]any{"dialerProxy": tunDNSLoopTag}},
 	}
 	loop := map[string]any{
@@ -318,24 +365,23 @@ func tunDNSOutbounds() ([]map[string]json.RawMessage, error) {
 	return out, nil
 }
 
-// withHijackRule puts the rule sending the tunnel's port 53 to the dns
-// outbound first, ahead of the panel's rules, any of which could otherwise
-// claim the query by its address.
-func withHijackRule(cfg map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+// addTunDNSRule puts the DNS rule ahead of any panel rules that would
+// otherwise claim the query by its address.
+func addTunDNSRule(cfg map[string]json.RawMessage, ingress string) error {
 	routingKey, err := soleField(cfg, "routing")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if routingKey == "" {
 		routingKey = "routing"
 	}
 	routing, err := object(cfg[routingKey], "routing")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	rulesKey, err := soleField(routing, "rules")
 	if err != nil {
-		return nil, fmt.Errorf("routing: %w", err)
+		return fmt.Errorf("routing: %w", err)
 	}
 	if rulesKey == "" {
 		rulesKey = "rules"
@@ -343,23 +389,27 @@ func withHijackRule(cfg map[string]json.RawMessage) (map[string]json.RawMessage,
 	var rules []json.RawMessage
 	if len(routing[rulesKey]) > 0 && string(routing[rulesKey]) != "null" {
 		if err := json.Unmarshal(routing[rulesKey], &rules); err != nil {
-			return nil, fmt.Errorf("routing.rules: %w", err)
+			return fmt.Errorf("routing.rules: %w", err)
 		}
 	}
-	rule, err := json.Marshal(map[string]any{
+	match := map[string]any{
 		"type":        "field",
 		"inboundTag":  []string{TunInboundTag},
 		"port":        "53",
 		"outboundTag": TunDNSOutboundTag,
-	})
+	}
+	if ingress != "" {
+		match["ip"] = []string{ingress}
+	}
+	rule, err := json.Marshal(match)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if routing[rulesKey], err = json.Marshal(append([]json.RawMessage{rule}, rules...)); err != nil {
-		return nil, err
+		return err
 	}
 	if cfg[routingKey], err = json.Marshal(routing); err != nil {
-		return nil, err
+		return err
 	}
-	return cfg, nil
+	return nil
 }

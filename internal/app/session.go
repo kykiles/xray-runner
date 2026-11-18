@@ -470,7 +470,8 @@ func (a *App) buildSessionConfig(t *target) (json.RawMessage, sessionPorts, erro
 // core would look its own servers up through the tunnel they carry.
 func (a *App) pinServers(raw json.RawMessage) (json.RawMessage, error) {
 	a.pinned = nil
-	if !system.TunSwitchesDNS {
+	a.tunDNSConfigErr = nil
+	if !system.TunSwitchesDNS || (runtime.GOOS == "windows" && a.split) {
 		return raw, nil
 	}
 	out, pinned, err := xraycfg.PinServerAddresses(raw, lookupServer)
@@ -492,9 +493,16 @@ func (a *App) hijackDNS(raw json.RawMessage) json.RawMessage {
 	if a.split {
 		return raw
 	}
-	out, skipped, err := xraycfg.HijackTunDNS(raw, lookupServer)
+	hijack := xraycfg.HijackTunDNS
+	if runtime.GOOS == "windows" {
+		hijack = xraycfg.HijackWindowsTunDNS
+	}
+	out, skipped, err := hijack(raw, lookupServer)
 	switch {
 	case err != nil:
+		if runtime.GOOS == "windows" {
+			a.tunDNSConfigErr = err
+		}
 		slog.Warn("tun dns not hijacked", "error", err)
 		return raw
 	case skipped != "":
@@ -1082,11 +1090,12 @@ func (l *tunLifecycle) setUp(ctx context.Context) error {
 	// dual-stack network goes around the tunnel with its real address. A kernel
 	// without IPv6 has none to claim, and its interface took no v6 address.
 	if l.route == nil {
+		hosts := l.t.serverHosts()
 		routeCfg := system.TunRouteConfig{
 			Iface:      xraycfg.TunInterfaceName,
 			Addr:       xraycfg.TunAddr,
-			ServerIPs:  withPinned(resolveAllIPs(l.t.serverHosts()), l.t.serverHosts(), a.pinned),
-			ServerIPs6: resolveAllIPs6(l.t.serverHosts()),
+			ServerIPs:  withPinned(resolveAllIPs(hosts), hosts, a.pinned, false),
+			ServerIPs6: withPinned(resolveAllIPs6(hosts), hosts, a.pinned, true),
 		}
 		if hasIPv6Stack() {
 			routeCfg.Addr6 = xraycfg.TunAddr6
@@ -1095,6 +1104,11 @@ func (l *tunLifecycle) setUp(ctx context.Context) error {
 			return fmt.Errorf("не удалось определить IP VPN-сервера — без него маршрутизация TUN оставит машину без сети")
 		}
 		l.route = &routeCfg
+	}
+	var endpoints []system.Endpoint
+	if !l.sent && a.cfg.KillSwitch && !l.split {
+		// Resolve before either routes or DNS change the path of the lookup.
+		endpoints = a.killSwitchEndpoints(l.t)
 	}
 	// Claimed before the call, not after it: an Enable that fails part way may
 	// leave what it already added behind — its own rollback is allowed not to
@@ -1111,7 +1125,7 @@ func (l *tunLifecycle) setUp(ctx context.Context) error {
 	// tunnel depends on whether the system's DNS made it in.
 	inTunnel := l.switchDNS()
 	if !l.sent {
-		if err := a.enableTunKillSwitch(l.t, l.split, !inTunnel); err != nil {
+		if err := a.enableTunKillSwitch(endpoints, l.split, !inTunnel); err != nil {
 			return err
 		}
 		l.dnsShut = a.killSwitchOn && inTunnel
@@ -1130,8 +1144,11 @@ func (l *tunLifecycle) switchDNS() bool {
 	if !system.TunSwitchesDNS || l.split {
 		return false
 	}
-	a.tunDNSOn = true
-	err := enableTunDNS(xraycfg.TunInterfaceName)
+	err := a.tunDNSConfigErr
+	if err == nil {
+		a.tunDNSOn = true
+		err = enableTunDNS(xraycfg.TunInterfaceName, a.binary)
+	}
 	if err == nil {
 		return true
 	}
@@ -1188,7 +1205,7 @@ func (l *tunLifecycle) afterStop() error {
 // enableTunKillSwitch is the session's part of the tun bring-up, done once with
 // the first core's routes in. passDNS: the system's DNS is still on the
 // physical path, and shutting port 53 would leave no name resolving.
-func (a *App) enableTunKillSwitch(t *target, split, passDNS bool) error {
+func (a *App) enableTunKillSwitch(endpoints []system.Endpoint, split, passDNS bool) error {
 	if a.cfg.KillSwitch && split {
 		// Kill switch cuts everything that does not go through the tunnel, which
 		// in split mode is most of the system working as intended (ADR-0003).
@@ -1204,7 +1221,6 @@ func (a *App) enableTunKillSwitch(t *target, split, passDNS bool) error {
 		// A balancer profile rotates across many servers, and the whitelist holds
 		// all of them — a single-endpoint whitelist used to make this case unsafe,
 		// which is why it was skipped before.
-		endpoints := a.killSwitchEndpoints(t)
 		if len(endpoints) == 0 {
 			// An empty whitelist would cut xray's own uplink along with the leak.
 			return fmt.Errorf("kill switch не включён: не удалось определить IP серверов")
@@ -1226,9 +1242,11 @@ func (a *App) killSwitchEndpoints(t *target) []system.Endpoint {
 	var out []system.Endpoint
 	seen := map[system.Endpoint]bool{}
 	add := func(host string, port int, udp bool) {
-		ips := withPinned(resolveAllIPs([]string{host}), []string{host}, a.pinned)
+		hosts := []string{host}
+		ips := withPinned(resolveAllIPs(hosts), hosts, a.pinned, false)
 		if tunAcceptsV6Server && hasIPv6Stack() {
-			ips = append(ips, resolveAllIPs6([]string{host})...)
+			ips6 := withPinned(resolveAllIPs6(hosts), hosts, a.pinned, true)
+			ips = append(ips, ips6...)
 		}
 		for _, ip := range ips {
 			e := system.Endpoint{IP: ip, Port: port, UDP: udp}
@@ -1255,8 +1273,9 @@ func (a *App) releaseSession() {
 	if a.tunDNSOn {
 		if err := disableTunDNS(xraycfg.TunInterfaceName); err != nil {
 			slog.Warn("failed to hand tun dns back", "error", err)
+		} else {
+			a.tunDNSOn = false
 		}
-		a.tunDNSOn = false
 	}
 	// Routes first: they are what stands between the user and a working
 	// network, so restore the physical path before anything else can fail.

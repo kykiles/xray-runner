@@ -7,8 +7,7 @@ import (
 	"strings"
 )
 
-// pinStrategy is the domainStrategy a pinned outbound dials with. IPv4 only:
-// the Linux tunnel refuses IPv6, and the pinned addresses are IPv4.
+// pinStrategy handles IPv4 pins and the shared DNS defaults.
 const pinStrategy = "UseIPv4"
 
 // PinServerAddresses makes the core reach its servers without the system
@@ -56,7 +55,8 @@ func PinServerAddresses(raw json.RawMessage, lookup func(host string) []string) 
 	}
 	for i, ob := range outbounds {
 		one, _ := json.Marshal([]map[string]json.RawMessage{ob})
-		if !dialsPinned(one, pinned) {
+		strategy := pinnedStrategy(one, pinned)
+		if strategy == "" {
 			continue
 		}
 		streamKey, err := soleField(ob, "streamSettings")
@@ -66,7 +66,7 @@ func PinServerAddresses(raw json.RawMessage, lookup func(host string) []string) 
 		if streamKey == "" {
 			streamKey = "streamSettings"
 		}
-		stream, err := withStrategy(ob[streamKey])
+		stream, err := withStrategy(ob[streamKey], strategy)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -97,18 +97,22 @@ func PinServerAddresses(raw json.RawMessage, lookup func(host string) []string) 
 	return out, pinned, nil
 }
 
-// dialsPinned reports whether the one outbound in raw dials a pinned domain.
-func dialsPinned(raw json.RawMessage, pinned map[string][]string) bool {
+// pinnedStrategy returns the socket strategy for an outbound with a pin.
+func pinnedStrategy(raw json.RawMessage, pinned map[string][]string) string {
+	var strategy string
 	for _, s := range OutboundServers(raw) {
-		if _, ok := pinned[s.Host]; ok {
-			return true
+		for _, addr := range pinned[s.Host] {
+			if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
+				return "UseIP"
+			}
+			strategy = pinStrategy
 		}
 	}
-	return false
+	return strategy
 }
 
 // withStrategy sets sockopt.domainStrategy unless the panel chose one.
-func withStrategy(raw json.RawMessage) (json.RawMessage, error) {
+func withStrategy(raw json.RawMessage, strategy string) (json.RawMessage, error) {
 	stream, err := object(raw, "streamSettings")
 	if err != nil {
 		return nil, err
@@ -131,7 +135,7 @@ func withStrategy(raw json.RawMessage) (json.RawMessage, error) {
 	if key != "" {
 		return raw, nil
 	}
-	sockopt["domainStrategy"], _ = json.Marshal(pinStrategy)
+	sockopt["domainStrategy"], _ = json.Marshal(strategy)
 	if stream[sockoptKey], err = json.Marshal(sockopt); err != nil {
 		return nil, err
 	}

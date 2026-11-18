@@ -30,7 +30,7 @@ func withDNSSpy(t *testing.T) *dnsSpy {
 	}
 	spy := &dnsSpy{}
 	origOn, origOff := enableTunDNS, disableTunDNS
-	enableTunDNS = func(iface string) error {
+	enableTunDNS = func(iface, _ string) error {
 		if iface != xraycfg.TunInterfaceName {
 			t.Errorf("DNS switched on %q", iface)
 		}
@@ -191,17 +191,23 @@ func hasTunDNSHijack(t *testing.T, raw json.RawMessage) bool {
 	t.Helper()
 	var cfg struct {
 		Outbounds []struct {
-			Tag string `json:"tag"`
+			Tag      string `json:"tag"`
+			Settings struct {
+				Rules []struct {
+					Action string `json:"action"`
+				} `json:"rules"`
+			} `json:"settings"`
 		} `json:"outbounds"`
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatal(err)
 	}
-	return slices.ContainsFunc(cfg.Outbounds, func(o struct {
-		Tag string `json:"tag"`
-	}) bool {
-		return o.Tag == xraycfg.TunDNSOutboundTag
-	})
+	for _, outbound := range cfg.Outbounds {
+		if outbound.Tag == xraycfg.TunDNSOutboundTag {
+			return len(outbound.Settings.Rules) > 0 && outbound.Settings.Rules[0].Action == "hijack"
+		}
+	}
+	return false
 }
 
 // A tun session over a panel profile answers the system's DNS from the panel's
@@ -270,7 +276,10 @@ func TestTunDNS_KillSwitchShutsDNSOnceItIsInTheTunnel(t *testing.T) {
 	var ks system.KillSwitchConfig
 	a := ksDNSApp(t, &calls, &ks)
 	orig := enableTunDNS
-	enableTunDNS = func(iface string) error { calls = append(calls, "dns"); return orig(iface) }
+	enableTunDNS = func(iface, core string) error {
+		calls = append(calls, "dns")
+		return orig(iface, core)
+	}
 
 	l := a.newTunLifecycle(killSwitchTarget(), sessionPorts{}, false)
 	if err := l.afterStart(context.Background()); err != nil {

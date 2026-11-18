@@ -76,8 +76,9 @@ type App struct {
 	// the next one first checks the settings are still ours to put back.
 	proxyAddr          string
 	proxyRestoreFailed bool
-	tunRouted          bool // tun routing attempted; teardown must take ours back out
-	tunDNSOn           bool // tun DNS switch attempted; teardown hands the link back to resolved
+	tunRouted          bool  // tun routing attempted; teardown must take ours back out
+	tunDNSOn           bool  // tun DNS switch attempted; teardown may need to hand back the link
+	tunDNSConfigErr    error // Windows DNS requires the synthetic resolver in the session config
 	// pinned maps each server domain the TUN config pinned to the addresses it
 	// pinned (xraycfg.PinServerAddresses): the routes past the tunnel and the
 	// kill switch must name the addresses the core will dial.
@@ -518,19 +519,27 @@ var (
 
 // lookupServer resolves one server domain for pinning into the TUN config; a
 // var so tests need no network.
-var lookupServer = func(host string) []string { return resolveAllIPs([]string{host}) }
+var lookupServer = func(host string) []string {
+	hosts := []string{host}
+	ips := resolveAllIPs(hosts)
+	if tunAcceptsV6Server && hasIPv6Stack() {
+		ips = append(ips, resolveAllIPs6(hosts)...)
+	}
+	return ips
+}
 
 // withPinned adds to ips the addresses pinned for hosts, without repeats: the
 // core dials only those, so the routes and the kill switch must cover them
 // even when a fresh lookup answered with others.
-func withPinned(ips, hosts []string, pinned map[string][]string) []string {
+func withPinned(ips, hosts []string, pinned map[string][]string, ipv6 bool) []string {
 	seen := map[string]bool{}
 	for _, ip := range ips {
 		seen[ip] = true
 	}
 	for _, h := range hosts {
 		for _, ip := range pinned[h] {
-			if !seen[ip] {
+			addr := net.ParseIP(ip)
+			if addr != nil && (addr.To4() == nil) == ipv6 && !seen[ip] {
 				seen[ip] = true
 				ips = append(ips, ip)
 			}

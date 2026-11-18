@@ -50,11 +50,11 @@ func EnableKillSwitch(cfg KillSwitchConfig) error {
 		return err
 	}
 
-	engine, err := wfpOpenDynamic()
+	engine, err := wfpOpenDynamic(wfpDisplayName)
 	if err != nil {
 		return fmt.Errorf("kill switch: открыть WFP: %w", err)
 	}
-	if err := wfpInstall(engine, rules, app); err != nil {
+	if err := wfpInstall(engine, wfpDisplayName, rules, app, true); err != nil {
 		// The transaction is aborted; closing the session takes the sublayer
 		// with it should anything have gone in outside it.
 		_ = wfpClose(engine)
@@ -236,8 +236,8 @@ func wfpErr(what string, r uintptr) error {
 	return fmt.Errorf("%s: 0x%08x: %w", what, uint32(r), windows.Errno(r))
 }
 
-func wfpOpenDynamic() (windows.Handle, error) {
-	name, err := windows.UTF16PtrFromString(wfpDisplayName)
+func wfpOpenDynamic(displayName string) (windows.Handle, error) {
+	name, err := windows.UTF16PtrFromString(displayName)
 	if err != nil {
 		return 0, err
 	}
@@ -307,7 +307,7 @@ func wfpFree(p *fwpByteBlob) {
 
 // wfpInstall adds a sublayer and the rules in it in one transaction: the set
 // goes in whole or not at all.
-func wfpInstall(engine windows.Handle, rules []wfpRule, app *fwpByteBlob) (err error) {
+func wfpInstall(engine windows.Handle, displayName string, rules []wfpRule, app *fwpByteBlob, hardPermit bool) (err error) {
 	if r, _, _ := procFwpmTransactionBegin0.Call(uintptr(engine), 0); r != 0 {
 		return wfpErr("FwpmTransactionBegin0", r)
 	}
@@ -317,7 +317,7 @@ func wfpInstall(engine windows.Handle, rules []wfpRule, app *fwpByteBlob) (err e
 		}
 	}()
 
-	name, err := windows.UTF16PtrFromString(wfpDisplayName)
+	name, err := windows.UTF16PtrFromString(displayName)
 	if err != nil {
 		return err
 	}
@@ -336,7 +336,7 @@ func wfpInstall(engine windows.Handle, rules []wfpRule, app *fwpByteBlob) (err e
 	}
 
 	for _, rule := range rules {
-		if err := wfpAddFilter(engine, key, name, rule, app); err != nil {
+		if err := wfpAddFilter(engine, key, name, rule, app, hardPermit); err != nil {
 			return err
 		}
 	}
@@ -345,7 +345,7 @@ func wfpInstall(engine windows.Handle, rules []wfpRule, app *fwpByteBlob) (err e
 	return wfpErr("FwpmTransactionCommit0", r)
 }
 
-func wfpAddFilter(engine windows.Handle, sublayer windows.GUID, name *uint16, rule wfpRule, app *fwpByteBlob) error {
+func wfpAddFilter(engine windows.Handle, sublayer windows.GUID, name *uint16, rule wfpRule, app *fwpByteBlob, hardPermit bool) error {
 	conds := make([]fwpmFilterCondition0, len(rule.conds))
 	// The IPv6 addresses the conditions point at, kept alive until the call.
 	addrs := make([][16]byte, len(rule.conds))
@@ -388,9 +388,11 @@ func wfpAddFilter(engine windows.Handle, sublayer windows.GUID, name *uint16, ru
 		action:      fwpmAction0{typ: fwpActionBlock},
 	}
 	if rule.permit {
-		// Cleared action right: a block in a sublayer below ours — Windows
-		// Firewall's among them — cannot overturn what we let through.
-		f.flags = fwpmFilterFlagClearActionRight
+		if hardPermit {
+			// The full kill switch's exceptions override lower sublayers.
+			// The DNS guard's exceptions respect other firewall rules.
+			f.flags = fwpmFilterFlagClearActionRight
+		}
 		f.weight.value = permitWeight
 		f.action.typ = fwpActionPermit
 	}

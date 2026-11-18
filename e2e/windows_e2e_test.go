@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -20,6 +21,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"xray-runner/internal/xraycfg"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -56,6 +59,7 @@ func TestWindowsEndToEnd(t *testing.T) {
 
 	t.Run("proxy", e.testProxy)
 	t.Run("tun", e.testTun)
+	t.Run("tun DNS", e.testTunDNS)
 	t.Run("kill switch", e.testKillSwitch)
 	t.Run("killed app", e.testKilledApp)
 	t.Run("killed tun app", e.testKilledTunApp)
@@ -147,6 +151,58 @@ func (e *env) testTun(t *testing.T) {
 	waitExit(t, core, 15*time.Second, "the core outlived its session")
 }
 
+// testTunDNS exercises the Windows DNS Client without supplying a server to
+// Resolve-DnsName. The VLESS server must see a DoH connection from the profile.
+func (e *env) testTunDNS(t *testing.T) {
+	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `[{
+			"remarks": "Windows DoH",
+			"dns": {"servers": ["https://1.1.1.1/dns-query"]},
+			"outbounds": [{
+				"tag": "proxy",
+				"protocol": "vless",
+				"settings": {"vnext": [{"address": %q, "port": %d,
+					"users": [{"id": %q, "encryption": "none"}]}]},
+				"streamSettings": {"network": "tcp", "security": "none"}
+			}],
+			"routing": {"rules": [{"type": "field", "network": "tcp,udp", "outboundTag": "proxy"}]}
+		}]`, serverAddr, e.server.port, serverUUID)
+	}))
+	defer panel.Close()
+
+	// Windows can resolve its connectivity-check name as soon as DNS is
+	// set. The test lookup may then reuse that HTTP/2 connection.
+	mark := e.server.mark()
+	r := e.startApp(t, "tun-dns", "tun", "SUBSCRIPTION_URL="+panel.URL)
+	r.waitLog(t, "msg=connected", 120*time.Second)
+	r.waitLog(t, "tun dns enabled", 5*time.Second)
+	const tunDNSFilterName = "xray-runner DNS"
+	if !wfpFiltersWithName(t, tunDNSFilterName) {
+		t.Error("the DNS guard is missing with the full kill switch off")
+	}
+	if err := dialPhysicalPort(e.alias, "53"); !errors.Is(err, windows.WSAEACCES) {
+		t.Errorf("TCP DNS through the physical adapter returned %v, want WFP access denied", err)
+	}
+	if got := ps(t, `(Get-DnsClientServerAddress -InterfaceAlias 'xray-tun' -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses`); got != xraycfg.WindowsTunDNSAddr {
+		t.Errorf("Wintun DNS servers = %q, want %s", got, xraycfg.WindowsTunDNSAddr)
+	}
+
+	got := ps(t, `Clear-DnsClientCache -ErrorAction Stop; (Resolve-DnsName -Name 'one.one.one.one.' -Type A -DnsOnly -NoHostsFile -ErrorAction Stop).IPAddress`)
+	if !strings.Contains(got, "1.1.1.1") {
+		t.Errorf("Windows DNS Client returned %q, want 1.1.1.1", got)
+	}
+	r.waitLog(t, "DOH//1.1.1.1 got answer: one.one.one.one. TypeA", 5*time.Second)
+	e.server.waitAccess(t, mark, "tcp:1.1.1.1:443")
+
+	if code := r.stop(t); code != 0 {
+		t.Errorf("exit code %d, want 0", code)
+	}
+	if wfpFiltersWithName(t, tunDNSFilterName) {
+		t.Error("DNS filters outlived the TUN session")
+	}
+}
+
 // testKillSwitch: with KILL_SWITCH=true the tunnel still carries traffic, and
 // a connection that leaves by the physical adapter the way a direct one would
 // is refused — until the app is killed outright, when the filters go with its
@@ -188,6 +244,10 @@ func (e *env) testKillSwitch(t *testing.T) {
 // dialPhysical connects to target by the physical adapter, whatever the
 // routing table says — the way the core sends direct traffic (IP_UNICAST_IF).
 func dialPhysical(alias string) error {
+	return dialPhysicalPort(alias, "80")
+}
+
+func dialPhysicalPort(alias, port string) error {
 	ifi, err := net.InterfaceByName(alias)
 	if err != nil {
 		return err
@@ -208,7 +268,7 @@ func dialPhysical(alias string) error {
 			return serr
 		},
 	}
-	c, err := d.Dial("tcp4", net.JoinHostPort(target, "80"))
+	c, err := d.Dial("tcp4", net.JoinHostPort(target, port))
 	if err != nil {
 		return err
 	}
@@ -222,6 +282,11 @@ const ipUnicastIf = 31
 // WFP, by the display name it gives them.
 func wfpFiltersPresent(t *testing.T) bool {
 	t.Helper()
+	return wfpFiltersWithName(t, "xray-runner kill switch")
+}
+
+func wfpFiltersWithName(t *testing.T, name string) bool {
+	t.Helper()
 	file := filepath.Join(t.TempDir(), "filters.xml")
 	if out, err := exec.Command("netsh", "wfp", "show", "filters", "file="+file).CombinedOutput(); err != nil {
 		t.Fatalf("netsh wfp show filters: %v\n%s", err, out)
@@ -230,7 +295,6 @@ func wfpFiltersPresent(t *testing.T) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const name = "xray-runner kill switch"
 	if strings.Contains(string(data), name) {
 		return true
 	}

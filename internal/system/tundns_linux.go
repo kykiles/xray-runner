@@ -60,7 +60,7 @@ var linkIndex = func(name string) (int, error) {
 // on the link, and the link goes when the core does.
 //
 // An error means the DNS still goes the old way; it is reported, not fatal.
-func EnableTunDNS(iface string) error {
+func EnableTunDNS(iface, _ string) error {
 	idx, err := linkIndex(iface)
 	if err != nil {
 		return fmt.Errorf("интерфейс %s: %w", iface, err)

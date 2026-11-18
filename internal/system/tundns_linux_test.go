@@ -55,7 +55,7 @@ const stubConf = "# managed by resolved\nnameserver 127.0.0.53\noptions edns0 tr
 // its own index, and nothing on any other link.
 func TestEnableTunDNS_SetsTheTunLink(t *testing.T) {
 	f := withFakeResolved(t, stubConf)
-	if err := EnableTunDNS("xray-tun"); err != nil {
+	if err := EnableTunDNS("xray-tun", ""); err != nil {
 		t.Fatalf("EnableTunDNS: %v", err)
 	}
 	want := []string{
@@ -78,7 +78,7 @@ func TestEnableTunDNS_SetsTheTunLink(t *testing.T) {
 func TestEnableTunDNS_FailedStepReverts(t *testing.T) {
 	f := withFakeResolved(t, stubConf)
 	f.failOn, f.err = "SetLinkDomains", dbus.Error{Name: "org.freedesktop.DBus.Error.AccessDenied"}
-	err := EnableTunDNS("xray-tun")
+	err := EnableTunDNS("xray-tun", "")
 	if err == nil || !strings.Contains(err.Error(), "нужен root") {
 		t.Fatalf("err = %v, want the access refusal in plain words", err)
 	}
@@ -90,7 +90,7 @@ func TestEnableTunDNS_FailedStepReverts(t *testing.T) {
 func TestEnableTunDNS_NoResolved(t *testing.T) {
 	f := withFakeResolved(t, stubConf)
 	f.failOn, f.err = "SetLinkDNS", dbus.Error{Name: "org.freedesktop.DBus.Error.ServiceUnknown"}
-	if err := EnableTunDNS("xray-tun"); err == nil || !strings.Contains(err.Error(), "не запущен") {
+	if err := EnableTunDNS("xray-tun", ""); err == nil || !strings.Contains(err.Error(), "не запущен") {
 		t.Fatalf("err = %v, want «systemd-resolved не запущен»", err)
 	}
 }
@@ -99,7 +99,7 @@ func TestEnableTunDNS_NoResolved(t *testing.T) {
 // past resolved, so the switch does not hold, and the caller hears it.
 func TestEnableTunDNS_ResolvConfPastTheStub(t *testing.T) {
 	withFakeResolved(t, "nameserver 127.0.0.53\nnameserver 192.168.31.1\n")
-	err := EnableTunDNS("xray-tun")
+	err := EnableTunDNS("xray-tun", "")
 	if err == nil || !strings.Contains(err.Error(), "192.168.31.1") {
 		t.Fatalf("err = %v, want the foreign nameserver named", err)
 	}
@@ -107,7 +107,7 @@ func TestEnableTunDNS_ResolvConfPastTheStub(t *testing.T) {
 
 func TestEnableTunDNS_NoInterface(t *testing.T) {
 	f := withFakeResolved(t, stubConf)
-	if err := EnableTunDNS("missing"); err == nil {
+	if err := EnableTunDNS("missing", ""); err == nil {
 		t.Fatal("no error for a missing interface")
 	}
 	if len(f.calls) != 0 {
